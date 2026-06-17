@@ -213,14 +213,9 @@ gh api graphql -f query='mutation { addSubIssue(input:{issueId:"<parent-node-id>
 
 This repo is freshly bootstrapped. Before the conventions above fully work, do this setup once (and check the boxes / delete this section as it's completed):
 
-- [ ] **Type labels** — `epic` exists. Create the rest:
-  ```bash
-  gh label create feature     --repo Nossimonov/Mjolnirsoft --description "A discrete deliverable capability within an epic" --color 0E8A16
-  gh label create user-story  --repo Nossimonov/Mjolnirsoft --description "A single user-facing behaviour within a feature" --color 1D76DB
-  gh label create task        --repo Nossimonov/Mjolnirsoft --description "Implementation-level sub-item under a feature/user story" --color C5DEF5
-  gh label create blocked     --repo Nossimonov/Mjolnirsoft --description "Active issue waiting on a sub-issue or prereq" --color B60205
-  gh label create in-flight-bug --repo Nossimonov/Mjolnirsoft --description "Unrelated bug found while doing other work; parked for a focused fix pass" --color FBCA04
-  ```
-- [ ] **Project Type/Status fields** — the Mjolnirsoft board has no custom `Type`/`Status` single-select fields yet, so the create-sequence above wires board membership but cannot set Type/Status. When you add those fields, capture their field IDs and option IDs here (query with `gh api graphql` on `node(id:"PVT_kwHOEIjUTs4BVVi-"){ ... fields }`) and extend the create-sequence to set them, mirroring how a mature project board does.
-- [ ] **Local config + setup script** — add a gitignored `.local.env` convention and a `setup` script once the project has machine-specific dependencies (see "Build & Environment Rules").
-- [ ] **Test harness** — stand up the test framework the tooling will use, so "every feature gets a test" has somewhere to land.
+- [x] **Type labels** — all six exist: `epic`, `feature`, `user-story`, `task`, `blocked`, `in-flight-bug`.
+- [x] **Project Status field** — the board has a single-select **Status** field (decision: Status only; `Type` is left to the label set, and blocked state is tracked by the `blocked` label rather than duplicated as a Status option). Field/option IDs for extending the create-sequence to set `Status` (e.g. to `Todo`) on new issues:
+  - Status field: `PVTSSF_lAHOEIjUTs4BVVi-zhQyBo4`
+  - Options: `Todo` = `f75ad846`, `In Progress` = `47fc9ee4`, `Done` = `98236657`
+- [ ] **Local config + setup script** — the gitignored `.local.env` convention is in place (see `.gitignore`). The `setup` script that validates dependencies and scaffolds local config is tracked in #4.
+- [x] **Test harness** — TypeScript/Node + **vitest** with a CI workflow (`.github/workflows/ci.yml`); scaffolded under #2 / #3.
