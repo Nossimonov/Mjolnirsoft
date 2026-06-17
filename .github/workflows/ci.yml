@@ -16,3 +16,5 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run check-types -w extension
+      - run: npm run build -w extension
