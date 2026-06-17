@@ -58,4 +58,12 @@ Two `Channel` implementations exist:
 
 ---
 
-_Coordination and basic human engagement are in place. Future capabilities are tracked as features under the epic: querying a past session's transcript, a graphical Markdown/Mermaid session window, and — the major next direction — a real agent behind the worker's `Respond` behavior._
+## VS Code session view (extension)
+
+**What it does.** A VS Code extension (`extension/`, an npm-workspaces package bundled with esbuild) contributes the command *Mjolnirsoft: Open Session View*, which opens a webview panel. The extension host renders Markdown to HTML (`markdown-it`, with `mermaid` code fences emitted as `<pre class="mermaid">`), and a bundled webview script runs `mermaid` to turn those into diagrams. Today it renders sample content — proving the rendering surface — and is **not yet wired to a live session** (that is the next slice).
+
+**Why.** This is the rich counterpart to the terminal CLI window, built VS Code-first because that is where the work happens. It is a host adapter: the webview is pure presentation, the extension host will bridge a `Channel`, and the core is untouched. It is its own workspace package because a VS Code manifest and bundling cannot share the root package — and esbuild here is the project's first build step (the headless code still runs build-free on Node). The webview CSP allows `'unsafe-eval'` (Mermaid uses `new Function`) and `'unsafe-inline'` styles (Mermaid injects SVG styling), scoped to our own content inside VS Code's already-sandboxed webview. The Markdown→HTML logic is unit-tested headlessly; the in-VS-Code render is verified manually by launching the Extension Development Host (F5).
+
+---
+
+_The end-to-end coordination loop and basic human engagement are in place, and the rich VS Code view renders (sample content). Remaining, tracked as features under the epic: wiring the VS Code view to a live session and an input box; querying a past session's transcript; and — the major next direction — a real agent behind the worker's `Respond` behavior._
