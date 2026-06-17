@@ -11,6 +11,13 @@ interface LocalParticipant {
 export interface FileChannelOptions {
   /** How often to poll the log for new messages, in ms (default 100). */
   readonly pollIntervalMs?: number;
+  /**
+   * Replay the session's existing history to this instance's participants
+   * before streaming live messages (default false: only see messages appended
+   * after joining). Intended for a freshly-constructed instance that is
+   * attaching to a session.
+   */
+  readonly replay?: boolean;
 }
 
 const NEWLINE = 0x0a;
@@ -40,8 +47,8 @@ export class FileChannel implements Channel {
     this.pollIntervalMs = options.pollIntervalMs ?? 100;
     mkdirSync(dirname(logPath), { recursive: true });
     if (!existsSync(logPath)) writeFileSync(logPath, '');
-    // Start tailing from the current end: prior history is not replayed.
-    this.offset = readFileSync(logPath).length;
+    // Replay starts from the beginning; otherwise tail from the current end.
+    this.offset = options.replay ? 0 : readFileSync(logPath).length;
   }
 
   join(id: string, role: Role, onMessage: MessageHandler): Participant {

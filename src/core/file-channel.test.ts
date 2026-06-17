@@ -73,6 +73,32 @@ describe('FileChannel', () => {
     expect(inbox).toEqual([]);
   });
 
+  it('replays existing history to a joiner, then streams live (AC1)', () => {
+    // Seed a prior transcript before anyone attaches.
+    writeFileSync(
+      logPath,
+      `${JSON.stringify({ from: 'orchestrator', type: 'text', payload: 'do #88' })}\n` +
+        `${JSON.stringify({ from: 'worker-1', type: 'text', payload: 'on it' })}\n`,
+    );
+
+    const attached = new FileChannel(logPath, { ...MANUAL, replay: true });
+    open.push(attached);
+    const inbox: Message[] = [];
+    attached.join('observer', 'planner', (m) => inbox.push(m));
+    attached.poll(); // delivers the replayed history
+
+    expect(inbox).toEqual([
+      { from: 'orchestrator', type: 'text', payload: 'do #88' },
+      { from: 'worker-1', type: 'text', payload: 'on it' },
+    ]);
+
+    // A live message appended after attaching is also delivered.
+    const live = channel();
+    live.join('boss', 'planner', () => {}).send({ type: 'text', payload: 'and write tests' });
+    attached.poll();
+    expect(inbox).toContainEqual({ from: 'boss', type: 'text', payload: 'and write tests' });
+  });
+
   it('rejects joining with a duplicate participant id', () => {
     const c = channel();
     c.join('dup', 'planner', () => {});
