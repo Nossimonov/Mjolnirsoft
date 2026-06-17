@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { InMemoryChannel } from './in-memory-channel';
-import type { Message } from './channel';
+import { InMemoryChannel } from './in-memory-channel.ts';
+import type { Message } from './channel.ts';
 
 describe('InMemoryChannel', () => {
   it('lets a participant join the channel in a role (AC1)', () => {
