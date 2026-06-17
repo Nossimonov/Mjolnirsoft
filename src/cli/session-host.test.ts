@@ -42,15 +42,19 @@ describe('hostSession', () => {
   it('writes messages received from the channel to the output (AC3)', async () => {
     const channel = new InMemoryChannel();
     const output: string[] = [];
+    const worker = channel.join('worker-1', 'worker', () => {});
 
-    // hostSession joins synchronously before awaiting the (empty) input, so its
-    // handler is registered by the time the worker sends.
+    // The worker sends while the session is still active (the input generator
+    // runs inside hostSession's loop, before it closes the participant).
+    async function* sendWhileActive(): AsyncIterable<string> {
+      worker.send({ type: 'text', payload: 'on it' });
+      // yield nothing: input ends, session closes
+    }
+
     await hostSession(channel, { id: 'planner-1', role: 'planner' }, {
-      input: lines(),
+      input: sendWhileActive(),
       output: (l) => output.push(l),
     });
-    const worker = channel.join('worker-1', 'worker', () => {});
-    worker.send({ type: 'text', payload: 'on it' });
 
     expect(output).toContain('worker-1 [text] on it');
   });

@@ -26,6 +26,9 @@ export class InMemoryChannel implements Channel {
           }
         }
       },
+      close: () => {
+        this.participants.delete(id);
+      },
     };
   }
 }

@@ -32,7 +32,11 @@ export async function hostSession(
     io.output(renderIncoming(message));
   });
   io.output(`joined channel as ${args.role} (${args.id})`);
-  for await (const line of io.input) {
-    participant.send({ type: 'text', payload: line });
+  try {
+    for await (const line of io.input) {
+      participant.send({ type: 'text', payload: line });
+    }
+  } finally {
+    participant.close();
   }
 }

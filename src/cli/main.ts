@@ -1,5 +1,7 @@
 import { createInterface } from 'node:readline';
+import type { Channel } from '../core/channel.ts';
 import { InMemoryChannel } from '../core/in-memory-channel.ts';
+import { FileChannel } from '../core/file-channel.ts';
 import { parseArgs, CliUsageError, USAGE } from './parse-args.ts';
 import { hostSession } from './session-host.ts';
 
@@ -17,7 +19,7 @@ async function main(argv: readonly string[]): Promise<void> {
     throw error;
   }
 
-  const channel = new InMemoryChannel();
+  const channel: Channel = args.logPath ? new FileChannel(args.logPath) : new InMemoryChannel();
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
   await hostSession(channel, args, {
     input: rl,
