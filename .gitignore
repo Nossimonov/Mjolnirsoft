@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+# Machine-specific local config (see CLAUDE.md "Build & Environment Rules")
+.local.env
