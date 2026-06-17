@@ -14,4 +14,12 @@ Organised by subsystem. When a component does not yet exist, it does not yet app
 
 ---
 
-_No further subsystems are implemented yet. The orchestration core and its shared-channel protocol are proposed design candidates tracked in open issues, and will be recorded here as they ship._
+## Orchestration core — shared channel
+
+**What it does.** The headless core (`src/core/`) defines the coordination seam. A `Channel` lets participants join under a unique id in a `Role` (`planner` or `worker`) and exchange typed `Message`s; a participant's handler receives every message sent by *other* participants. `InMemoryChannel` is an in-process implementation that delivers messages synchronously and never echoes a message back to its sender. The core has no host, transport, or external I/O. The `Message` shape is deliberately minimal (`from`, `type`, optional `payload`) and expected to evolve as coordination needs are pinned down.
+
+**Why.** The architecture treats the channel as the single seam between the orchestration engine and any host (terminal, IDE, CI), the way LSP/MCP separate a server from its clients. Building the core headless with an in-memory channel first establishes and tests that seam before committing to a wire transport — the transport decision is deferred to a later story so it is made once the surrounding shape is known, rather than guessed up front.
+
+---
+
+_A host adapter (CLI) and a cross-process transport are proposed design candidates tracked under Feature #6, and will be recorded here as they ship._
