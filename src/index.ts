@@ -1,2 +1,2 @@
-export * from './core/channel';
-export * from './core/in-memory-channel';
+export * from './core/channel.ts';
+export * from './core/in-memory-channel.ts';

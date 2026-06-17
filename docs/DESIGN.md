@@ -22,4 +22,12 @@ Organised by subsystem. When a component does not yet exist, it does not yet app
 
 ---
 
-_A host adapter (CLI) and a cross-process transport are proposed design candidates tracked under Feature #6, and will be recorded here as they ship._
+## CLI host adapter
+
+**What it does.** A thin CLI adapter (`src/cli/`) hosts a session from the terminal. Invoked as `<planner|worker> [id]` (via `npm run session`), it joins a channel in that role and bridges I/O: each stdin line is sent as a `text` message, and messages received from the channel are written to stdout. A missing or invalid role is rejected with a usage message and a non-zero exit. The terminal bridging (`hostSession`) is separate from the core and takes an injected `Channel`, so a transport can replace the in-memory one without touching the adapter. It runs via Node's native TypeScript execution (`node src/cli/main.ts`), which requires Node ≥ 23.6.
+
+**Why.** Adapters are how the host-agnostic design reaches a concrete host: the core never imports terminal APIs — only the adapter does. Building the adapter against the in-memory channel first proves the host-bridging in isolation, before a transport lets two CLI processes share one channel. Running TypeScript directly on Node avoids a build step while the project is small; if broad Node-version compatibility or distribution later matters, a minimum-version check or a build step is the lever (deferred).
+
+---
+
+_A cross-process transport (so two CLI sessions share one channel) and the end-to-end coordination it enables are proposed design candidates tracked under Feature #6, and will be recorded here as they ship._
