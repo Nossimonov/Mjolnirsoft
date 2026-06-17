@@ -50,4 +50,12 @@ Two `Channel` implementations exist:
 
 ---
 
-_The end-to-end planner ↔ worker coordination loop is complete (Milestone "Session coordination over the channel"). Future capabilities are tracked as their own features under the epic: querying a past session's recorded transcript, and the orchestrator opening a worker's session window to the user for live feedback. A real agent behind the worker's `Respond` behavior is the major next direction._
+## Engaging with a worker
+
+**What it does.** `attachInvitation` (`src/orchestrator/`) turns a spawned worker's handle into what a user needs to engage: the worker id, its session log, and the exact `--replay` command to open a window onto that session. The orchestrator surfaces this; the user opens the window when they choose, joins as a planner (co-prompter), sees the conversation so far, and can give feedback or corrections that the worker receives as attributed turns.
+
+**Why.** The user's window is just another participant attaching through the channel, so "opening it" is surfacing an attach handle — robust and cross-platform — not new plumbing. Automatically opening a *richer* surface (a graphical Markdown/Mermaid window) is the job of that surface (tracked separately), not a fragile terminal-spawn here.
+
+---
+
+_Coordination and basic human engagement are in place. Future capabilities are tracked as features under the epic: querying a past session's transcript, a graphical Markdown/Mermaid session window, and — the major next direction — a real agent behind the worker's `Respond` behavior._
