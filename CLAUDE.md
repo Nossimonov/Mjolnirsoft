@@ -75,6 +75,21 @@ Every artifact that outlives the conversation — GitHub issue bodies, acceptanc
 
 ---
 
+## Design Documentation
+
+The project keeps a single descriptive design record at `docs/DESIGN.md`. It documents **what the project currently does and why it does it that way** — never what is merely desired. This inverts the usual up-front design document, which rots as aspiration meets reality and becomes expensive churn. Here the durable artifact only ever contains shipped reality, so it stays trustworthy and is the most useful orientation a future session can read.
+
+**Division of labour:**
+
+- **Open issues hold desired/proposed design** ("design candidates"). A feature or user-story body proposes design language; that language *evolves in the issue* as implementation meets reality — edit the body as you learn, exactly as you flip AC checkboxes.
+- **`docs/DESIGN.md` holds completed design only.** Design language enters it *only* by way of a closed issue. This makes the design record structurally incapable of holding speculation, reinforcing *No Speculative Design in Artifacts*.
+
+**Structure `docs/DESIGN.md` by subsystem/component, not chronologically**, so completed work folds into a located section and cleanly replaces what it supersedes. Each section records both behaviour/contracts **and the rationale** for the shipped decisions — the rationale is the part future sessions most need, to avoid re-litigating settled choices.
+
+**Updating the record is a protocol step, not goodwill.** The close phase of *Issue-Driven Work Discipline* (step 5) folds the now-true design language into the right component section and prunes/replaces any text the change made inaccurate, in the same commit that closes the work. The prune half is what decays if left to memory; the protocol step exists so it does not.
+
+---
+
 ## Capturing Deferred Scope
 
 When you trim an issue's acceptance criteria — moving work out of scope before closing — the deferred functionality must land in **tracked artifacts before the issue closes**. A "Removed from scope" note in a closed issue body does not count: closed issues don't surface in `gh issue list` or session-start checks, so the deferral evaporates.
@@ -119,9 +134,10 @@ When work surfaces a separable concern outside any active issue's scope: (1) not
 2. **Verify (manual, when applicable)** — if an acceptance criterion is out of the automated suite's reach, surface for user verification and wait (see *Pause for Manual Verification*). Feedback iterates in the working tree, not follow-up issues.
 3. **Review** — for each assigned issue ask: did the work complete a stated criterion? were the criteria complete, or did delivery expose gaps? did running it surface refinements that should land before close? **are all artifacts the work depends on actually in source control** (run `git status`; trace names referenced from staged content back to tracked files; include user-authored content)? Gaps → treat as in-flight discoveries; do not close.
 4. **Update AC/task checkboxes** — flip `- [ ]` to `- [x]` for criteria this commit satisfies (via `gh issue edit --body`), even when the issue isn't closing — the checkboxes are the resumable state. Check *after* Verify confirms correctness, *before* Close.
-5. **Close (only if review is clean)** — observe the hierarchy closing rules (sub-issues first; parents only when every child is closed); cascade upward; remove `blocked` from any issue whose blocker just closed. Prefer the commit-message auto-close keyword (`closes #N` / `fixes #N` / `resolves #N`) over an explicit `gh issue close`; reserve the explicit close for cascading parent closes the commit body can't express.
-6. **File deferred-discovery issues** noted during the session — all of them — before writing the commit message.
-7. **Write the commit message** referencing the advancing issue. The closing keyword goes only on the commit that lands after Verify is satisfied; intermediate commits use a plain `(#N)` reference.
+5. **Update the design record** — for work that changes what the system does, fold the now-true design language from the closing issue into the correct `docs/DESIGN.md` component section, **and** prune/replace any prior text the change made inaccurate, in this same commit (see *Design Documentation*). The "remove what's now false" half is not optional. Pure internal refactors with no behavioural or contract change skip this step.
+6. **Close (only if review is clean)** — observe the hierarchy closing rules (sub-issues first; parents only when every child is closed); cascade upward; remove `blocked` from any issue whose blocker just closed. Prefer the commit-message auto-close keyword (`closes #N` / `fixes #N` / `resolves #N`) over an explicit `gh issue close`; reserve the explicit close for cascading parent closes the commit body can't express.
+7. **File deferred-discovery issues** noted during the session — all of them — before writing the commit message.
+8. **Write the commit message** referencing the advancing issue. The closing keyword goes only on the commit that lands after Verify is satisfied; intermediate commits use a plain `(#N)` reference.
 
 ### Exceptions
 
