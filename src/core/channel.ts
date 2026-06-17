@@ -32,6 +32,8 @@ export interface Participant {
   readonly role: Role;
   /** Send a message to the other participants on the channel. */
   send(message: Omit<Message, 'from'>): void;
+  /** Leave the channel and release any resources held for this participant. */
+  close(): void;
 }
 
 /** A medium over which participants exchange messages, headless of any host. */

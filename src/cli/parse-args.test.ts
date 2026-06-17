@@ -18,4 +18,21 @@ describe('parseArgs', () => {
   it('rejects an invalid role (AC1)', () => {
     expect(() => parseArgs(['boss'])).toThrow(CliUsageError);
   });
+
+  it('parses a --log path for a shared file-backed channel', () => {
+    expect(parseArgs(['worker', '--log', '/tmp/s.jsonl'])).toEqual({
+      role: 'worker',
+      id: 'worker-1',
+      logPath: '/tmp/s.jsonl',
+    });
+    expect(parseArgs(['planner', 'p-2', '-l', '/tmp/s.jsonl'])).toEqual({
+      role: 'planner',
+      id: 'p-2',
+      logPath: '/tmp/s.jsonl',
+    });
+  });
+
+  it('rejects --log without a value', () => {
+    expect(() => parseArgs(['worker', '--log'])).toThrow(CliUsageError);
+  });
 });
