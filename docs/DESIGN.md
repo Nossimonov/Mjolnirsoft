@@ -34,4 +34,12 @@ Two `Channel` implementations exist:
 
 ---
 
-_Remaining toward end-to-end coordination, tracked under Feature #6: an orchestrator that spawns and supervises worker processes; multiple clients attaching to one live session with replay-on-join (the interactive window); and querying a past session's recorded transcript. These are proposed design candidates and will be recorded here as they ship._
+## Orchestrator — worker supervision
+
+**What it does.** `spawnWorker` (`src/orchestrator/`) launches a worker bound to a per-session log and returns a handle that reports lifecycle state (`running` → `exited`), can `stop()` the worker, notifies `onExit` listeners, and exposes the orchestrator's own `Participant` (planner role) on that session's channel. The default launcher spawns the worker CLI as a Node child process with stdin piped and left open (so the worker tails until stopped) and stdout/stderr inherited; the launcher is injectable so the supervisor is unit-tested without spawning a real process. When the worker exits, the orchestrator's channel participant is closed, but the session log — the durable transcript — persists.
+
+**Why.** This is the first component that makes the tool an *orchestrator* rather than two manually-launched peers: it owns the worker's lifecycle. Process life and record life are deliberately decoupled — stopping a worker ends the process while its transcript survives for later inspection. Messaging is reused unchanged from the session-log channel; this layer adds only spawning and supervision, so the seam keeps the orchestrator ignorant of how messages physically travel.
+
+---
+
+_Remaining toward end-to-end coordination, tracked under Feature #6: multiple clients attaching to one live session with replay-on-join (the interactive window); and querying a past session's recorded transcript. These are proposed design candidates and will be recorded here as they ship._
