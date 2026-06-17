@@ -48,4 +48,13 @@ describe('parseArgs', () => {
   it('rejects --replay without --log', () => {
     expect(() => parseArgs(['planner', '--replay'])).toThrow(CliUsageError);
   });
+
+  it('parses --auto (automated worker)', () => {
+    expect(parseArgs(['worker', 'w1', '--log', '/tmp/s.jsonl', '--auto'])).toEqual({
+      role: 'worker',
+      id: 'w1',
+      logPath: '/tmp/s.jsonl',
+      auto: true,
+    });
+  });
 });

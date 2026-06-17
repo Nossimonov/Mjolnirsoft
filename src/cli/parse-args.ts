@@ -7,9 +7,11 @@ export interface CliArgs {
   readonly logPath?: string;
   /** Replay the session's history on attach (requires a log). */
   readonly replay?: boolean;
+  /** Run as an automated worker that auto-responds to messages. */
+  readonly auto?: boolean;
 }
 
-export const USAGE = 'usage: <planner|worker> [participant-id] [--log <session-log-path>] [--replay]';
+export const USAGE = 'usage: <planner|worker> [participant-id] [--log <session-log-path>] [--replay] [--auto]';
 
 /** Thrown when CLI arguments are missing or invalid. */
 export class CliUsageError extends Error {}
@@ -24,6 +26,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   const positional: string[] = [];
   let logPath: string | undefined;
   let replay = false;
+  let auto = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -34,6 +37,8 @@ export function parseArgs(argv: readonly string[]): CliArgs {
       }
     } else if (arg === '--replay') {
       replay = true;
+    } else if (arg === '--auto') {
+      auto = true;
     } else {
       positional.push(arg);
     }
@@ -46,5 +51,5 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   if (replay && logPath === undefined) {
     throw new CliUsageError('--replay requires --log');
   }
-  return { role, id: id ?? `${role}-1`, logPath, replay: replay || undefined };
+  return { role, id: id ?? `${role}-1`, logPath, replay: replay || undefined, auto: auto || undefined };
 }

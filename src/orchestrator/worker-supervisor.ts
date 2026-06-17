@@ -47,7 +47,7 @@ const WORKER_ENTRY = fileURLToPath(new URL('../cli/main.ts', import.meta.url));
  * and stderr are inherited so the worker's output is visible.
  */
 export const spawnWorkerCli: Launcher = (logPath, id) => {
-  const child = spawn(process.execPath, [WORKER_ENTRY, 'worker', id, '--log', logPath], {
+  const child = spawn(process.execPath, [WORKER_ENTRY, 'worker', id, '--log', logPath, '--auto'], {
     stdio: ['pipe', 'inherit', 'inherit'],
   });
   return {
