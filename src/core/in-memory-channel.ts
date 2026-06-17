@@ -1,4 +1,4 @@
-import type { Channel, Message, MessageHandler, Participant, Role } from './channel';
+import type { Channel, Message, MessageHandler, Participant, Role } from './channel.ts';
 
 /**
  * An in-process {@link Channel}: a message is delivered synchronously to every
