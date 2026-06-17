@@ -1,0 +1,16 @@
+{
+  "name": "mjolnirsoft",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Project-agnostic engineering tooling and methods. Founding initiative: multi-session orchestration tooling.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}
