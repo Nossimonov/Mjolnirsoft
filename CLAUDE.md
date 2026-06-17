@@ -39,7 +39,8 @@ All build/setup must be **environment-agnostic**. No hardcoded paths, tool locat
 
 - Machine-specific values (tool paths, SDK locations, secrets) live in a **gitignored local config** (e.g. `.local.env`).
 - A **setup script** detects or prompts for those values and writes the local config on first run; it validates required dependencies and gives actionable guidance when something is missing.
-- When you change any build/setup step, update the setup script too so the dependency or path stays covered.
+- The first-run entry point is **`./setup.sh`** (run in Git Bash on Windows). It validates Node/npm, installs dependencies, and creates `.local.env` from the checked-in `.local.env.example` template.
+- When you change any build/setup step, update `setup.sh` (and `.local.env.example`) too so the dependency or path stays covered.
 
 ---
 
@@ -233,5 +234,5 @@ This repo is freshly bootstrapped. Before the conventions above fully work, do t
 - [x] **Project Status field** — the board has a single-select **Status** field (decision: Status only; `Type` is left to the label set, and blocked state is tracked by the `blocked` label rather than duplicated as a Status option). Field/option IDs for extending the create-sequence to set `Status` (e.g. to `Todo`) on new issues:
   - Status field: `PVTSSF_lAHOEIjUTs4BVVi-zhQyBo4`
   - Options: `Todo` = `f75ad846`, `In Progress` = `47fc9ee4`, `Done` = `98236657`
-- [ ] **Local config + setup script** — the gitignored `.local.env` convention is in place (see `.gitignore`). The `setup` script that validates dependencies and scaffolds local config is tracked in #4.
+- [x] **Local config + setup script** — `./setup.sh` validates Node/npm, installs dependencies, and scaffolds `.local.env` from `.local.env.example`; the gitignored `.local.env` convention is in `.gitignore`.
 - [x] **Test harness** — TypeScript/Node + **vitest** with a CI workflow (`.github/workflows/ci.yml`); scaffolded under #2 / #3.
