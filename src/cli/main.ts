@@ -19,7 +19,9 @@ async function main(argv: readonly string[]): Promise<void> {
     throw error;
   }
 
-  const channel: Channel = args.logPath ? new FileChannel(args.logPath) : new InMemoryChannel();
+  const channel: Channel = args.logPath
+    ? new FileChannel(args.logPath, { replay: args.replay })
+    : new InMemoryChannel();
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
   await hostSession(channel, args, {
     input: rl,

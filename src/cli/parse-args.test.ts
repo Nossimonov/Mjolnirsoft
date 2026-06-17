@@ -35,4 +35,17 @@ describe('parseArgs', () => {
   it('rejects --log without a value', () => {
     expect(() => parseArgs(['worker', '--log'])).toThrow(CliUsageError);
   });
+
+  it('parses --replay (attach with history) when a log is given', () => {
+    expect(parseArgs(['planner', 'observer', '--log', '/tmp/s.jsonl', '--replay'])).toEqual({
+      role: 'planner',
+      id: 'observer',
+      logPath: '/tmp/s.jsonl',
+      replay: true,
+    });
+  });
+
+  it('rejects --replay without --log', () => {
+    expect(() => parseArgs(['planner', '--replay'])).toThrow(CliUsageError);
+  });
 });
