@@ -5,9 +5,11 @@ export interface CliArgs {
   readonly id: string;
   /** Path to a shared session log; when set, sessions share a file-backed channel. */
   readonly logPath?: string;
+  /** Replay the session's history on attach (requires a log). */
+  readonly replay?: boolean;
 }
 
-export const USAGE = 'usage: <planner|worker> [participant-id] [--log <session-log-path>]';
+export const USAGE = 'usage: <planner|worker> [participant-id] [--log <session-log-path>] [--replay]';
 
 /** Thrown when CLI arguments are missing or invalid. */
 export class CliUsageError extends Error {}
@@ -21,6 +23,7 @@ export class CliUsageError extends Error {}
 export function parseArgs(argv: readonly string[]): CliArgs {
   const positional: string[] = [];
   let logPath: string | undefined;
+  let replay = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -29,6 +32,8 @@ export function parseArgs(argv: readonly string[]): CliArgs {
       if (logPath === undefined) {
         throw new CliUsageError('--log requires a path');
       }
+    } else if (arg === '--replay') {
+      replay = true;
     } else {
       positional.push(arg);
     }
@@ -38,5 +43,8 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   if (role !== 'planner' && role !== 'worker') {
     throw new CliUsageError(`role must be "planner" or "worker", got ${role ?? '(none)'}`);
   }
-  return { role, id: id ?? `${role}-1`, logPath };
+  if (replay && logPath === undefined) {
+    throw new CliUsageError('--replay requires --log');
+  }
+  return { role, id: id ?? `${role}-1`, logPath, replay: replay || undefined };
 }
