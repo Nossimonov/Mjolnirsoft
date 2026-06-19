@@ -1,11 +1,22 @@
 import * as vscode from 'vscode';
+import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { SessionStore } from '../../src/core/session-store.ts';
 import { WorktreeManager, type Worktree } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runWorker } from '../../src/worker/worker-runtime.ts';
 import { createClaudeCodeResponder } from '../../src/worker/claude-code-responder.ts';
-import { renderMessage } from './render.ts';
+import {
+  INTERACTION_DECISION,
+  INTERACTION_REQUEST,
+  type InteractionRequest,
+} from '../../src/core/interaction.ts';
+import { renderMessage, renderInteractionRequest } from './render.ts';
+
+// The MCP server is named `perm` in the generated config, so its `approve` tool
+// is addressed as `mcp__perm__approve` to `--permission-prompt-tool`.
+const PERMISSION_PROMPT_TOOL = 'mcp__perm__approve';
 
 // Quick-pick sentinel offered above the session list; the input validation for
 // session names forbids spaces/'+', so this can never collide with a real id.
@@ -84,19 +95,30 @@ async function startWorkerSession(
     return;
   }
 
+  // Give the worker an escalation path: a per-session MCP config wiring Claude's
+  // `--permission-prompt-tool` to our server, which bridges a gated tool use to
+  // this session's channel so the human can allow/deny it in the panel (#66).
+  const permParticipantId = `${sessionId}-perms`;
+  const mcpConfigPath = writePermissionMcpConfig(context, store.logPath(sessionId), permParticipantId);
+
   // Spawn the worker in-process: it joins the session and answers each message
   // by running a headless Claude Code agent with the worktree as its workspace.
   const workerChannel = store.open(sessionId);
   const worker = runWorker(
     workerChannel,
     `${sessionId}-worker`,
-    createClaudeCodeResponder({ workdir: worktree.path }),
+    createClaudeCodeResponder({
+      workdir: worktree.path,
+      permissionPromptTool: PERMISSION_PROMPT_TOOL,
+      mcpConfigPath,
+    }),
   );
 
   openSessionPanel(context, store, sessionId, {
     onDispose: () => {
       worker.close();
       workerChannel.close();
+      rmSync(mcpConfigPath, { force: true });
       // System capture: commit whatever the worker changed onto its branch,
       // then drop the worktree (the branch survives for review).
       const captured = worktree.commit(`Mjolnir worker session ${sessionId}`);
@@ -152,22 +174,39 @@ function openSessionPanel(
   // Attach to the session: replay history, then stream live messages.
   const channel = store.open(sessionId, { replay: true });
   const participant = channel.join('vscode-view', 'planner', (message) => {
+    // A permission request means the worker is blocked waiting on us — render it
+    // as an allow/deny card and keep the "working" indicator on (it hasn't replied).
+    if (message.type === INTERACTION_REQUEST) {
+      void panel.webview.postMessage({
+        kind: 'message',
+        html: renderInteractionRequest(message.payload as InteractionRequest),
+      });
+      return;
+    }
     void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
-    // A message from another participant means the worker has replied — stop "working".
+    // A reply (result/text) from another participant means the worker is done — stop "working".
     void panel.webview.postMessage({ kind: 'working', on: false });
   });
 
   // Compose-and-send: one (possibly multi-line) message per send. The channel
   // doesn't echo a participant's own messages, so render the sent turn locally.
-  panel.webview.onDidReceiveMessage((event: { kind?: string; text?: string }) => {
-    if (event.kind === 'send' && event.text) {
-      const sent = { from: 'vscode-view', type: 'text', payload: event.text };
-      void panel.webview.postMessage({ kind: 'message', html: renderMessage(sent) });
-      participant.send({ type: 'text', payload: event.text });
-      // We just sent — show "working" until a reply arrives.
-      void panel.webview.postMessage({ kind: 'working', on: true });
-    }
-  });
+  panel.webview.onDidReceiveMessage(
+    (event: { kind?: string; text?: string; requestId?: string; behavior?: 'allow' | 'deny' }) => {
+      if (event.kind === 'send' && event.text) {
+        const sent = { from: 'vscode-view', type: 'text', payload: event.text };
+        void panel.webview.postMessage({ kind: 'message', html: renderMessage(sent) });
+        participant.send({ type: 'text', payload: event.text });
+        // We just sent — show "working" until a reply arrives.
+        void panel.webview.postMessage({ kind: 'working', on: true });
+      } else if (event.kind === 'decision' && event.requestId && event.behavior) {
+        // Answer a permission request: the server fills the original input on a
+        // bare allow, so a verdict + requestId is all the worker needs. The
+        // worker resumes once it has our answer, so show "working" again.
+        participant.send({ type: INTERACTION_DECISION, payload: { requestId: event.requestId, behavior: event.behavior } });
+        void panel.webview.postMessage({ kind: 'working', on: true });
+      }
+    },
+  );
 
   panel.onDidDispose(() => {
     participant.close();
@@ -208,6 +247,14 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
            border: 1px solid var(--vscode-input-border, transparent); }
   #send { background: var(--vscode-button-background); color: var(--vscode-button-foreground);
           border: none; padding: 0 1rem; cursor: pointer; }
+  .interaction-input { white-space: pre-wrap; word-break: break-word; background: var(--vscode-textCodeBlock-background, rgba(127,127,127,0.1));
+                       padding: 0.4rem; border-radius: 3px; font-size: 0.85em; max-height: 12em; overflow-y: auto; }
+  .decision { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+  .decide { border: none; padding: 0.25rem 0.9rem; cursor: pointer; border-radius: 3px;
+            background: var(--vscode-button-secondaryBackground, #444); color: var(--vscode-button-secondaryForeground, #fff); }
+  .decide[data-behavior="allow"] { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .decide:disabled { opacity: 0.5; cursor: default; }
+  .decided { font-size: 0.85em; opacity: 0.8; align-self: center; }
 </style>
 </head>
 <body>
@@ -220,6 +267,37 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
+}
+
+/**
+ * Write a per-session MCP config that wires Claude's `--permission-prompt-tool`
+ * to our bundled permission server, and return its path. The server is launched
+ * with the extension host's own Node (Electron run as Node, so no separate Node
+ * on PATH is needed) and told — via env — which session log to bridge over and
+ * what channel id to use. Returns the temp path; the caller deletes it on close.
+ */
+function writePermissionMcpConfig(
+  context: vscode.ExtensionContext,
+  sessionLogPath: string,
+  participantId: string,
+): string {
+  const serverPath = vscode.Uri.joinPath(context.extensionUri, 'dist', 'permission-mcp-server.js').fsPath;
+  const config = {
+    mcpServers: {
+      perm: {
+        command: process.execPath,
+        args: [serverPath],
+        env: {
+          ELECTRON_RUN_AS_NODE: '1',
+          MJOLNIR_SESSION_LOG: sessionLogPath,
+          MJOLNIR_PERM_ID: participantId,
+        },
+      },
+    },
+  };
+  const configPath = join(tmpdir(), `mjolnir-perm-${participantId}-${Date.now()}.json`);
+  writeFileSync(configPath, JSON.stringify(config));
+  return configPath;
 }
 
 function makeNonce(): string {

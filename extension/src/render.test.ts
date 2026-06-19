@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { renderMarkdown, renderMessage, hueForSender } from './render.ts';
+import { renderMarkdown, renderMessage, hueForSender, renderInteractionRequest } from './render.ts';
 import type { Message } from '../../src/core/channel.ts';
+import type { InteractionRequest } from '../../src/core/interaction.ts';
 
 describe('renderMarkdown', () => {
   it('renders Markdown to HTML', () => {
@@ -46,6 +47,34 @@ describe('renderMessage', () => {
     expect(user).toContain(`hsl(${hueForSender('vscode-view')} `); // styled by the sender's hue
     const worker = renderMessage({ from: 'demo-worker', type: 'result', payload: 'hi' });
     expect(user).not.toBe(worker); // different senders render distinctly
+  });
+});
+
+describe('renderInteractionRequest', () => {
+  const request: InteractionRequest = {
+    requestId: 'req-7',
+    toolName: 'Write',
+    input: { file_path: '/etc/hosts', content: '127.0.0.1' },
+    toolUseId: 'toolu_1',
+  };
+
+  it('renders a permission card naming the tool, with allow/deny keyed by request id', () => {
+    const html = renderInteractionRequest(request);
+    expect(html).toContain('<strong>Write</strong>');
+    expect(html).toContain('data-request-id="req-7"');
+    expect(html).toContain('data-behavior="allow"');
+    expect(html).toContain('data-behavior="deny"');
+  });
+
+  it('shows the tool input so the human can judge the request', () => {
+    const html = renderInteractionRequest(request);
+    expect(html).toContain('/etc/hosts');
+  });
+
+  it('escapes HTML in the input preview', () => {
+    const html = renderInteractionRequest({ requestId: 'r', toolName: 'Bash', input: { command: 'echo "<script>"' } });
+    expect(html).toContain('&lt;script&gt;');
+    expect(html).not.toContain('<script>');
   });
 });
 

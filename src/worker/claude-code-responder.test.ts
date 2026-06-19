@@ -46,6 +46,31 @@ describe('createClaudeCodeResponder', () => {
     const respond = createClaudeCodeResponder({ workdir: '/tmp/worker-1', run: async () => '   ' });
     expect(await respond(task)).toBeUndefined();
   });
+
+  it('ignores permission interaction messages rather than treating them as prompts (#66)', async () => {
+    const run = vi.fn().mockResolvedValue('x');
+    const respond = createClaudeCodeResponder({ workdir: '/w', run });
+    const req = { from: 'p', type: 'interaction-request', payload: { requestId: 'r', toolName: 'Write', input: {} } };
+    const dec = { from: 'p', type: 'interaction-decision', payload: { requestId: 'r', behavior: 'allow' } };
+    expect(await respond(req)).toBeUndefined();
+    expect(await respond(dec)).toBeUndefined();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('passes the permission-prompt tool and MCP config through to the run (#66)', async () => {
+    const run = vi.fn().mockResolvedValue('ok');
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      permissionPromptTool: 'mcp__perm__approve',
+      mcpConfigPath: '/cfg.json',
+      run,
+    });
+    await respond(task);
+    expect(run).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ permissionPromptTool: 'mcp__perm__approve', mcpConfigPath: '/cfg.json' }),
+    );
+  });
 });
 
 describe('buildClaudeArgs', () => {
@@ -71,6 +96,20 @@ describe('buildClaudeArgs', () => {
   it('pins a new session with --session-id, and resumes an existing one with --resume', () => {
     expect(buildClaudeArgs('go', { sessionId: 'sid' }).slice(-2)).toEqual(['--session-id', 'sid']);
     expect(buildClaudeArgs('go', { sessionId: 'sid', resume: true }).slice(-2)).toEqual(['--resume', 'sid']);
+  });
+
+  it('wires the permission-prompt tool and its MCP config when given (#66)', () => {
+    const args = buildClaudeArgs('go', { permissionPromptTool: 'mcp__perm__approve', mcpConfigPath: '/cfg.json' });
+    const tool = args.indexOf('--permission-prompt-tool');
+    expect(tool).toBeGreaterThan(-1);
+    expect(args[tool + 1]).toBe('mcp__perm__approve');
+    expect(args.slice(-2)).toEqual(['--mcp-config', '/cfg.json']);
+  });
+
+  it('omits the permission-prompt flags when not given', () => {
+    const args = buildClaudeArgs('go');
+    expect(args).not.toContain('--permission-prompt-tool');
+    expect(args).not.toContain('--mcp-config');
   });
 });
 
