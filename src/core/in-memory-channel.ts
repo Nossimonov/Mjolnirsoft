@@ -31,4 +31,8 @@ export class InMemoryChannel implements Channel {
       },
     };
   }
+
+  close(): void {
+    this.participants.clear();
+  }
 }
