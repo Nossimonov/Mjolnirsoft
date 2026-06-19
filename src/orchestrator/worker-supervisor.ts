@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { MessageHandler, Participant } from '../core/channel.ts';
-import { SessionStore } from '../core/session-store.ts';
+import type { SessionBackend } from '../core/session-store.ts';
+import { createSessionStore } from '../core/create-session-store.ts';
+import { loadProjectConfig } from '../core/project-config.ts';
 
 export type WorkerState = 'running' | 'exited';
 
@@ -23,8 +25,8 @@ export interface SpawnWorkerOptions {
   readonly orchestratorId?: string;
   /** Receives messages the worker sends on the session channel. */
   readonly onMessage?: MessageHandler;
-  /** Session store resolving the id to a channel (default: a fresh SessionStore). */
-  readonly store?: SessionStore;
+  /** Session backend resolving the id to a channel (default: mounted from the project config). */
+  readonly store?: SessionBackend;
   /** Override how the worker process is launched (tests inject a fake). */
   readonly launch?: Launcher;
 }
@@ -64,7 +66,7 @@ export const spawnWorkerCli: Launcher = (sessionId, id) => {
  * session log (the durable transcript) outlives the process.
  */
 export function spawnWorker(options: SpawnWorkerOptions): WorkerHandle {
-  const { id, sessionId, orchestratorId = 'orchestrator', onMessage, store = new SessionStore(), launch = spawnWorkerCli } = options;
+  const { id, sessionId, orchestratorId = 'orchestrator', onMessage, store = createSessionStore(loadProjectConfig()), launch = spawnWorkerCli } = options;
 
   const channel = store.open(sessionId);
   const orchestrator = channel.join(orchestratorId, 'planner', onMessage ?? (() => {}));
