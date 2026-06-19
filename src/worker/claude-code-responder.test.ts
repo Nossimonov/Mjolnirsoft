@@ -4,6 +4,7 @@ import {
   resolveClaudeBin,
   buildClaudeArgs,
   DEFAULT_WORKER_ROLE,
+  WORKER_PERMISSIONS,
 } from './claude-code-responder.ts';
 
 const task = { from: 'orchestrator', type: 'text', payload: 'write a haiku to haiku.md' } as const;
@@ -50,8 +51,16 @@ describe('createClaudeCodeResponder', () => {
 describe('buildClaudeArgs', () => {
   it('omits --append-system-prompt when no role prompt is given', () => {
     const args = buildClaudeArgs('do it');
-    expect(args).toEqual(['-p', 'do it', '--output-format', 'json', '--permission-mode', 'acceptEdits']);
+    expect(args).toEqual(['-p', 'do it', '--output-format', 'json', '--settings', WORKER_PERMISSIONS]);
     expect(args).not.toContain('--append-system-prompt');
+  });
+
+  it('applies the worker permission policy — commands allowed, foot-guns denied', () => {
+    const policy = JSON.parse(WORKER_PERMISSIONS) as {
+      permissions: { allow: string[]; deny: string[] };
+    };
+    expect(policy.permissions.allow).toEqual(expect.arrayContaining(['Bash', 'Edit(./**)', 'Read']));
+    expect(policy.permissions.deny).toEqual(expect.arrayContaining(['Bash(rm -rf *)', 'Bash(git push *)']));
   });
 
   it('appends --append-system-prompt with the role text when given', () => {
