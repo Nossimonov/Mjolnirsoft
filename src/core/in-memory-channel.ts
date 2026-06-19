@@ -4,7 +4,8 @@ import type { Channel, Message, MessageHandler, Participant, Role } from './chan
  * An in-process {@link Channel}: a message is delivered synchronously to every
  * other joined participant (never echoed to its sender). No transport and no
  * external I/O — suitable for the headless core and its tests. Role-based
- * routing and a real transport are deferred to later stories.
+ * routing is not implemented (a message goes to every other participant); the
+ * cross-process transport lives in `FileChannel`.
  */
 export class InMemoryChannel implements Channel {
   private readonly participants = new Map<string, { role: Role; onMessage: MessageHandler }>();

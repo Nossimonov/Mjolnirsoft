@@ -29,8 +29,10 @@ const NEWLINE = 0x0a;
  * transport, the persistence, and the shared transcript at once — participants
  * in separate processes that open the same path share one channel.
  *
- * A participant sees only messages appended after it joins (no replay of prior
- * history — that is a later rung). Polling re-reads the file and only consumes
+ * By default a participant sees only messages appended after it joins;
+ * constructing the channel with `replay` instead delivers the existing history
+ * first, then streams live (the basis for attaching a window to a running
+ * session). Polling re-reads the file and only consumes
  * up to the last complete line, so a concurrent mid-write append is never read
  * partially. Re-reading the whole file each poll is intentionally simple;
  * optimise when logs grow large.
