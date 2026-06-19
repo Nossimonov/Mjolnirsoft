@@ -1,8 +1,7 @@
 import * as vscode from 'vscode';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionStore } from '../../src/core/session-store.ts';
+import { WorktreeManager, type Worktree } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runWorker } from '../../src/worker/worker-runtime.ts';
 import { createClaudeCodeResponder } from '../../src/worker/claude-code-responder.ts';
@@ -50,19 +49,43 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
+    // Give the worker an isolated git worktree on its own branch, so it edits
+    // the real repo without ever touching the developer's working tree.
+    let worktree: Worktree;
+    try {
+      worktree = new WorktreeManager({ repoDir: folder.uri.fsPath }).create(sessionId);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Could not create a worktree for "${sessionId}": ${String(error)}`);
+      return;
+    }
+
     // Spawn the worker in-process: it joins the session and answers each message
-    // by running a headless Claude Code agent in an isolated temp workspace.
+    // by running a headless Claude Code agent with the worktree as its workspace.
     const workerChannel = store.open(sessionId);
-    const workdir = mkdtempSync(join(tmpdir(), `mjolnir-worker-${sessionId}-`));
-    const worker = runWorker(workerChannel, `${sessionId}-worker`, createClaudeCodeResponder({ workdir }));
+    const worker = runWorker(
+      workerChannel,
+      `${sessionId}-worker`,
+      createClaudeCodeResponder({ workdir: worktree.path }),
+    );
 
     openSessionPanel(context, store, sessionId, {
       onDispose: () => {
         worker.close();
         workerChannel.close();
+        // System capture: commit whatever the worker changed onto its branch,
+        // then drop the worktree (the branch survives for review).
+        const captured = worktree.commit(`Mjolnir worker session ${sessionId}`);
+        worktree.remove();
+        void vscode.window.showInformationMessage(
+          captured
+            ? `Worker session "${sessionId}" ended — review its work on branch ${worktree.branch}.`
+            : `Worker session "${sessionId}" ended — it made no changes (branch ${worktree.branch}).`,
+        );
       },
     });
-    void vscode.window.showInformationMessage(`Worker session "${sessionId}" started — type a task in the panel.`);
+    void vscode.window.showInformationMessage(
+      `Worker session "${sessionId}" started on branch ${worktree.branch} — type a task in the panel.`,
+    );
   });
 
   context.subscriptions.push(openView, startWorker);
