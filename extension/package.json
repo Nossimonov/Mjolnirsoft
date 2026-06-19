@@ -14,12 +14,13 @@
       {
         "command": "mjolnirsoft.openSessionView",
         "title": "Mjolnirsoft: Open Session View"
+      },
+      {
+        "command": "mjolnirsoft.startWorkerSession",
+        "title": "Mjolnirsoft: Start Worker Session"
       }
     ]
   },
-  "activationEvents": [
-    "onCommand:mjolnirsoft.openSessionView"
-  ],
   "scripts": {
     "check-types": "tsc --noEmit",
     "build": "node esbuild.mjs"
