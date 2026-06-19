@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { MessageHandler, Participant } from '../core/channel.ts';
-import { FileChannel } from '../core/file-channel.ts';
+import { SessionStore } from '../core/session-store.ts';
 
 export type WorkerState = 'running' | 'exited';
 
@@ -13,27 +13,29 @@ export interface ChildHandle {
   onExit(listener: (code: number | null) => void): void;
 }
 
-/** Launches a worker process bound to a session log. Injectable for tests. */
-export type Launcher = (logPath: string, id: string) => ChildHandle;
+/** Launches a worker process on a session (by id). Injectable for tests. */
+export type Launcher = (sessionId: string, id: string) => ChildHandle;
 
 export interface SpawnWorkerOptions {
   readonly id: string;
-  readonly logPath: string;
+  readonly sessionId: string;
   /** Orchestrator's participant id on the session (default 'orchestrator'). */
   readonly orchestratorId?: string;
   /** Receives messages the worker sends on the session channel. */
   readonly onMessage?: MessageHandler;
+  /** Session store resolving the id to a channel (default: a fresh SessionStore). */
+  readonly store?: SessionStore;
   /** Override how the worker process is launched (tests inject a fake). */
   readonly launch?: Launcher;
 }
 
 export interface WorkerHandle {
   readonly id: string;
-  readonly logPath: string;
+  readonly sessionId: string;
   readonly state: WorkerState;
   /** The orchestrator's participant on the worker's session channel (planner role). */
   readonly orchestrator: Participant;
-  /** Stop the worker process. The session log persists. */
+  /** Stop the worker process. The session transcript persists. */
   stop(): void;
   /** Notified when the worker process exits. */
   onExit(listener: (code: number | null) => void): void;
@@ -46,8 +48,8 @@ const WORKER_ENTRY = fileURLToPath(new URL('../cli/main.ts', import.meta.url));
  * piped and left open so the worker keeps tailing until it is stopped; stdout
  * and stderr are inherited so the worker's output is visible.
  */
-export const spawnWorkerCli: Launcher = (logPath, id) => {
-  const child = spawn(process.execPath, [WORKER_ENTRY, 'worker', id, '--log', logPath, '--auto'], {
+export const spawnWorkerCli: Launcher = (sessionId, id) => {
+  const child = spawn(process.execPath, [WORKER_ENTRY, 'worker', id, '--session', sessionId, '--auto'], {
     stdio: ['pipe', 'inherit', 'inherit'],
   });
   return {
@@ -62,15 +64,15 @@ export const spawnWorkerCli: Launcher = (logPath, id) => {
  * session log (the durable transcript) outlives the process.
  */
 export function spawnWorker(options: SpawnWorkerOptions): WorkerHandle {
-  const { id, logPath, orchestratorId = 'orchestrator', onMessage, launch = spawnWorkerCli } = options;
+  const { id, sessionId, orchestratorId = 'orchestrator', onMessage, store = new SessionStore(), launch = spawnWorkerCli } = options;
 
-  const channel = new FileChannel(logPath);
+  const channel = store.open(sessionId);
   const orchestrator = channel.join(orchestratorId, 'planner', onMessage ?? (() => {}));
 
   let state: WorkerState = 'running';
   const exitListeners: Array<(code: number | null) => void> = [];
 
-  const child = launch(logPath, id);
+  const child = launch(sessionId, id);
   child.onExit((code) => {
     state = 'exited';
     orchestrator.close();
@@ -79,7 +81,7 @@ export function spawnWorker(options: SpawnWorkerOptions): WorkerHandle {
 
   return {
     id,
-    logPath,
+    sessionId,
     orchestrator,
     get state() {
       return state;

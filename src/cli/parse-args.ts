@@ -3,15 +3,15 @@ import type { Role } from '../core/channel.ts';
 export interface CliArgs {
   readonly role: Role;
   readonly id: string;
-  /** Path to a shared session log; when set, sessions share a file-backed channel. */
-  readonly logPath?: string;
-  /** Replay the session's history on attach (requires a log). */
+  /** Session to join by id; when set, participants share that session. Omit for in-memory single-process. */
+  readonly sessionId?: string;
+  /** Replay the session's history on attach (requires a session). */
   readonly replay?: boolean;
   /** Run as an automated worker that auto-responds to messages. */
   readonly auto?: boolean;
 }
 
-export const USAGE = 'usage: <planner|worker> [participant-id] [--log <session-log-path>] [--replay] [--auto]';
+export const USAGE = 'usage: <planner|worker> [participant-id] [--session <id>] [--replay] [--auto]';
 
 /** Thrown when CLI arguments are missing or invalid. */
 export class CliUsageError extends Error {}
@@ -24,16 +24,16 @@ export class CliUsageError extends Error {}
  */
 export function parseArgs(argv: readonly string[]): CliArgs {
   const positional: string[] = [];
-  let logPath: string | undefined;
+  let sessionId: string | undefined;
   let replay = false;
   let auto = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--log' || arg === '-l') {
-      logPath = argv[++i];
-      if (logPath === undefined) {
-        throw new CliUsageError('--log requires a path');
+    if (arg === '--session' || arg === '-s') {
+      sessionId = argv[++i];
+      if (sessionId === undefined) {
+        throw new CliUsageError('--session requires an id');
       }
     } else if (arg === '--replay') {
       replay = true;
@@ -48,8 +48,8 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   if (role !== 'planner' && role !== 'worker') {
     throw new CliUsageError(`role must be "planner" or "worker", got ${role ?? '(none)'}`);
   }
-  if (replay && logPath === undefined) {
-    throw new CliUsageError('--replay requires --log');
+  if (replay && sessionId === undefined) {
+    throw new CliUsageError('--replay requires --session');
   }
-  return { role, id: id ?? `${role}-1`, logPath, replay: replay || undefined, auto: auto || undefined };
+  return { role, id: id ?? `${role}-1`, sessionId, replay: replay || undefined, auto: auto || undefined };
 }
