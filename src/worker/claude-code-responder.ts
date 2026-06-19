@@ -15,9 +15,24 @@ export interface ClaudeRunArgs {
 /** Runs a one-shot headless Claude Code task in `cwd`, returning its result text. */
 export type RunClaudeCode = (prompt: string, options: { cwd: string } & ClaudeRunArgs) => Promise<string>;
 
+/**
+ * Permission policy for the worker's headless `claude`: no prompts for what a
+ * normal dev task needs (reads, cwd-scoped edits, shell commands), with a few
+ * clearly-dangerous commands denied. This is *soft* confinement — on native
+ * Windows there's no OS sandbox, so the worktree cwd, the worker-role
+ * instructions, and the developer's branch review are the real boundary (Bash
+ * can still escape this policy). A WSL sandbox would be the hard boundary. See #62.
+ */
+export const WORKER_PERMISSIONS = JSON.stringify({
+  permissions: {
+    allow: ['Read', 'Glob', 'Grep', 'WebFetch', 'Edit(./**)', 'Write(./**)', 'Bash'],
+    deny: ['Bash(rm -rf *)', 'Bash(git push *)', 'Bash(git reset --hard *)', 'Bash(sudo *)'],
+  },
+});
+
 /** Build the `claude` argv for a one-shot run from the task prompt and run options. */
 export function buildClaudeArgs(prompt: string, options: ClaudeRunArgs = {}): string[] {
-  const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', 'acceptEdits'];
+  const args = ['-p', prompt, '--output-format', 'json', '--settings', WORKER_PERMISSIONS];
   if (options.appendSystemPrompt) args.push('--append-system-prompt', options.appendSystemPrompt);
   if (options.sessionId) args.push(options.resume ? '--resume' : '--session-id', options.sessionId);
   return args;
