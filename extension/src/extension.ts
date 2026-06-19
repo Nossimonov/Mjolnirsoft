@@ -7,88 +7,110 @@ import { runWorker } from '../../src/worker/worker-runtime.ts';
 import { createClaudeCodeResponder } from '../../src/worker/claude-code-responder.ts';
 import { renderMessage } from './render.ts';
 
+// Quick-pick sentinel offered above the session list; the input validation for
+// session names forbids spaces/'+', so this can never collide with a real id.
+const START_NEW_SESSION = '+ Start a new worker session…';
+
 export function activate(context: vscode.ExtensionContext): void {
   const openView = vscode.commands.registerCommand('mjolnirsoft.openSessionView', async () => {
     const folder = requireFolder();
     if (!folder) return;
     const store = storeFor(folder);
 
+    // List-or-create front door: with no sessions, skip the dead-end message and
+    // take the newcomer straight into starting a worker.
     const sessions = store.list();
     if (sessions.length === 0) {
-      void vscode.window.showInformationMessage('No sessions yet — run "Mjolnirsoft: Start Worker Session" first.');
+      await startWorkerSession(context, folder, store);
       return;
     }
-    const sessionId = await vscode.window.showQuickPick(sessions, {
+    const pick = await vscode.window.showQuickPick([START_NEW_SESSION, ...sessions], {
       title: 'Open a Mjolnirsoft session',
-      placeHolder: 'Pick a session to open',
+      placeHolder: 'Pick a session to open, or start a new worker',
     });
-    if (!sessionId) return;
+    if (!pick) return;
+    if (pick === START_NEW_SESSION) {
+      await startWorkerSession(context, folder, store);
+      return;
+    }
 
-    openSessionPanel(context, store, sessionId);
+    openSessionPanel(context, store, pick);
   });
 
   const startWorker = vscode.commands.registerCommand('mjolnirsoft.startWorkerSession', async () => {
     const folder = requireFolder();
     if (!folder) return;
-    // The in-process worker shells out to `claude`; load machine-specific config
-    // (CLAUDE_BIN) so it's found even when the extension host's PATH lacks it.
-    loadLocalEnv(join(folder.uri.fsPath, '.local.env'));
-
-    const sessionId = await vscode.window.showInputBox({
-      title: 'Start a worker session',
-      prompt: 'Name this session',
-      placeHolder: 'e.g. add-feature-x',
-      validateInput: (value) =>
-        /^[A-Za-z0-9_-]+$/.test(value) ? undefined : "use letters, digits, '_' or '-'",
-    });
-    if (!sessionId) return;
-
-    const store = storeFor(folder);
-    if (store.list().includes(sessionId)) {
-      void vscode.window.showErrorMessage(`Session "${sessionId}" already exists — open it instead.`);
-      return;
-    }
-
-    // Give the worker an isolated git worktree on its own branch, so it edits
-    // the real repo without ever touching the developer's working tree.
-    let worktree: Worktree;
-    try {
-      worktree = new WorktreeManager({ repoDir: folder.uri.fsPath }).create(sessionId);
-    } catch (error) {
-      void vscode.window.showErrorMessage(`Could not create a worktree for "${sessionId}": ${String(error)}`);
-      return;
-    }
-
-    // Spawn the worker in-process: it joins the session and answers each message
-    // by running a headless Claude Code agent with the worktree as its workspace.
-    const workerChannel = store.open(sessionId);
-    const worker = runWorker(
-      workerChannel,
-      `${sessionId}-worker`,
-      createClaudeCodeResponder({ workdir: worktree.path }),
-    );
-
-    openSessionPanel(context, store, sessionId, {
-      onDispose: () => {
-        worker.close();
-        workerChannel.close();
-        // System capture: commit whatever the worker changed onto its branch,
-        // then drop the worktree (the branch survives for review).
-        const captured = worktree.commit(`Mjolnir worker session ${sessionId}`);
-        worktree.remove();
-        void vscode.window.showInformationMessage(
-          captured
-            ? `Worker session "${sessionId}" ended — review its work on branch ${worktree.branch}.`
-            : `Worker session "${sessionId}" ended — it made no changes (branch ${worktree.branch}).`,
-        );
-      },
-    });
-    void vscode.window.showInformationMessage(
-      `Worker session "${sessionId}" started on branch ${worktree.branch} — type a task in the panel.`,
-    );
+    await startWorkerSession(context, folder, storeFor(folder));
   });
 
   context.subscriptions.push(openView, startWorker);
+}
+
+/**
+ * Prompt for a name, spawn a worker in its own git worktree, and open its panel.
+ * Shared by the "Start Worker Session" command and the "Open Session View" front
+ * door, so the start-a-worker logic lives in exactly one place.
+ */
+async function startWorkerSession(
+  context: vscode.ExtensionContext,
+  folder: vscode.WorkspaceFolder,
+  store: SessionStore,
+): Promise<void> {
+  // The in-process worker shells out to `claude`; load machine-specific config
+  // (CLAUDE_BIN) so it's found even when the extension host's PATH lacks it.
+  loadLocalEnv(join(folder.uri.fsPath, '.local.env'));
+
+  const sessionId = await vscode.window.showInputBox({
+    title: 'Start a worker session',
+    prompt: 'Name this session',
+    placeHolder: 'e.g. add-feature-x',
+    validateInput: (value) =>
+      /^[A-Za-z0-9_-]+$/.test(value) ? undefined : "use letters, digits, '_' or '-'",
+  });
+  if (!sessionId) return;
+
+  if (store.list().includes(sessionId)) {
+    void vscode.window.showErrorMessage(`Session "${sessionId}" already exists — open it instead.`);
+    return;
+  }
+
+  // Give the worker an isolated git worktree on its own branch, so it edits
+  // the real repo without ever touching the developer's working tree.
+  let worktree: Worktree;
+  try {
+    worktree = new WorktreeManager({ repoDir: folder.uri.fsPath }).create(sessionId);
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Could not create a worktree for "${sessionId}": ${String(error)}`);
+    return;
+  }
+
+  // Spawn the worker in-process: it joins the session and answers each message
+  // by running a headless Claude Code agent with the worktree as its workspace.
+  const workerChannel = store.open(sessionId);
+  const worker = runWorker(
+    workerChannel,
+    `${sessionId}-worker`,
+    createClaudeCodeResponder({ workdir: worktree.path }),
+  );
+
+  openSessionPanel(context, store, sessionId, {
+    onDispose: () => {
+      worker.close();
+      workerChannel.close();
+      // System capture: commit whatever the worker changed onto its branch,
+      // then drop the worktree (the branch survives for review).
+      const captured = worktree.commit(`Mjolnir worker session ${sessionId}`);
+      worktree.remove();
+      void vscode.window.showInformationMessage(
+        captured
+          ? `Worker session "${sessionId}" ended — review its work on branch ${worktree.branch}.`
+          : `Worker session "${sessionId}" ended — it made no changes (branch ${worktree.branch}).`,
+      );
+    },
+  });
+  void vscode.window.showInformationMessage(
+    `Worker session "${sessionId}" started on branch ${worktree.branch} — type a task in the panel.`,
+  );
 }
 
 export function deactivate(): void {}
