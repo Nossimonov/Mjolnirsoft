@@ -18,11 +18,24 @@ export interface Worktree {
   readonly path: string;
   /** The branch the worktree is on; survives removal and holds the worker's commits. */
   readonly branch: string;
+  /**
+   * Stage and commit everything in the worktree onto its branch (the system
+   * "capture" at session end). Returns false if there was nothing to commit.
+   */
+  commit(message: string): boolean;
   /** Remove the worktree directory; the branch (and its commits) remains. */
   remove(): void;
 }
 
 const SAFE_ID = /^[A-Za-z0-9_-]+$/;
+
+/** Fixed identity for system-captured commits, so committing never depends on the repo's git config. */
+const COMMIT_IDENTITY = {
+  GIT_AUTHOR_NAME: 'Mjolnirsoft',
+  GIT_AUTHOR_EMAIL: 'mjolnir@localhost',
+  GIT_COMMITTER_NAME: 'Mjolnirsoft',
+  GIT_COMMITTER_EMAIL: 'mjolnir@localhost',
+};
 
 /**
  * Creates and tears down isolated git worktrees for workers. Each worktree is a
@@ -58,6 +71,16 @@ export class WorktreeManager {
     return {
       path,
       branch,
+      commit: (message: string): boolean => {
+        execFileSync('git', ['add', '-A'], { cwd: path });
+        try {
+          execFileSync('git', ['diff', '--cached', '--quiet'], { cwd: path, stdio: 'ignore' });
+          return false; // nothing staged — nothing to capture
+        } catch {
+          execFileSync('git', ['commit', '-m', message], { cwd: path, env: { ...process.env, ...COMMIT_IDENTITY } });
+          return true;
+        }
+      },
       remove: () => {
         this.git(['worktree', 'remove', path]);
       },
