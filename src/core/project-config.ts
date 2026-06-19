@@ -38,10 +38,27 @@ export function loadProjectConfig(path = resolve(process.cwd(), 'mjolnir.config.
   } catch (error) {
     throw new Error(`invalid mjolnir.config.json: ${String(error)}`);
   }
-  const storage = (parsed as { storage?: { backend?: unknown } }).storage;
+  if (!isJsonObject(parsed)) {
+    throw new Error(`invalid mjolnir.config.json: expected an object, got ${describeJson(parsed)}`);
+  }
+  const { storage } = parsed;
+  if (storage !== undefined && !isJsonObject(storage)) {
+    throw new Error(`invalid mjolnir.config.json: "storage" must be an object, got ${describeJson(storage)}`);
+  }
   const backend = storage?.backend ?? DEFAULT_PROJECT_CONFIG.storage.backend;
   if (typeof backend !== 'string') {
-    throw new Error(`mjolnir.config.json: storage.backend must be a string, got ${typeof backend}`);
+    throw new Error(`invalid mjolnir.config.json: storage.backend must be a string, got ${describeJson(backend)}`);
   }
   return { storage: { backend } };
+}
+
+/** A non-null, non-array object — the only valid shape for the config and its `storage`. */
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Human-readable type for error messages, distinguishing null and array from object. */
+function describeJson(value: unknown): string {
+  if (value === null) return 'null';
+  return Array.isArray(value) ? 'array' : typeof value;
 }

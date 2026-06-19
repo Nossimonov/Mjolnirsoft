@@ -30,6 +30,19 @@ describe('loadProjectConfig', () => {
     expect(() => loadProjectConfig(tempConfig('{ not json'))).toThrow(/invalid mjolnir\.config\.json/);
   });
 
+  it('throws an actionable error on a non-object top-level config', () => {
+    // `null` parses fine but must not crash with a raw TypeError, and a
+    // primitive/array must not be silently accepted as the default.
+    expect(() => loadProjectConfig(tempConfig('null'))).toThrow(/expected an object, got null/);
+    expect(() => loadProjectConfig(tempConfig('42'))).toThrow(/expected an object, got number/);
+    expect(() => loadProjectConfig(tempConfig('[]'))).toThrow(/expected an object, got array/);
+  });
+
+  it('throws when storage is present but not an object', () => {
+    expect(() => loadProjectConfig(tempConfig('{ "storage": "git" }')))
+      .toThrow(/"storage" must be an object/);
+  });
+
   it('throws when storage.backend is not a string', () => {
     expect(() => loadProjectConfig(tempConfig('{ "storage": { "backend": 123 } }')))
       .toThrow(/must be a string/);
