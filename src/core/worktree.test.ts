@@ -1,0 +1,77 @@
+import { describe, it, expect } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { WorktreeManager } from './worktree.ts';
+
+function initRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'mjolnir-wt-'));
+  const g = (...a: string[]) => execFileSync('git', a, { cwd: dir, stdio: 'ignore' });
+  g('init');
+  g('config', 'user.email', 't@t');
+  g('config', 'user.name', 'Tester');
+  writeFileSync(join(dir, '.gitignore'), '.mjolnir/\n');
+  writeFileSync(join(dir, 'file.txt'), 'v1\n');
+  g('add', '-A');
+  g('commit', '-m', 'init');
+  return dir;
+}
+
+const git = (repo: string, ...a: string[]) => execFileSync('git', a, { cwd: repo }).toString();
+
+describe('WorktreeManager', () => {
+  it('creates an isolated worktree on a fresh branch, leaving the main tree untouched', () => {
+    const repo = initRepo();
+    const headBefore = git(repo, 'rev-parse', 'HEAD').trim();
+    const mgr = new WorktreeManager({ repoDir: repo });
+
+    const wt = mgr.create('sess1');
+
+    expect(existsSync(wt.path)).toBe(true);
+    expect(wt.branch).toBe('mjolnir/work/sess1');
+    expect(git(repo, 'rev-parse', wt.branch).trim()).toBe(headBefore); // branch forks from HEAD
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(headBefore); // main HEAD untouched
+    expect(git(repo, 'status', '--porcelain').trim()).toBe(''); // worktree is gitignored, tree clean
+  });
+
+  it('keeps the branch and its commits after the worktree is removed; main tree never changes', () => {
+    const repo = initRepo();
+    const headBefore = git(repo, 'rev-parse', 'HEAD').trim();
+    const mgr = new WorktreeManager({ repoDir: repo });
+    const wt = mgr.create('task');
+
+    // A worker edits + commits inside the worktree.
+    writeFileSync(join(wt.path, 'added.txt'), 'work\n');
+    execFileSync('git', ['add', '-A'], { cwd: wt.path });
+    execFileSync(
+      'git',
+      ['-c', 'user.email=m@l', '-c', 'user.name=Mjolnir', 'commit', '-m', 'worker work'],
+      { cwd: wt.path },
+    );
+    const branchHead = git(repo, 'rev-parse', wt.branch).trim();
+    expect(branchHead).not.toBe(headBefore);
+
+    wt.remove();
+
+    expect(existsSync(wt.path)).toBe(false);
+    expect(git(repo, 'rev-parse', wt.branch).trim()).toBe(branchHead); // branch survives
+    expect(git(repo, 'show', `${wt.branch}:added.txt`)).toContain('work'); // with its commit
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(headBefore); // main never moved
+  });
+
+  it('rejects an invalid id, a duplicate worktree, and a non-repo', () => {
+    const repo = initRepo();
+    const mgr = new WorktreeManager({ repoDir: repo });
+    expect(() => mgr.create('../evil')).toThrow(/invalid worktree id/);
+    mgr.create('dup');
+    expect(() => mgr.create('dup')).toThrow(); // branch + path already exist
+    const notRepo = mkdtempSync(join(tmpdir(), 'mjolnir-norepo-'));
+    expect(() => new WorktreeManager({ repoDir: notRepo })).toThrow(/git repository/);
+  });
+
+  it('prune runs cleanly', () => {
+    const mgr = new WorktreeManager({ repoDir: initRepo() });
+    expect(() => mgr.prune()).not.toThrow();
+  });
+});
