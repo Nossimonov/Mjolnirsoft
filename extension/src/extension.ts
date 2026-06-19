@@ -131,6 +131,8 @@ function openSessionPanel(
   const channel = store.open(sessionId, { replay: true });
   const participant = channel.join('vscode-view', 'planner', (message) => {
     void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
+    // A message from another participant means the worker has replied — stop "working".
+    void panel.webview.postMessage({ kind: 'working', on: false });
   });
 
   // Compose-and-send: one (possibly multi-line) message per send. The channel
@@ -140,6 +142,8 @@ function openSessionPanel(
       const sent = { from: 'vscode-view', type: 'text', payload: event.text };
       void panel.webview.postMessage({ kind: 'message', html: renderMessage(sent) });
       participant.send({ type: 'text', payload: event.text });
+      // We just sent — show "working" until a reply arrives.
+      void panel.webview.postMessage({ kind: 'working', on: true });
     }
   });
 
@@ -171,9 +175,11 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   html, body { height: 100%; margin: 0; }
   body { font-family: var(--vscode-font-family); display: flex; flex-direction: column; }
   #content { flex: 1; overflow-y: auto; padding: 0 1rem; }
-  .turn { border-top: 1px solid var(--vscode-panel-border); padding: 0.5rem 0; }
+  .turn { padding: 0.4rem 0.6rem; margin: 0.45rem 0; border-radius: 4px; }
   .from { font-size: 0.8em; opacity: 0.7; margin-bottom: 0.25rem; }
   .mermaid { background: #fff; padding: 0.5rem; border-radius: 4px; }
+  #working { padding: 0.25rem 1rem; font-size: 0.85em; opacity: 0.75; }
+  #working[hidden] { display: none; }
   #composer { display: flex; gap: 0.5rem; padding: 0.5rem 1rem; border-top: 1px solid var(--vscode-panel-border); }
   #input { flex: 1; min-height: 3em; font: inherit; resize: vertical; padding: 0.4rem;
            background: var(--vscode-input-background); color: var(--vscode-input-foreground);
@@ -184,8 +190,9 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 </head>
 <body>
 <div id="content"></div>
+<div id="working" hidden>● worker is working…</div>
 <div id="composer">
-  <textarea id="input" placeholder="Type a message (Markdown + Mermaid supported). Ctrl/Cmd+Enter to send."></textarea>
+  <textarea id="input" placeholder="Type a message (Markdown + Mermaid). Enter to send, Shift+Enter for a new line."></textarea>
   <button id="send">Send</button>
 </div>
 <script nonce="${nonce}" src="${scriptUri}"></script>
