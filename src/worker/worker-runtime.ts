@@ -4,8 +4,10 @@ import type { Channel, Message, Participant } from '../core/channel.ts';
 export type Respond = (message: Message) => Promise<Omit<Message, 'from'> | undefined>;
 
 /**
- * Default worker behavior: acknowledge the message. This is a stub — the seam
- * where a real agent (which reads the task and does work) plugs in.
+ * A trivial {@link Respond} that echoes the message back as an `ack`. It is the
+ * default for transport-only use and tests; the real agent behavior is the
+ * Claude Code responder (`createClaudeCodeResponder`), which the `--auto` worker
+ * passes in.
  */
 export const acknowledge: Respond = async (message) => ({
   type: 'ack',
