@@ -11,12 +11,25 @@ export interface SessionStoreOptions {
 const SESSION_ID = /^[A-Za-z0-9_-]+$/;
 
 /**
- * Resolves session ids to channels, hiding the file-backed transport. A session
- * is addressed by id; its backing log lives in a directory the user never sees.
- * Swapping the backing (file → broker/socket) leaves this id-based interface
- * unchanged.
+ * The storage seam: resolves session ids to channels. Backends (file, and later
+ * git/cloud) implement this so the rest of the system depends on the interface,
+ * not a concrete store. A backend is mounted from the project config by
+ * `createSessionStore`.
  */
-export class SessionStore {
+export interface SessionBackend {
+  /** Open (creating if needed) the channel for a session id. */
+  open(id: string, options?: { replay?: boolean }): Channel;
+  /** List existing session ids. */
+  list(): string[];
+}
+
+/**
+ * The `local` backend: resolves session ids to file-backed channels, hiding the
+ * transport. A session is addressed by id; its backing log lives in a directory
+ * the user never sees. Swapping the backing (file → broker/socket) leaves this
+ * id-based interface unchanged.
+ */
+export class SessionStore implements SessionBackend {
   private readonly dir: string;
 
   constructor(options: SessionStoreOptions = {}) {
