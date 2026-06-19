@@ -51,6 +51,16 @@ export class SessionStore implements SessionBackend {
       .map((name) => name.slice(0, -'.jsonl'.length));
   }
 
+  /**
+   * Absolute path to a session's backing log. The permission-prompt MCP server
+   * (#66) runs in its own process and bridges to the view over this file, so it
+   * needs the path the channel is backed by — a detail this local/file backend
+   * can expose because it *is* the file backend.
+   */
+  logPath(id: string): string {
+    return this.pathFor(id);
+  }
+
   private pathFor(id: string): string {
     if (!SESSION_ID.test(id)) {
       throw new Error(`invalid session id: ${id} (use letters, digits, '_' or '-')`);

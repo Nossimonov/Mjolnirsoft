@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { INTERACTION_DECISION, INTERACTION_REQUEST } from '../core/interaction.ts';
 import type { Respond } from './worker-runtime.ts';
 
 /** Options shaping a one-shot `claude` run beyond the task prompt and cwd. */
@@ -10,6 +11,10 @@ export interface ClaudeRunArgs {
   readonly sessionId?: string;
   /** When a session is pinned, resume it (later turns) instead of creating it (first turn). */
   readonly resume?: boolean;
+  /** MCP tool that handles permission prompts (e.g. `mcp__perm__approve`), surfacing them to the human (#66). */
+  readonly permissionPromptTool?: string;
+  /** Path to the MCP config defining the server that backs {@link permissionPromptTool}. */
+  readonly mcpConfigPath?: string;
 }
 
 /** Runs a one-shot headless Claude Code task in `cwd`, returning its result text. */
@@ -35,6 +40,8 @@ export function buildClaudeArgs(prompt: string, options: ClaudeRunArgs = {}): st
   const args = ['-p', prompt, '--output-format', 'json', '--settings', WORKER_PERMISSIONS];
   if (options.appendSystemPrompt) args.push('--append-system-prompt', options.appendSystemPrompt);
   if (options.sessionId) args.push(options.resume ? '--resume' : '--session-id', options.sessionId);
+  if (options.permissionPromptTool) args.push('--permission-prompt-tool', options.permissionPromptTool);
+  if (options.mcpConfigPath) args.push('--mcp-config', options.mcpConfigPath);
   return args;
 }
 
@@ -56,9 +63,13 @@ export function resolveClaudeBin(): string {
  * agent write files without prompting. The task is passed as an argv element
  * (no shell), so prompt contents are not interpreted by a shell.
  */
-export const runClaudeCodeCli: RunClaudeCode = (prompt, { cwd, appendSystemPrompt, sessionId, resume }) =>
+export const runClaudeCodeCli: RunClaudeCode = (
+  prompt,
+  { cwd, appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath },
+) =>
   new Promise((resolve, reject) => {
-    const child = spawn(resolveClaudeBin(), buildClaudeArgs(prompt, { appendSystemPrompt, sessionId, resume }), {
+    const args = buildClaudeArgs(prompt, { appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath });
+    const child = spawn(resolveClaudeBin(), args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -112,6 +123,14 @@ export interface ClaudeCodeResponderOptions {
    * keystone (#40) can record it.
    */
   readonly claudeSessionId?: string;
+  /**
+   * MCP tool that handles permission prompts (e.g. `mcp__perm__approve`) plus
+   * the config path defining its server, so a tool use the worker isn't
+   * pre-allowed to make is surfaced to the human instead of dead-ending (#66).
+   * Both must be set together; omit for a worker with no escalation path.
+   */
+  readonly permissionPromptTool?: string;
+  readonly mcpConfigPath?: string;
   /** Override how Claude Code is run (tests inject a fake; default spawns the CLI). */
   readonly run?: RunClaudeCode;
 }
@@ -131,13 +150,26 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     workdir,
     appendSystemPrompt = DEFAULT_WORKER_ROLE,
     claudeSessionId = randomUUID(),
+    permissionPromptTool,
+    mcpConfigPath,
     run = runClaudeCodeCli,
   } = options;
   let started = false; // first turn creates the session; later turns resume it
   return async (message) => {
+    // Permission requests/decisions are a side-channel between the MCP server and
+    // the view — not task prompts. Ignoring them keeps the worker from feeding
+    // its own mid-run permission request back into Claude as a new turn (#66).
+    if (message.type === INTERACTION_REQUEST || message.type === INTERACTION_DECISION) return undefined;
     const prompt = typeof message.payload === 'string' ? message.payload : JSON.stringify(message.payload);
     const result = (
-      await run(prompt, { cwd: workdir, appendSystemPrompt, sessionId: claudeSessionId, resume: started })
+      await run(prompt, {
+        cwd: workdir,
+        appendSystemPrompt,
+        sessionId: claudeSessionId,
+        resume: started,
+        permissionPromptTool,
+        mcpConfigPath,
+      })
     ).trim();
     started = true;
     return result ? { type: 'result', payload: result } : undefined;
