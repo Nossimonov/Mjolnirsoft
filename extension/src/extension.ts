@@ -95,6 +95,10 @@ function openSessionPanel(
     vscode.ViewColumn.One,
     {
       enableScripts: true,
+      // Keep the webview alive while hidden so switching editor tabs doesn't
+      // destroy the conversation (and unsent composer text). History is only
+      // replayed once at join, so a recreated webview would come back empty.
+      retainContextWhenHidden: true,
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')],
     },
   );
