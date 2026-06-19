@@ -42,3 +42,17 @@ input?.addEventListener('keydown', (event: KeyboardEvent) => {
     sendMessage();
   }
 });
+
+// Permission cards carry allow/deny buttons (#66). Delegate clicks: send the
+// verdict back keyed by request id, then lock the card and show what was chosen.
+content?.addEventListener('click', (event: MouseEvent) => {
+  const target = event.target as HTMLElement;
+  if (!target.classList.contains('decide')) return;
+  const card = target.closest('.decision') as HTMLElement | null;
+  const requestId = card?.getAttribute('data-request-id');
+  const behavior = target.getAttribute('data-behavior');
+  if (!card || !requestId || (behavior !== 'allow' && behavior !== 'deny')) return;
+  vscode.postMessage({ kind: 'decision', requestId, behavior });
+  card.querySelectorAll('button').forEach((button) => (button.disabled = true));
+  card.insertAdjacentHTML('beforeend', `<span class="decided">${behavior === 'allow' ? 'allowed' : 'denied'}</span>`);
+});
