@@ -1,21 +1,22 @@
 import * as vscode from 'vscode';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { SessionStore } from '../../src/core/session-store.ts';
+import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
+import { runWorker } from '../../src/worker/worker-runtime.ts';
+import { createClaudeCodeResponder } from '../../src/worker/claude-code-responder.ts';
 import { renderMessage } from './render.ts';
 
 export function activate(context: vscode.ExtensionContext): void {
-  const command = vscode.commands.registerCommand('mjolnirsoft.openSessionView', async () => {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) {
-      void vscode.window.showErrorMessage('Open a workspace folder to use Mjolnirsoft sessions.');
-      return;
-    }
-    const store = new SessionStore({
-      baseDir: vscode.Uri.joinPath(folder.uri, '.mjolnir', 'sessions').fsPath,
-    });
+  const openView = vscode.commands.registerCommand('mjolnirsoft.openSessionView', async () => {
+    const folder = requireFolder();
+    if (!folder) return;
+    const store = storeFor(folder);
 
     const sessions = store.list();
     if (sessions.length === 0) {
-      void vscode.window.showInformationMessage('No sessions yet — start a worker or planner first.');
+      void vscode.window.showInformationMessage('No sessions yet — run "Mjolnirsoft: Start Worker Session" first.');
       return;
     }
     const sessionId = await vscode.window.showQuickPick(sessions, {
@@ -24,44 +25,103 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     if (!sessionId) return;
 
-    const panel = vscode.window.createWebviewPanel(
-      'mjolnirsoftSessionView',
-      `Session: ${sessionId}`,
-      vscode.ViewColumn.One,
-      {
-        enableScripts: true,
-        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')],
-      },
-    );
-    panel.webview.html = renderHtml(panel.webview, context.extensionUri);
-
-    // Attach to the session: replay history, then stream live messages.
-    const channel = store.open(sessionId, { replay: true });
-    const participant = channel.join('vscode-view', 'planner', (message) => {
-      void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
-    });
-    // History (replay) and live messages arrive via the channel's poll loop.
-
-    // Compose-and-send from the panel: one (possibly multi-line) message per
-    // send. The channel doesn't echo a participant's own messages, so render
-    // the sent turn locally.
-    panel.webview.onDidReceiveMessage((event: { kind?: string; text?: string }) => {
-      if (event.kind === 'send' && event.text) {
-        const sent = { from: 'vscode-view', type: 'text', payload: event.text };
-        void panel.webview.postMessage({ kind: 'message', html: renderMessage(sent) });
-        participant.send({ type: 'text', payload: event.text });
-      }
-    });
-
-    panel.onDidDispose(() => {
-      participant.close();
-      channel.close();
-    });
+    openSessionPanel(context, store, sessionId);
   });
-  context.subscriptions.push(command);
+
+  const startWorker = vscode.commands.registerCommand('mjolnirsoft.startWorkerSession', async () => {
+    const folder = requireFolder();
+    if (!folder) return;
+    // The in-process worker shells out to `claude`; load machine-specific config
+    // (CLAUDE_BIN) so it's found even when the extension host's PATH lacks it.
+    loadLocalEnv(join(folder.uri.fsPath, '.local.env'));
+
+    const sessionId = await vscode.window.showInputBox({
+      title: 'Start a worker session',
+      prompt: 'Name this session',
+      placeHolder: 'e.g. add-feature-x',
+      validateInput: (value) =>
+        /^[A-Za-z0-9_-]+$/.test(value) ? undefined : "use letters, digits, '_' or '-'",
+    });
+    if (!sessionId) return;
+
+    const store = storeFor(folder);
+    if (store.list().includes(sessionId)) {
+      void vscode.window.showErrorMessage(`Session "${sessionId}" already exists — open it instead.`);
+      return;
+    }
+
+    // Spawn the worker in-process: it joins the session and answers each message
+    // by running a headless Claude Code agent in an isolated temp workspace.
+    const workerChannel = store.open(sessionId);
+    const workdir = mkdtempSync(join(tmpdir(), `mjolnir-worker-${sessionId}-`));
+    const worker = runWorker(workerChannel, `${sessionId}-worker`, createClaudeCodeResponder({ workdir }));
+
+    openSessionPanel(context, store, sessionId, {
+      onDispose: () => {
+        worker.close();
+        workerChannel.close();
+      },
+    });
+    void vscode.window.showInformationMessage(`Worker session "${sessionId}" started — type a task in the panel.`);
+  });
+
+  context.subscriptions.push(openView, startWorker);
 }
 
 export function deactivate(): void {}
+
+function requireFolder(): vscode.WorkspaceFolder | undefined {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) {
+    void vscode.window.showErrorMessage('Open a workspace folder to use Mjolnirsoft sessions.');
+  }
+  return folder;
+}
+
+function storeFor(folder: vscode.WorkspaceFolder): SessionStore {
+  return new SessionStore({ baseDir: vscode.Uri.joinPath(folder.uri, '.mjolnir', 'sessions').fsPath });
+}
+
+/** Open a webview panel attached to a session: replay history, stream live, compose. */
+function openSessionPanel(
+  context: vscode.ExtensionContext,
+  store: SessionStore,
+  sessionId: string,
+  options: { onDispose?: () => void } = {},
+): void {
+  const panel = vscode.window.createWebviewPanel(
+    'mjolnirsoftSessionView',
+    `Session: ${sessionId}`,
+    vscode.ViewColumn.One,
+    {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')],
+    },
+  );
+  panel.webview.html = renderHtml(panel.webview, context.extensionUri);
+
+  // Attach to the session: replay history, then stream live messages.
+  const channel = store.open(sessionId, { replay: true });
+  const participant = channel.join('vscode-view', 'planner', (message) => {
+    void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
+  });
+
+  // Compose-and-send: one (possibly multi-line) message per send. The channel
+  // doesn't echo a participant's own messages, so render the sent turn locally.
+  panel.webview.onDidReceiveMessage((event: { kind?: string; text?: string }) => {
+    if (event.kind === 'send' && event.text) {
+      const sent = { from: 'vscode-view', type: 'text', payload: event.text };
+      void panel.webview.postMessage({ kind: 'message', html: renderMessage(sent) });
+      participant.send({ type: 'text', payload: event.text });
+    }
+  });
+
+  panel.onDidDispose(() => {
+    participant.close();
+    channel.close();
+    options.onDispose?.();
+  });
+}
 
 function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'));
