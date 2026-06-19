@@ -3,5 +3,8 @@ dist/
 coverage/
 *.log
 
+# Session transcripts (the file-backed channel's storage)
+.mjolnir/
+
 # Machine-specific local config (see CLAUDE.md "Build & Environment Rules")
 .local.env

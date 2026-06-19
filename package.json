@@ -3,7 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "workspaces": ["extension"],
+  "workspaces": [
+    "extension"
+  ],
   "description": "Project-agnostic engineering tooling and methods. Founding initiative: multi-session orchestration tooling.",
   "scripts": {
     "test": "vitest run",

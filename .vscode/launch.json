@@ -5,7 +5,7 @@
       "name": "Run Session View Extension",
       "type": "extensionHost",
       "request": "launch",
-      "args": ["--extensionDevelopmentPath=${workspaceFolder}/extension"]
+      "args": ["${workspaceFolder}", "--extensionDevelopmentPath=${workspaceFolder}/extension"]
     }
   ]
 }

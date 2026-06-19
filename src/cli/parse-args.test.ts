@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { parseArgs, CliUsageError } from './parse-args.ts';
 
 describe('parseArgs', () => {
-  it('parses a role and defaults the id (AC1)', () => {
+  it('parses a role and defaults the id', () => {
     expect(parseArgs(['planner'])).toEqual({ role: 'planner', id: 'planner-1' });
     expect(parseArgs(['worker'])).toEqual({ role: 'worker', id: 'worker-1' });
   });
@@ -11,49 +11,49 @@ describe('parseArgs', () => {
     expect(parseArgs(['worker', 'w-7'])).toEqual({ role: 'worker', id: 'w-7' });
   });
 
-  it('rejects a missing role (AC1)', () => {
+  it('rejects a missing role', () => {
     expect(() => parseArgs([])).toThrow(CliUsageError);
   });
 
-  it('rejects an invalid role (AC1)', () => {
+  it('rejects an invalid role', () => {
     expect(() => parseArgs(['boss'])).toThrow(CliUsageError);
   });
 
-  it('parses a --log path for a shared file-backed channel', () => {
-    expect(parseArgs(['worker', '--log', '/tmp/s.jsonl'])).toEqual({
+  it('parses --session to join a shared session by id', () => {
+    expect(parseArgs(['worker', '--session', 'demo'])).toEqual({
       role: 'worker',
       id: 'worker-1',
-      logPath: '/tmp/s.jsonl',
+      sessionId: 'demo',
     });
-    expect(parseArgs(['planner', 'p-2', '-l', '/tmp/s.jsonl'])).toEqual({
+    expect(parseArgs(['planner', 'p-2', '-s', 'demo'])).toEqual({
       role: 'planner',
       id: 'p-2',
-      logPath: '/tmp/s.jsonl',
+      sessionId: 'demo',
     });
   });
 
-  it('rejects --log without a value', () => {
-    expect(() => parseArgs(['worker', '--log'])).toThrow(CliUsageError);
+  it('rejects --session without an id', () => {
+    expect(() => parseArgs(['worker', '--session'])).toThrow(CliUsageError);
   });
 
-  it('parses --replay (attach with history) when a log is given', () => {
-    expect(parseArgs(['planner', 'observer', '--log', '/tmp/s.jsonl', '--replay'])).toEqual({
+  it('parses --replay (attach with history) when a session is given', () => {
+    expect(parseArgs(['planner', 'observer', '--session', 'demo', '--replay'])).toEqual({
       role: 'planner',
       id: 'observer',
-      logPath: '/tmp/s.jsonl',
+      sessionId: 'demo',
       replay: true,
     });
   });
 
-  it('rejects --replay without --log', () => {
+  it('rejects --replay without --session', () => {
     expect(() => parseArgs(['planner', '--replay'])).toThrow(CliUsageError);
   });
 
   it('parses --auto (automated worker)', () => {
-    expect(parseArgs(['worker', 'w1', '--log', '/tmp/s.jsonl', '--auto'])).toEqual({
+    expect(parseArgs(['worker', 'w1', '--session', 'demo', '--auto'])).toEqual({
       role: 'worker',
       id: 'w1',
-      logPath: '/tmp/s.jsonl',
+      sessionId: 'demo',
       auto: true,
     });
   });

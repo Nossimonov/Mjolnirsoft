@@ -44,4 +44,6 @@ export interface Channel {
    * handle used to send.
    */
   join(id: string, role: Role, onMessage: MessageHandler): Participant;
+  /** Stop the channel and release any resources it holds. */
+  close(): void;
 }
