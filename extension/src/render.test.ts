@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderMarkdown, renderMessage } from './render.ts';
+import { renderMarkdown, renderMessage, hueForSender } from './render.ts';
 import type { Message } from '../../src/core/channel.ts';
 
 describe('renderMarkdown', () => {
@@ -39,5 +39,23 @@ describe('renderMessage', () => {
     const html = renderMessage({ from: 'orchestrator', type: 'task', payload: { id: 42 } });
     expect(html).toContain('orchestrator · task');
     expect(html).toContain('42');
+  });
+
+  it('colours the turn by its sender, keyed on `from`', () => {
+    const user = renderMessage({ from: 'vscode-view', type: 'text', payload: 'hi' });
+    expect(user).toContain(`hsl(${hueForSender('vscode-view')} `); // styled by the sender's hue
+    const worker = renderMessage({ from: 'demo-worker', type: 'result', payload: 'hi' });
+    expect(user).not.toBe(worker); // different senders render distinctly
+  });
+});
+
+describe('hueForSender', () => {
+  it('is stable for a given sender and within 0–359', () => {
+    expect(hueForSender('vscode-view')).toBe(hueForSender('vscode-view'));
+    for (const id of ['a', 'vscode-view', 'orchestrator', 'demo-worker']) {
+      const h = hueForSender(id);
+      expect(h).toBeGreaterThanOrEqual(0);
+      expect(h).toBeLessThan(360);
+    }
   });
 });
