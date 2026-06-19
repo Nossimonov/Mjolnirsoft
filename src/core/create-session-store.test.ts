@@ -17,7 +17,7 @@ describe('createSessionStore', () => {
 
   it('throws an actionable error on an unknown backend', () => {
     expect(() => createSessionStore({ storage: { backend: 'nope' } }))
-      .toThrow(/unknown storage backend: "nope" \(supported: local\)/);
+      .toThrow(/unknown storage backend: "nope" \(supported: local, git\)/);
   });
 
   it('round-trips a loaded local config into a working store (AC: local unchanged)', () => {

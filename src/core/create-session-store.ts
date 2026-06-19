@@ -1,5 +1,6 @@
 import type { ProjectConfig } from './project-config.ts';
 import { SessionStore, type SessionBackend, type SessionStoreOptions } from './session-store.ts';
+import { GitSessionStore } from './git-session-store.ts';
 
 /**
  * Mount the session-storage backend named by the project config. This factory
@@ -15,7 +16,9 @@ export function createSessionStore(
   switch (config.storage.backend) {
     case 'local':
       return new SessionStore(options);
+    case 'git':
+      return new GitSessionStore(options);
     default:
-      throw new Error(`unknown storage backend: "${config.storage.backend}" (supported: local)`);
+      throw new Error(`unknown storage backend: "${config.storage.backend}" (supported: local, git)`);
   }
 }
