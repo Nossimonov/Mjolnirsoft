@@ -16,17 +16,29 @@ describe('createClaudeCodeResponder', () => {
     const reply = await respond(task);
 
     expect(reply).toEqual({ type: 'result', payload: 'Created haiku.md with a haiku.' });
-    expect(run).toHaveBeenCalledWith('write a haiku to haiku.md', {
-      cwd: '/tmp/worker-1',
-      appendSystemPrompt: DEFAULT_WORKER_ROLE,
-    });
+    expect(run).toHaveBeenCalledWith(
+      'write a haiku to haiku.md',
+      expect.objectContaining({ cwd: '/tmp/worker-1', appendSystemPrompt: DEFAULT_WORKER_ROLE, resume: false }),
+    );
   });
 
   it('lets the caller override the appended worker-role prompt', async () => {
     const run = vi.fn().mockResolvedValue('done');
     const respond = createClaudeCodeResponder({ workdir: '/w', appendSystemPrompt: 'on branch X', run });
     await respond(task);
-    expect(run).toHaveBeenCalledWith(expect.any(String), { cwd: '/w', appendSystemPrompt: 'on branch X' });
+    expect(run).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ cwd: '/w', appendSystemPrompt: 'on branch X' }),
+    );
+  });
+
+  it('pins a Claude session: creates it on the first turn, resumes it on the next', async () => {
+    const run = vi.fn().mockResolvedValue('ok');
+    const respond = createClaudeCodeResponder({ workdir: '/w', claudeSessionId: 'fixed-uuid', run });
+    await respond(task);
+    await respond(task);
+    expect(run.mock.calls[0][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: false });
+    expect(run.mock.calls[1][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: true });
   });
 
   it('returns undefined when Claude Code produces no result', async () => {
@@ -43,8 +55,13 @@ describe('buildClaudeArgs', () => {
   });
 
   it('appends --append-system-prompt with the role text when given', () => {
-    const args = buildClaudeArgs('do it', 'be a worker');
+    const args = buildClaudeArgs('do it', { appendSystemPrompt: 'be a worker' });
     expect(args.slice(-2)).toEqual(['--append-system-prompt', 'be a worker']);
+  });
+
+  it('pins a new session with --session-id, and resumes an existing one with --resume', () => {
+    expect(buildClaudeArgs('go', { sessionId: 'sid' }).slice(-2)).toEqual(['--session-id', 'sid']);
+    expect(buildClaudeArgs('go', { sessionId: 'sid', resume: true }).slice(-2)).toEqual(['--resume', 'sid']);
   });
 });
 
