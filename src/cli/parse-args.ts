@@ -19,8 +19,10 @@ export class CliUsageError extends Error {}
 /**
  * Parse CLI arguments into {@link CliArgs}. The first positional is the required
  * role; the optional second is the participant id (defaulting to `<role>-1`).
- * `--log <path>` (or `-l`) selects a shared file-backed channel. Throws
- * {@link CliUsageError} on missing/invalid input.
+ * `--session <id>` (or `-s`) joins a shared, file-backed session by id (omit for
+ * an in-memory single-process channel); `--replay` requires a session, and
+ * `--auto` runs an automated worker. Throws {@link CliUsageError} on
+ * missing/invalid input.
  */
 export function parseArgs(argv: readonly string[]): CliArgs {
   const positional: string[] = [];
