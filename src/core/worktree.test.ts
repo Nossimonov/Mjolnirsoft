@@ -60,6 +60,24 @@ describe('WorktreeManager', () => {
     expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(headBefore); // main never moved
   });
 
+  it('captures worktree changes onto its branch, reporting nothing to commit when clean', () => {
+    const repo = initRepo();
+    const headBefore = git(repo, 'rev-parse', 'HEAD').trim();
+    const mgr = new WorktreeManager({ repoDir: repo });
+    const wt = mgr.create('cap');
+
+    expect(wt.commit('noop')).toBe(false); // fresh worktree — nothing to capture
+
+    writeFileSync(join(wt.path, 'feature.txt'), 'work\n');
+    expect(wt.commit('worker session cap')).toBe(true);
+    expect(git(repo, 'show', `${wt.branch}:feature.txt`)).toContain('work');
+    expect(git(repo, 'log', '-1', '--format=%s', wt.branch).trim()).toBe('worker session cap');
+
+    wt.remove();
+    expect(git(repo, 'rev-parse', '--verify', wt.branch).trim()).toMatch(/^[0-9a-f]{40}$/); // branch survives
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(headBefore); // main never moved
+  });
+
   it('rejects an invalid id, a duplicate worktree, and a non-repo', () => {
     const repo = initRepo();
     const mgr = new WorktreeManager({ repoDir: repo });
