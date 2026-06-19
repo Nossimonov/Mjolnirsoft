@@ -1,5 +1,5 @@
 {
   "storage": {
-    "backend": "local"
+    "backend": "git"
   }
 }
