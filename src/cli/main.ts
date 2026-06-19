@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Channel } from '../core/channel.ts';
 import { InMemoryChannel } from '../core/in-memory-channel.ts';
-import { SessionStore } from '../core/session-store.ts';
+import { createSessionStore } from '../core/create-session-store.ts';
+import { loadProjectConfig } from '../core/project-config.ts';
 import { parseArgs, CliUsageError, USAGE } from './parse-args.ts';
 import { loadLocalEnv } from './load-local-env.ts';
 import { hostSession } from './session-host.ts';
@@ -27,7 +28,7 @@ async function main(argv: readonly string[]): Promise<void> {
   }
 
   const channel: Channel = args.sessionId
-    ? new SessionStore().open(args.sessionId, { replay: args.replay })
+    ? createSessionStore(loadProjectConfig()).open(args.sessionId, { replay: args.replay })
     : new InMemoryChannel();
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 
