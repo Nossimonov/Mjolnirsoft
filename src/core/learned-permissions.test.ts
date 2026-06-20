@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   learnedRuleFor,
   loadLearnedAllowRules,
+  matchesLearnedRule,
   recordLearnedRule,
   LEARNED_PERMISSIONS_RELPATH,
 } from './learned-permissions.ts';
@@ -82,5 +83,38 @@ describe('loadLearnedAllowRules / recordLearnedRule', () => {
     mkdirSync(join(projectDir, '.mjolnir'), { recursive: true });
     writeFileSync(join(projectDir, LEARNED_PERMISSIONS_RELPATH), JSON.stringify({ allow: ['Read', 42, null, 'Bash'] }));
     expect(loadLearnedAllowRules(projectDir)).toEqual(['Read', 'Bash']);
+  });
+});
+
+describe('matchesLearnedRule', () => {
+  let projectDir: string;
+
+  beforeEach(() => {
+    projectDir = mkdtempSync(join(tmpdir(), 'mjolnir-perms-'));
+  });
+  afterEach(() => {
+    rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  it('returns the matched rule for a request the parent-dir rule already covers', () => {
+    recordLearnedRule(projectDir, 'Write', { file_path: 'C:/x/y.txt' });
+    // A sibling in the same directory derives the same Write(C:/x/**) rule → match.
+    expect(matchesLearnedRule(projectDir, 'Write', { file_path: 'C:/x/z.txt' })).toBe('Write(C:/x/**)');
+  });
+
+  it('returns undefined for a request no learned rule covers', () => {
+    recordLearnedRule(projectDir, 'Write', { file_path: 'C:/x/y.txt' });
+    // Different directory and a different tool both derive non-recorded rules.
+    expect(matchesLearnedRule(projectDir, 'Write', { file_path: 'C:/other/z.txt' })).toBeUndefined();
+    expect(matchesLearnedRule(projectDir, 'Bash', { command: 'npm test' })).toBeUndefined();
+  });
+
+  it('returns undefined when nothing has been learned', () => {
+    expect(matchesLearnedRule(projectDir, 'Write', { file_path: 'C:/x/y.txt' })).toBeUndefined();
+  });
+
+  it('matches a remembered command at its leading-token prefix', () => {
+    recordLearnedRule(projectDir, 'Bash', { command: 'npm install left-pad' });
+    expect(matchesLearnedRule(projectDir, 'Bash', { command: 'npm test' })).toBe('Bash(npm *)');
   });
 });

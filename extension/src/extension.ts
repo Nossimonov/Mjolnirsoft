@@ -7,7 +7,7 @@ import { WorktreeManager, type Worktree } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runWorker } from '../../src/worker/worker-runtime.ts';
 import { createClaudeCodeResponder } from '../../src/worker/claude-code-responder.ts';
-import { loadLearnedAllowRules, recordLearnedRule } from '../../src/core/learned-permissions.ts';
+import { recordLearnedRule } from '../../src/core/learned-permissions.ts';
 import {
   INTERACTION_DECISION,
   INTERACTION_REQUEST,
@@ -99,8 +99,15 @@ async function startWorkerSession(
   // Give the worker an escalation path: a per-session MCP config wiring Claude's
   // `--permission-prompt-tool` to our server, which bridges a gated tool use to
   // this session's channel so the human can allow/deny it in the panel (#66).
+  // The server also reads the project's learned "Always" rules to auto-allow a
+  // remembered action without prompting, so it's given the project dir (#70).
   const permParticipantId = `${sessionId}-perms`;
-  const mcpConfigPath = writePermissionMcpConfig(context, store.logPath(sessionId), permParticipantId);
+  const mcpConfigPath = writePermissionMcpConfig(
+    context,
+    store.logPath(sessionId),
+    permParticipantId,
+    folder.uri.fsPath,
+  );
 
   // Spawn the worker in-process: it joins the session and answers each message
   // by running a headless Claude Code agent with the worktree as its workspace.
@@ -112,9 +119,6 @@ async function startWorkerSession(
       workdir: worktree.path,
       permissionPromptTool: PERMISSION_PROMPT_TOOL,
       mcpConfigPath,
-      // Read learned "Always" rules per turn from the project (not the worktree),
-      // so rules from prior sessions — and this session's own — auto-approve (#70).
-      loadLearnedRules: () => loadLearnedAllowRules(folder.uri.fsPath),
     }),
   );
 
@@ -320,13 +324,15 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
  * Write a per-session MCP config that wires Claude's `--permission-prompt-tool`
  * to our bundled permission server, and return its path. The server is launched
  * with the extension host's own Node (Electron run as Node, so no separate Node
- * on PATH is needed) and told — via env — which session log to bridge over and
- * what channel id to use. Returns the temp path; the caller deletes it on close.
+ * on PATH is needed) and told — via env — which session log to bridge over, what
+ * channel id to use, and which project dir holds the learned "Always" rules it
+ * consults to auto-allow (#70). Returns the temp path; the caller deletes it on close.
  */
 function writePermissionMcpConfig(
   context: vscode.ExtensionContext,
   sessionLogPath: string,
   participantId: string,
+  projectDir: string,
 ): string {
   const serverPath = vscode.Uri.joinPath(context.extensionUri, 'dist', 'permission-mcp-server.js').fsPath;
   const config = {
@@ -338,6 +344,7 @@ function writePermissionMcpConfig(
           ELECTRON_RUN_AS_NODE: '1',
           MJOLNIR_SESSION_LOG: sessionLogPath,
           MJOLNIR_PERM_ID: participantId,
+          MJOLNIR_PROJECT_DIR: projectDir,
         },
       },
     },

@@ -5,18 +5,24 @@
  * "Always" is a third choice that allows the action *and* remembers it, so the
  * same action stops escalating in future. There is no Claude "remember" feature
  * behind this: Claude's verdict stays a plain `allow`; the memory is entirely our
- * side-effect. On an "Always" decision we derive a `--settings` allow-rule from
- * the request and persist it to a gitignored, per-project file; a later worker
- * spawn merges those rules into its policy (see `buildWorkerSettings`), and since
- * allow rules are checked before the permission-prompt tool, the action no longer
- * reaches the human — the allow-list has *learned* from the decision.
+ * side-effect. On an "Always" decision we derive an allow-rule string from the
+ * request and persist it to a gitignored, per-project file.
+ *
+ * The remembering is consumed in *our* permission MCP server, not in Claude's
+ * `--settings`: when Claude calls the `approve` tool, the server derives the rule
+ * for the request and, if it matches a persisted one, returns `allow` itself —
+ * no human prompt. We can't lean on a `--settings` allow rule for this, because
+ * the main "Always" case is a write *outside* the worktree, which Claude gates at
+ * its access layer before any allow rule is consulted (verified live for #70); a
+ * learned allow rule never reaches it. Doing the match ourselves works for any
+ * tool, needs no permission-mode change, and honours the parent-dir granularity.
  *
  * Granularity is **parent-directory / prefix** (the decision recorded for #70):
  * an "Always" on a write to `C:/x/y.txt` remembers `Write(C:/x/**)`, not just that
  * one file — fewer future prompts, at the cost of auto-approving siblings in the
- * same directory the human never explicitly saw. The `deny` floor in
- * `WORKER_PERMISSIONS` still wins over any learned `allow`, so a broadened rule
- * can't unlock a denied foot-gun.
+ * same directory the human never explicitly saw. The `deny` floor stays in the
+ * worker's `--settings`, and Claude enforces deny *before* calling `approve`, so a
+ * denied foot-gun never reaches the server's auto-allow path.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -102,6 +108,22 @@ export function loadLearnedAllowRules(projectDir: string): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Decide whether a tool request is already remembered: derive its rule at the
+ * same parent-dir/prefix granularity used to record one, and return that rule
+ * when it's present in the persisted set, else `undefined`. The match is exact
+ * string equality against the recorded rules — symmetric with {@link recordLearnedRule}'s
+ * dedup — so an "Always" on `C:/x/y.txt` (recorded as `Write(C:/x/**)`)
+ * auto-allows any sibling in `C:/x`, the granularity the #70 decision intends.
+ * Re-reads the file each call so a rule learned earlier in the session also
+ * matches; the read is cheap and the file is small.
+ */
+export function matchesLearnedRule(projectDir: string, toolName: string, input: unknown): string | undefined {
+  const rule = learnedRuleFor(toolName, input);
+  if (!rule) return undefined;
+  return loadLearnedAllowRules(projectDir).includes(rule) ? rule : undefined;
 }
 
 /**

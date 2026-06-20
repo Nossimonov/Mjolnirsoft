@@ -13,16 +13,20 @@
  * Configured entirely by env so the same binary serves any session:
  *   MJOLNIR_SESSION_LOG  — absolute path to the session's JSONL channel log
  *   MJOLNIR_PERM_ID      — this participant's channel id (unique per session)
+ *   MJOLNIR_PROJECT_DIR  — project root holding learned "Always" rules (#70);
+ *                          a request matching one is auto-allowed without a
+ *                          prompt. Unset disables auto-allow (every request asks).
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { FileChannel } from '../core/file-channel.ts';
-import { decisionToVerdict, type InteractionRequest } from '../core/interaction.ts';
 import { createPermissionBridge } from './permission-bridge.ts';
+import { approveToolUse } from './permission-approval.ts';
 
 const logPath = process.env.MJOLNIR_SESSION_LOG;
 const participantId = process.env.MJOLNIR_PERM_ID ?? 'perms';
+const projectDir = process.env.MJOLNIR_PROJECT_DIR;
 if (!logPath) {
   process.stderr.write('permission-mcp-server: MJOLNIR_SESSION_LOG is required\n');
   process.exit(1);
@@ -56,14 +60,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const args = (req.params.arguments ?? {}) as { tool_name?: string; input?: unknown; tool_use_id?: string };
   const toolName = args.tool_name ?? 'unknown';
-  const decision = await bridge.request(toolName, args.input, args.tool_use_id);
-  const request: InteractionRequest = {
-    requestId: decision.requestId,
+  // Re-read learned rules per request (cheap) so a rule learned earlier this
+  // session also auto-allows; on no match this escalates exactly as #66 did.
+  const verdict = await approveToolUse(
+    { projectDir, bridge, postAudit: (text) => participant.send({ type: 'text', payload: text }) },
     toolName,
-    input: args.input,
-    toolUseId: args.tool_use_id,
-  };
-  return { content: [{ type: 'text', text: JSON.stringify(decisionToVerdict(request, decision)) }] };
+    args.input,
+    args.tool_use_id,
+  );
+  return { content: [{ type: 'text', text: JSON.stringify(verdict) }] };
 });
 
 // Keep references alive for the lifetime of the stdio connection.
