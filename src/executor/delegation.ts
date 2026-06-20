@@ -1,5 +1,6 @@
 import type { Channel, Message, Role } from '../core/channel.ts';
 import { acknowledge, runExecutor, type Respond } from './executor-runtime.ts';
+import { REASONING_DIGEST } from './reasoning-digest.ts';
 
 /**
  * Agent-to-agent delegation (#88, rung 2 of #85): the transport-free primitive
@@ -84,7 +85,14 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
       // through the reporter. Every message it hears is from the delegate (a
       // channel never echoes a sender to itself); the `from` guard documents that.
       const driver = sub.join(spawnerId, spawnerRole, (message) => {
-        if (message.from === id) reporter.send({ type: message.type, payload: message.payload });
+        // The delegate's reasoning digest (#110) stays on its own sub-channel log
+        // for later post-mortem; only its distilled *report* (the result/error)
+        // crosses up to the spawner, so the spawner isn't fed the delegate's full
+        // reasoning as a turn to react to. Every other message here is from the
+        // delegate (a channel never echoes a sender to itself).
+        if (message.from === id && message.type !== REASONING_DIGEST) {
+          reporter.send({ type: message.type, payload: message.payload });
+        }
       });
 
       delegates.set(id, {

@@ -126,6 +126,18 @@ function clearReasoning(): void {
   trailSpanKind = null;
 }
 
+function discardReasoning(): void {
+  // Remove the in-progress ephemeral trail entirely (not just collapse it): the
+  // durable reasoning digest (#110) now stands in its place and survives reload,
+  // so keeping the live copy would double-show the same reasoning for this turn.
+  if (currentTrail) {
+    currentTrail.remove();
+    currentTrail = null;
+  }
+  trailSpan = null;
+  trailSpanKind = null;
+}
+
 // Show how many messages are waiting behind the in-flight turn. The executor
 // serializes turns (#100), so a message typed mid-turn is queued, not run now;
 // the cue keeps that visible rather than letting it look ignored. Count 0 hides.
@@ -165,6 +177,8 @@ window.addEventListener('message', (event: MessageEvent) => {
     appendReasoning(data.event);
   } else if (data.kind === 'reasoning-clear') {
     clearReasoning();
+  } else if (data.kind === 'reasoning-discard') {
+    discardReasoning();
   } else if (data.kind === 'queued') {
     setQueued(data.count ?? 0);
   } else if (data.kind === 'notice' && notice) {

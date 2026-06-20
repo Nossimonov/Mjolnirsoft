@@ -17,6 +17,7 @@ import {
   type InteractionRequest,
 } from '../../src/core/interaction.ts';
 import { DELEGATION_REQUEST, DELEGATION_RESPONSE } from '../../src/core/delegation-protocol.ts';
+import { REASONING_DIGEST } from '../../src/executor/reasoning-digest.ts';
 import { renderMessage, renderInteractionRequest } from './render.ts';
 
 // The MCP server is named `perm` in the generated config, so its `approve` tool
@@ -278,6 +279,25 @@ function openSessionPanel(
       void panel.webview.postMessage({ kind: 'message', html: renderInteractionRequest(request) });
       return;
     }
+    // The durable reasoning digest (#110) lands just before the turn's result.
+    // Live, it supersedes the ephemeral #109 trail — so discard that in-progress
+    // trail (the digest now stands in its place, and it survives reload/replay)
+    // and render the digest as its own collapsed element. It must NOT settle the
+    // turn: the `result`, which follows it, does. On replay there is no live trail,
+    // so the discard is a harmless no-op and the digest is the only reasoning shown.
+    if (message.type === REASONING_DIGEST) {
+      // Only *this executor's own* digest supersedes the live trail. Guarding the
+      // discard on the sender keeps a digest from any other id (none reaches here
+      // today — delegation keeps a delegate's digest off the up-bridge — but the
+      // guard makes the invariant explicit) from wiping the executor's in-progress
+      // trail. The render itself is ungated: on a viewer/replay panel `executorId`
+      // is undefined, and the digest must still show.
+      if (message.from === executorId) {
+        void panel.webview.postMessage({ kind: 'reasoning-discard' });
+      }
+      void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
+      return;
+    }
     void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
     // Only the executor's own reply settles a sent turn. A bridged delegate
     // report (#93) — e.g. an evaluator's finding — renders above, but the executor
@@ -459,6 +479,17 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   .tool-chip { display: inline-block; background: var(--vscode-badge-background, #4d4d4d);
                color: var(--vscode-badge-foreground, #fff); border-radius: 3px; padding: 0 0.4rem;
                margin: 0.1rem 0.2rem; font-size: 0.92em; font-style: normal; }
+  /* The durable reasoning digest (#110): the persistent counterpart to the live
+     trail, collapsed by default on replay; each tool-use is its own nested twisty
+     showing input + a trimmed result. */
+  .reasoning-digest .from { font-style: italic; }
+  .reasoning-digest-trail > summary { cursor: pointer; opacity: 0.75; font-style: italic; user-select: none; }
+  .reasoning-digest-trail .digest-body { margin-top: 0.35rem; }
+  .digest-thinking { white-space: pre-wrap; word-break: break-word; opacity: 0.6; font-style: italic;
+                     margin: 0.25rem 0; }
+  .digest-tool { margin: 0.25rem 0; }
+  .digest-tool > summary { cursor: pointer; user-select: none; }
+  .digest-label { font-size: 0.8em; opacity: 0.7; margin-top: 0.25rem; }
   #queued { padding: 0.25rem 1rem; font-size: 0.85em; opacity: 0.75; }
   #queued[hidden] { display: none; }
   #notice { padding: 0.25rem 1rem; font-size: 0.85em; color: var(--vscode-inputValidation-warningForeground, #cca700); }

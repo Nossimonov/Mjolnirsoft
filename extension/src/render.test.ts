@@ -228,3 +228,59 @@ describe('hueForSender', () => {
     }
   });
 });
+
+describe('renderMessage — reasoning digest (#110)', () => {
+  const digestMessage = (entries: unknown[]): Message => ({
+    from: 'demo-executor',
+    role: 'executor',
+    type: 'reasoning-digest',
+    payload: { entries },
+  });
+
+  it('renders the digest as a collapsed, expandable <details> trail (not the JSON fallback)', () => {
+    const html = renderMessage(digestMessage([{ kind: 'thinking', text: 'is 91 prime?' }]));
+    // A collapsed twisty (no `open` attribute), labelled as reasoning — the durable
+    // counterpart to the live trail, available on replay.
+    expect(html).toContain('class="reasoning-digest-trail"');
+    expect(html).toContain('<summary>');
+    expect(html).not.toContain('<details open');
+    expect(html).not.toContain('```json'); // never the structured-payload fallback
+  });
+
+  it('renders a thinking block verbatim (escaped), dimmed', () => {
+    const html = renderMessage(digestMessage([{ kind: 'thinking', text: 'check <tag> & flag' }]));
+    expect(html).toContain('class="digest-thinking"');
+    expect(html).toContain('check &lt;tag&gt; &amp; flag'); // verbatim, HTML-escaped
+  });
+
+  it('renders a tool-use as a nested expandable detail with its input and trimmed result', () => {
+    const html = renderMessage(
+      digestMessage([
+        { kind: 'tool', name: 'Bash', input: { command: 'factor 91' }, result: '91: 7 13', truncated: false },
+      ]),
+    );
+    expect(html).toContain('class="digest-tool"');
+    expect(html).toContain('⚙ Bash');
+    expect(html).toContain('factor 91'); // the actual command is visible for post-mortem
+    expect(html).toContain('result:');
+    expect(html).toContain('91: 7 13');
+  });
+
+  it('marks a trimmed tool result so a reader knows output was elided', () => {
+    const html = renderMessage(
+      digestMessage([{ kind: 'tool', name: 'Read', input: { file: 'a.ts' }, result: 'head…tail', truncated: true }]),
+    );
+    expect(html).toContain('result (trimmed):');
+  });
+
+  it('summarises the trail by counts and omits the result line for a tool that had not returned', () => {
+    const html = renderMessage(
+      digestMessage([
+        { kind: 'thinking', text: 'plan' },
+        { kind: 'tool', name: 'Write', input: { file: 'x' } },
+      ]),
+    );
+    expect(html).toContain('1 thinking, 1 tool');
+    expect(html).not.toContain('result:'); // no result captured → no result block
+  });
+});

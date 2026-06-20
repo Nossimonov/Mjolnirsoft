@@ -5,6 +5,7 @@ import type { Message } from '../core/channel.ts';
 import { INTERACTION_DECISION, INTERACTION_REQUEST } from '../core/interaction.ts';
 import { DELEGATION_REQUEST, DELEGATION_RESPONSE } from '../core/delegation-protocol.ts';
 import { composeAgentInstructions } from '../core/agent-instructions.ts';
+import { createReasoningDigestAssembler, REASONING_DIGEST, type ReasoningDigest } from './reasoning-digest.ts';
 import type { Respond } from './executor-runtime.ts';
 
 /**
@@ -58,6 +59,14 @@ export interface ClaudeRunArgs {
    * untouched. Omit to ignore the stream and only take the final result.
    */
   readonly onEvent?: (event: ViewEvent) => void;
+  /**
+   * Digest seam (#110): called once when the run completes with the assembled,
+   * **block-level** {@link ReasoningDigest} (whole thinking blocks + tool-uses
+   * with action detail). Unlike {@link onEvent}'s per-token, off-channel stream,
+   * this is the *durable* trail the responder persists to the channel alongside
+   * the result. Omit to skip digest assembly entirely (no per-line overhead).
+   */
+  readonly onDigest?: (digest: ReasoningDigest) => void;
 }
 
 /**
@@ -117,6 +126,12 @@ export interface StreamReaderHandlers {
   readonly onEvent: (event: ViewEvent) => void;
   /** The raw JSON of the terminal `result` line, captured for {@link interpretClaudeResult}. */
   readonly onResult: (raw: string) => void;
+  /**
+   * Each complete raw line, before parsing (#110). The digest assembler taps this
+   * to see the lower-level events `parseStreamEvent` discards — tool-input deltas,
+   * `tool_result` lines — that the block-level digest needs. Optional; omit to skip.
+   */
+  readonly onLine?: (line: string) => void;
 }
 
 /**
@@ -136,6 +151,7 @@ export function createStreamReader(handlers: StreamReaderHandlers): {
 } {
   let buffer = '';
   const handleLine = (line: string): void => {
+    handlers.onLine?.(line); // raw tap for the digest assembler (#110), before parsing
     const event = parseStreamEvent(line);
     if (!event) return;
     if (event.kind === 'result') handlers.onResult(event.raw);
@@ -287,7 +303,7 @@ export function interpretClaudeResult(stdout: string, stderr: string, code: numb
  */
 export const runClaudeCodeCli: RunClaudeCode = (
   prompt,
-  { cwd, appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath, onEvent },
+  { cwd, appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath, onEvent, onDigest },
 ) =>
   new Promise((resolve, reject) => {
     const args = buildClaudeArgs(prompt, {
@@ -310,11 +326,17 @@ export const runClaudeCodeCli: RunClaudeCode = (
     // a bare "exited with code N".
     let resultRaw = '';
     let stdout = '';
+    // Assemble the durable, block-level reasoning digest (#110) only when a
+    // consumer wants it — no per-line work otherwise. It taps the raw stream via
+    // `onLine` to see the tool-input deltas and `tool_result` lines the view's
+    // `parseStreamEvent` discards.
+    const digest = onDigest ? createReasoningDigestAssembler() : undefined;
     const reader = createStreamReader({
       onEvent: (event) => onEvent?.(event),
       onResult: (raw) => {
         resultRaw = raw;
       },
+      onLine: digest ? (line) => digest.feed(line) : undefined,
     });
     // Decode stdout through a StringDecoder so a multi-byte UTF-8 char split across
     // two `data` chunks isn't mangled into U+FFFD — it would otherwise corrupt a
@@ -336,6 +358,7 @@ export const runClaudeCodeCli: RunClaudeCode = (
         reader.feed(tail);
       }
       reader.flush(); // parse a final line with no trailing newline (the `result` line often is one)
+      if (digest && onDigest) onDigest(digest.build()); // hand the assembled trail back for persistence (#110)
       try {
         resolve(interpretClaudeResult(resultRaw || stdout, stderr, code));
       } catch (error) {
@@ -433,6 +456,9 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     // from — the authoritative architect vs. a peer/subordinate agent (#86).
     const prompt = `${senderAttribution(message)}\n\n${body}`;
     let result: string;
+    // The turn's assembled reasoning trail (#110), captured from the run's stream;
+    // posted to the channel alongside the result so it survives reload/replay.
+    let digest: ReasoningDigest | undefined;
     try {
       result = (
         await run(prompt, {
@@ -443,6 +469,9 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
           permissionPromptTool,
           mcpConfigPath,
           onEvent,
+          onDigest: (d) => {
+            digest = d;
+          },
         })
       ).trim();
     } catch (error) {
@@ -453,6 +482,20 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
       throw error;
     }
     started = true;
-    return result ? { type: 'result', payload: result } : undefined;
+    // A resultless turn replies with nothing, exactly as before — the digest rides
+    // *with* a result, never alone: a lone digest message wouldn't settle the
+    // turn's "working" indicator (only the `result` does, #100), so it would spin.
+    if (!result) return undefined;
+    // Post the durable digest *before* the result so the view renders the
+    // (collapsed) reasoning trail above the clean result, matching the live
+    // layout. Skip an empty digest (a turn with no thinking/tools) — no log noise;
+    // then the reply is the bare result object, exactly as a non-streaming run (#110).
+    if (digest && digest.entries.length > 0) {
+      return [
+        { type: REASONING_DIGEST, payload: digest },
+        { type: 'result', payload: result },
+      ];
+    }
+    return { type: 'result', payload: result };
   };
 }

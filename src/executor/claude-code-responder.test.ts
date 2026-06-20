@@ -13,6 +13,7 @@ import {
 } from './claude-code-responder.ts';
 import { isAuthError } from './auth-error.ts';
 import { SHARED_CORE, EXECUTOR_INSERT } from '../core/agent-instructions.ts';
+import type { ReasoningDigest } from './reasoning-digest.ts';
 
 const task = { from: 'orchestrator', role: 'planner', type: 'text', payload: 'write a haiku to haiku.md' } as const;
 
@@ -295,8 +296,54 @@ describe('createClaudeCodeResponder', () => {
     expect(reply).toEqual({ type: 'result', payload: 'No, 7 × 13.' });
   });
 
+  it('persists the assembled reasoning digest as its own message, before the result (#110)', async () => {
+    // The injected run plays the streaming CLI: it hands back a block-level digest
+    // through the onDigest seam, then returns the final result text.
+    const digest = {
+      entries: [
+        { kind: 'thinking', text: 'is 91 prime?' },
+        { kind: 'tool', name: 'Bash', input: { command: 'factor 91' }, result: '91: 7 13\n' },
+      ],
+    } as const;
+    const run = vi.fn(async (_prompt: string, options: { onDigest?: (d: ReasoningDigest) => void }) => {
+      options.onDigest?.(digest);
+      return 'No, 7 × 13.';
+    });
+    const respond = createClaudeCodeResponder({ workdir: '/w', run });
+
+    const reply = await respond(task);
+
+    // Two messages, in order: the durable digest (distinct type) then the result.
+    expect(reply).toEqual([
+      { type: 'reasoning-digest', payload: digest },
+      { type: 'result', payload: 'No, 7 × 13.' },
+    ]);
+  });
+
+  it('omits the digest message when the turn assembled no reasoning (no log noise) (#110)', async () => {
+    // An empty digest (no thinking, no tools) must not post a message — the reply
+    // stays the bare result object, exactly as a non-streaming run.
+    const run = vi.fn(async (_prompt: string, options: { onDigest?: (d: ReasoningDigest) => void }) => {
+      options.onDigest?.({ entries: [] });
+      return 'done';
+    });
+    const respond = createClaudeCodeResponder({ workdir: '/w', run });
+    expect(await respond(task)).toEqual({ type: 'result', payload: 'done' });
+  });
+
   it('returns undefined when Claude Code produces no result', async () => {
     const respond = createClaudeCodeResponder({ workdir: '/tmp/executor-1', run: async () => '   ' });
+    expect(await respond(task)).toBeUndefined();
+  });
+
+  it('drops the digest on a resultless turn — it rides with a result, never alone (#110)', async () => {
+    // A lone digest message wouldn't settle the turn's "working" indicator (only
+    // the result does, #100), so a resultless turn replies with nothing — as before.
+    const run = vi.fn(async (_prompt: string, options: { onDigest?: (d: ReasoningDigest) => void }) => {
+      options.onDigest?.({ entries: [{ kind: 'thinking', text: 'hm' }] });
+      return '   '; // trims to empty
+    });
+    const respond = createClaudeCodeResponder({ workdir: '/w', run });
     expect(await respond(task)).toBeUndefined();
   });
 

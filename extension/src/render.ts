@@ -2,6 +2,7 @@ import MarkdownIt from 'markdown-it';
 import type { Message } from '../../src/core/channel.ts';
 import type { InteractionRequest } from '../../src/core/interaction.ts';
 import { isAuthError } from '../../src/executor/auth-error.ts';
+import { REASONING_DIGEST, type ReasoningDigest, type DigestEntry } from '../../src/executor/reasoning-digest.ts';
 
 // Two Markdown renderers that differ only in how a *single* newline is treated.
 //
@@ -73,6 +74,10 @@ export function hueForSender(from: string): number {
 
 /** Render one channel message as an attributed transcript turn (Markdown + Mermaid). */
 export function renderMessage(message: Message): string {
+  // The durable reasoning digest (#110) is the persistent counterpart to #109's
+  // live trail — rendered as its own collapsed, expandable element, available on
+  // replay and to a later log-reader, distinct from the clean result below it.
+  if (message.type === REASONING_DIGEST) return renderReasoningDigest(message);
   const body =
     typeof message.payload === 'string'
       ? message.payload
@@ -105,6 +110,50 @@ export function renderMessage(message: Message): string {
   const hue = hueForSender(message.from);
   const style = `border-inline-start:3px solid hsl(${hue} 70% 55%);background:hsl(${hue} 70% 55% / 0.08)`;
   return `<div class="turn" style="${style}"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}</div>${renderBody(body)}</div>`;
+}
+
+/**
+ * Render the durable reasoning digest (#110) as a collapsed, expandable trail —
+ * the persistent counterpart to #109's live `💭 Thinking`, available on replay and
+ * to a later log-reader. Thinking blocks render verbatim (dimmed); each tool-use is
+ * its own nested, expandable detail showing the input (the actual query/command)
+ * and a trimmed result, so a post-mortem can see what was searched without the
+ * conversation drowning in it. Collapsed by default so the clean result stays the
+ * focus; one twisty-click reveals the reasoning.
+ */
+function renderReasoningDigest(message: Message): string {
+  const entries = (message.payload as ReasoningDigest | undefined)?.entries ?? [];
+  const hue = hueForSender(message.from);
+  const style = `border-inline-start:3px solid hsl(${hue} 70% 55%);background:hsl(${hue} 70% 55% / 0.08)`;
+  const thinkCount = entries.filter((e) => e.kind === 'thinking').length;
+  const toolCount = entries.filter((e) => e.kind === 'tool').length;
+  const summary = `💭 Reasoning — ${thinkCount} thinking, ${toolCount} tool${toolCount === 1 ? '' : 's'}`;
+  return (
+    `<div class="turn reasoning-digest" style="${style}">` +
+    `<div class="from">${escapeHtml(message.from)} · reasoning</div>` +
+    `<details class="reasoning-digest-trail"><summary>${escapeHtml(summary)}</summary>` +
+    `<div class="digest-body">${entries.map(renderDigestEntry).join('')}</div>` +
+    `</details></div>`
+  );
+}
+
+/** One digest step: a verbatim thinking block, or a tool-use with its action detail. */
+function renderDigestEntry(entry: DigestEntry): string {
+  if (entry.kind === 'thinking') {
+    return `<div class="digest-thinking">${escapeHtml(entry.text)}</div>`;
+  }
+  const result =
+    entry.result !== undefined
+      ? `<div class="digest-label">result${entry.truncated ? ' (trimmed)' : ''}:</div>` +
+        `<pre class="interaction-input">${escapeHtml(entry.result)}</pre>`
+      : '';
+  return (
+    `<details class="digest-tool"><summary>⚙ ${escapeHtml(entry.name)}</summary>` +
+    `<div class="digest-label">input:</div>` +
+    `<pre class="interaction-input">${escapeHtml(previewInput(entry.input))}</pre>` +
+    result +
+    `</details>`
+  );
 }
 
 /**
