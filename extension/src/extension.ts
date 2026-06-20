@@ -153,6 +153,7 @@ async function startExecutorSession(
 
   openSessionPanel(context, store, sessionId, folder.uri.fsPath, {
     executorAttached: true,
+    executorId,
     onDispose: () => {
       delegationHost.close();
       executor.close();
@@ -202,9 +203,13 @@ function openSessionPanel(
   store: SessionStore,
   sessionId: string,
   projectDir: string,
-  options: { onDispose?: () => void; executorAttached?: boolean } = {},
+  options: { onDispose?: () => void; executorAttached?: boolean; executorId?: string } = {},
 ): void {
   const executorAttached = options.executorAttached ?? false;
+  // The executor whose replies settle a sent turn. Only this participant's
+  // messages advance the queue/indicator — a bridged delegate report (#93) is
+  // someone else's id, so it renders but never counts as a turn completion (#100).
+  const executorId = options.executorId;
   const panel = vscode.window.createWebviewPanel(
     'mjolnirsoftSessionView',
     `Session: ${sessionId}`,
@@ -250,6 +255,12 @@ function openSessionPanel(
       return;
     }
     void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
+    // Only the executor's own reply settles a sent turn. A bridged delegate
+    // report (#93) — e.g. an evaluator's finding — renders above, but the executor
+    // is still mid-turn (about to react to it), so it must not advance the queue or
+    // flip the indicator off (#100). Anything that isn't the executor's reply
+    // renders and stops here.
+    if (message.from !== executorId) return;
     // A reply settles the in-flight turn. With serialization (#100) the executor
     // runs queued turns one at a time, so if more were sent while this one ran the
     // next now starts: keep "working" on and drop the queued count by one. Only
