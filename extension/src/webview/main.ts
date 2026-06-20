@@ -1,5 +1,6 @@
 import mermaid from 'mermaid';
 import { formatElapsed } from '../elapsed.ts';
+import type { ViewEvent } from '../../../src/executor/claude-code-responder.ts';
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void };
 
@@ -10,6 +11,10 @@ const content = document.getElementById('content');
 const input = document.getElementById('input') as HTMLTextAreaElement | null;
 const send = document.getElementById('send');
 const working = document.getElementById('working');
+const workingHeader = document.getElementById('working-header');
+const reasoningThinking = document.getElementById('reasoning-thinking');
+const reasoningThinkingText = document.getElementById('reasoning-thinking-text');
+const reasoningBody = document.getElementById('reasoning-body');
 const queued = document.getElementById('queued');
 const notice = document.getElementById('notice');
 
@@ -20,8 +25,8 @@ let workingSince: number | null = null;
 let tick: ReturnType<typeof setInterval> | null = null;
 
 function renderWorking(): void {
-  if (!working || workingSince === null) return;
-  working.textContent = `● executor is working… ${formatElapsed(Date.now() - workingSince)}`;
+  if (!workingHeader || workingSince === null) return;
+  workingHeader.textContent = `● executor is working… ${formatElapsed(Date.now() - workingSince)}`;
 }
 
 function startWorking(): void {
@@ -40,6 +45,52 @@ function stopWorking(): void {
     tick = null;
   }
   working?.setAttribute('hidden', '');
+  // The turn is over — drop its ephemeral live stream so a reopened "working"
+  // block (next turn) never inherits the previous turn's thinking/text (#109).
+  clearReasoning();
+}
+
+// The executor's live reasoning (#109) streams into the in-progress block as
+// ephemeral host posts (never from the channel, never logged). Thinking tokens
+// accumulate in a dimmed block; answer text and inline tool chips build the body
+// in arrival order. `currentText` is the running text span the next text delta
+// extends — reset to null by a tool chip so post-tool text starts after it.
+let currentText: HTMLElement | null = null;
+
+function appendReasoning(event: ViewEvent): void {
+  if (event.kind === 'thinking') {
+    // Some CLI builds stream `thinking_delta` with the reasoning text redacted to
+    // empty (only an estimated-token count). Skip those so an empty "thinking…"
+    // block never appears; when real thinking text streams, it renders unchanged.
+    if (!event.text) return;
+    if (reasoningThinking) reasoningThinking.removeAttribute('hidden');
+    if (reasoningThinkingText) reasoningThinkingText.textContent += event.text;
+  } else if (event.kind === 'text') {
+    if (!reasoningBody) return;
+    if (!currentText) {
+      currentText = document.createElement('span');
+      currentText.className = 'reasoning-text';
+      reasoningBody.appendChild(currentText);
+    }
+    currentText.textContent += event.text;
+  } else if (event.kind === 'tool-use') {
+    if (!reasoningBody) return;
+    const chip = document.createElement('span');
+    chip.className = 'tool-chip';
+    chip.textContent = `⚙ ${event.name}`;
+    reasoningBody.appendChild(chip);
+    currentText = null; // text after a tool starts a fresh span past the chip
+  }
+  // Keep the latest stream in view as it grows.
+  const reasoning = document.getElementById('reasoning');
+  if (reasoning) reasoning.scrollTop = reasoning.scrollHeight;
+}
+
+function clearReasoning(): void {
+  currentText = null;
+  if (reasoningThinking) reasoningThinking.setAttribute('hidden', '');
+  if (reasoningThinkingText) reasoningThinkingText.textContent = '';
+  if (reasoningBody) reasoningBody.textContent = '';
 }
 
 // Show how many messages are waiting behind the in-flight turn. The executor
@@ -62,7 +113,14 @@ function setQueued(count: number): void {
 // attached), so the webview just renders what it's told. Append messages and
 // render any new Mermaid diagrams.
 window.addEventListener('message', (event: MessageEvent) => {
-  const data = event.data as { kind?: string; html?: string; on?: boolean; text?: string; count?: number };
+  const data = event.data as {
+    kind?: string;
+    html?: string;
+    on?: boolean;
+    text?: string;
+    count?: number;
+    event?: ViewEvent;
+  };
   if (data.kind === 'message' && data.html && content) {
     content.insertAdjacentHTML('beforeend', data.html);
     void mermaid.run();
@@ -70,6 +128,10 @@ window.addEventListener('message', (event: MessageEvent) => {
   } else if (data.kind === 'working') {
     if (data.on) startWorking();
     else stopWorking();
+  } else if (data.kind === 'reasoning' && data.event) {
+    appendReasoning(data.event);
+  } else if (data.kind === 'reasoning-clear') {
+    clearReasoning();
   } else if (data.kind === 'queued') {
     setQueued(data.count ?? 0);
   } else if (data.kind === 'notice' && notice) {

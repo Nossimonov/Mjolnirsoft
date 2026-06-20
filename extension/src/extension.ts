@@ -7,6 +7,7 @@ import { WorktreeManager, currentRemoteBase, type Worktree } from '../../src/cor
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runExecutor } from '../../src/executor/executor-runtime.ts';
 import { createClaudeCodeResponder, resolveClaudeBin } from '../../src/executor/claude-code-responder.ts';
+import { createReasoningStream, type ReasoningStream } from '../../src/executor/reasoning-stream.ts';
 import { createDelegationHost } from '../../src/executor/delegation-host.ts';
 import { composeAgentInstructions } from '../../src/core/agent-instructions.ts';
 import { recordLearnedRule } from '../../src/core/learned-permissions.ts';
@@ -118,6 +119,13 @@ async function startExecutorSession(
     worktree.path,
   );
 
+  // The live, ephemeral path for the executor's reasoning (#109): the responder
+  // pushes intermediate thinking/text/tool events here as it streams, and the
+  // panel (opened below) subscribes to forward them token-level to the webview.
+  // It is deliberately *off* the channel — these events never hit the JSONL log
+  // or replay; only the final `result` persists on the channel, exactly as before.
+  const reasoning = createReasoningStream();
+
   // Spawn the executor in-process: it joins the session and answers each message
   // by running a headless Claude Code agent with the worktree as its workspace.
   const executorChannel = store.open(sessionId);
@@ -129,6 +137,7 @@ async function startExecutorSession(
       workdir: worktree.path,
       permissionPromptTool: PERMISSION_PROMPT_TOOL,
       mcpConfigPath,
+      onEvent: reasoning.emit,
     }),
   );
 
@@ -155,6 +164,7 @@ async function startExecutorSession(
   openSessionPanel(context, store, sessionId, folder.uri.fsPath, {
     executorAttached: true,
     executorId,
+    reasoning,
     onDispose: () => {
       delegationHost.close();
       executor.close();
@@ -204,7 +214,12 @@ function openSessionPanel(
   store: SessionStore,
   sessionId: string,
   projectDir: string,
-  options: { onDispose?: () => void; executorAttached?: boolean; executorId?: string } = {},
+  options: {
+    onDispose?: () => void;
+    executorAttached?: boolean;
+    executorId?: string;
+    reasoning?: ReasoningStream;
+  } = {},
 ): void {
   const executorAttached = options.executorAttached ?? false;
   // The executor whose replies settle a sent turn. Only this participant's
@@ -225,6 +240,14 @@ function openSessionPanel(
     },
   );
   panel.webview.html = renderHtml(panel.webview, context.extensionUri);
+
+  // Forward the executor's live reasoning (#109) to the webview ephemerally: each
+  // thinking/text/tool event becomes a `reasoning` post the webview renders into
+  // its in-progress block. This bypasses the channel entirely, so nothing here is
+  // logged or replayed. No-op for a viewer-only panel (no executor, no stream).
+  const unsubscribeReasoning = options.reasoning?.subscribe((event) => {
+    void panel.webview.postMessage({ kind: 'reasoning', event });
+  });
 
   // Attach to the session: replay history, then stream live messages.
   const channel = store.open(sessionId, { replay: true });
@@ -262,6 +285,11 @@ function openSessionPanel(
     // flip the indicator off (#100). Anything that isn't the executor's reply
     // renders and stops here.
     if (message.from !== executorId) return;
+    // The turn's durable result has now rendered above, so its ephemeral live
+    // stream is superseded — clear the in-progress reasoning block (#109) so it
+    // never double-shows alongside the final turn. The next turn (if any) starts
+    // a fresh stream.
+    void panel.webview.postMessage({ kind: 'reasoning-clear' });
     // A reply settles the in-flight turn. With serialization (#100) the executor
     // runs queued turns one at a time, so if more were sent while this one ran the
     // next now starts: keep "working" on and drop the queued count by one. Only
@@ -371,6 +399,7 @@ function openSessionPanel(
   );
 
   panel.onDidDispose(() => {
+    unsubscribeReasoning?.();
     participant.close();
     channel.close();
     options.onDispose?.();
@@ -412,8 +441,23 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   .auth-actions button:disabled { opacity: 0.5; cursor: default; }
   .from { font-size: 0.8em; opacity: 0.7; margin-bottom: 0.25rem; }
   .mermaid { background: #fff; padding: 0.5rem; border-radius: 4px; }
-  #working { padding: 0.25rem 1rem; font-size: 0.85em; opacity: 0.75; }
+  /* The in-progress block (#109): replaces the bare "working…" line — its header
+     carries the #76 elapsed timer, and the executor's live reasoning streams below
+     it (dimmed thinking, inline tool chips, then the answer text). Cleared when the
+     turn's durable result lands. */
+  #working { padding: 0.4rem 1rem; font-size: 0.85em; }
   #working[hidden] { display: none; }
+  #working-header { opacity: 0.75; }
+  #reasoning { margin-top: 0.3rem; max-height: 16em; overflow-y: auto; }
+  /* Thinking: a dimmed, italic block above the answer (the settled #109 shape). */
+  #reasoning-thinking { opacity: 0.6; font-style: italic; border-inline-start: 2px solid var(--vscode-panel-border);
+                        padding-inline-start: 0.5rem; margin-bottom: 0.35rem; }
+  .reasoning-label { font-style: normal; font-weight: 600; opacity: 0.85; margin-bottom: 0.15rem; }
+  #reasoning-thinking-text, #reasoning-body { white-space: pre-wrap; word-break: break-word; }
+  /* Each tool use as a compact inline chip (e.g. ⚙ Bash) as the agent calls it. */
+  .tool-chip { display: inline-block; background: var(--vscode-badge-background, #4d4d4d);
+               color: var(--vscode-badge-foreground, #fff); border-radius: 3px; padding: 0 0.4rem;
+               margin: 0.1rem 0.2rem; font-size: 0.92em; font-style: normal; }
   #queued { padding: 0.25rem 1rem; font-size: 0.85em; opacity: 0.75; }
   #queued[hidden] { display: none; }
   #notice { padding: 0.25rem 1rem; font-size: 0.85em; color: var(--vscode-inputValidation-warningForeground, #cca700); }
@@ -451,7 +495,13 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 </head>
 <body>
 <div id="content"></div>
-<div id="working" hidden>● executor is working…</div>
+<div id="working" hidden>
+  <div id="working-header">● executor is working…</div>
+  <div id="reasoning">
+    <div id="reasoning-thinking" hidden><div class="reasoning-label">💭 thinking…</div><span id="reasoning-thinking-text"></span></div>
+    <div id="reasoning-body"></div>
+  </div>
+</div>
 <div id="queued" hidden></div>
 <div id="notice" hidden></div>
 <div id="composer">
