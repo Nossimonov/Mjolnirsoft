@@ -76,6 +76,53 @@ describe('renderInteractionRequest', () => {
     expect(html).toContain('&lt;script&gt;');
     expect(html).not.toContain('<script>');
   });
+
+  it('renders an AskUserQuestion as selectable options, not an allow/deny card', () => {
+    const html = renderInteractionRequest({
+      requestId: 'q-1',
+      toolName: 'AskUserQuestion',
+      input: {
+        questions: [
+          {
+            question: 'Which color?',
+            header: 'Color',
+            options: [
+              { label: 'Red', description: 'warm' },
+              { label: 'Blue', description: 'cool' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      },
+    });
+    expect(html).toContain('AskUserQuestion');
+    expect(html).toContain('data-question="Which color?"');
+    expect(html).toContain('data-multi="false"');
+    expect(html).toContain('data-label="Red"');
+    expect(html).toContain('data-label="Blue"');
+    expect(html).toContain('submit-answers');
+    expect(html).not.toContain('data-behavior'); // not the permission card
+  });
+
+  it('marks multi-select questions so several options can be picked', () => {
+    const html = renderInteractionRequest({
+      requestId: 'q-2',
+      toolName: 'AskUserQuestion',
+      input: { questions: [{ question: 'Which sections?', options: [{ label: 'Intro' }, { label: 'Outro' }], multiSelect: true }] },
+    });
+    expect(html).toContain('data-multi="true"');
+  });
+
+  it('escapes HTML in question text and option labels', () => {
+    const html = renderInteractionRequest({
+      requestId: 'q-3',
+      toolName: 'AskUserQuestion',
+      input: { questions: [{ question: 'A "<b>" choice?', options: [{ label: '<i>x</i>' }, { label: 'y' }], multiSelect: false }] },
+    });
+    expect(html).toContain('&quot;'); // quote escaped for the data- attribute
+    expect(html).not.toContain('<b>');
+    expect(html).not.toContain('<i>x</i>');
+  });
 });
 
 describe('hueForSender', () => {
