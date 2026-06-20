@@ -1,4 +1,4 @@
-import type { Channel, Message, Participant } from '../core/channel.ts';
+import type { Channel, Message, Participant, Role } from '../core/channel.ts';
 
 /** Computes an executor's reply to an incoming message, or undefined for no reply. */
 export type Respond = (message: Message) => Promise<Omit<Message, 'from' | 'role'> | undefined>;
@@ -15,15 +15,22 @@ export const acknowledge: Respond = async (message) => ({
 });
 
 /**
- * Run an automated executor: join `channel` as an executor and reply to each message
- * received from another participant using `respond` (which may be async — e.g.
- * a Claude agentic loop). Returns the executor participant (call `close()` to
- * leave). Replies only to others' messages, so the orchestrator → executor →
- * orchestrator round-trip does not loop.
+ * Run an automated responder: join `channel` under `id` in `role` and reply to
+ * each message received from another participant using `respond` (which may be
+ * async — e.g. a Claude agentic loop). Returns the participant (call `close()`
+ * to leave). Replies only to others' messages, so the orchestrator → executor →
+ * orchestrator round-trip does not loop. `role` defaults to `executor` (the
+ * original, sole caller shape); delegation (#88) passes the delegate's own role
+ * so a spawned agent joins its sub-channel honestly attributed.
  */
-export function runExecutor(channel: Channel, id: string, respond: Respond = acknowledge): Participant {
+export function runExecutor(
+  channel: Channel,
+  id: string,
+  respond: Respond = acknowledge,
+  role: Role = 'executor',
+): Participant {
   let executor: Participant;
-  executor = channel.join(id, 'executor', (message) => {
+  executor = channel.join(id, role, (message) => {
     respond(message)
       .then((reply) => {
         if (reply) executor.send(reply);
