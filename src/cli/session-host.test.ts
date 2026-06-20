@@ -9,7 +9,9 @@ async function* lines(...items: string[]): AsyncIterable<string> {
 
 describe('renderIncoming', () => {
   it('renders a text message as a single line', () => {
-    expect(renderIncoming({ from: 'planner-1', type: 'text', payload: 'hi' })).toBe('planner-1 [text] hi');
+    expect(renderIncoming({ from: 'planner-1', role: 'planner', type: 'text', payload: 'hi' })).toBe(
+      'planner-1 [text] hi',
+    );
   });
 });
 
@@ -34,8 +36,8 @@ describe('hostSession', () => {
     });
 
     expect(executorInbox).toEqual([
-      { from: 'planner-1', type: 'text', payload: 'build it' },
-      { from: 'planner-1', type: 'text', payload: 'ship it' },
+      { from: 'planner-1', role: 'planner', type: 'text', payload: 'build it' },
+      { from: 'planner-1', role: 'planner', type: 'text', payload: 'ship it' },
     ]);
   });
 

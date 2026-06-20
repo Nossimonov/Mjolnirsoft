@@ -3,12 +3,13 @@ import {
   createClaudeCodeResponder,
   resolveClaudeBin,
   buildClaudeArgs,
+  senderAttribution,
   DEFAULT_EXECUTOR_ROLE,
   EXECUTOR_PERMISSIONS,
 } from './claude-code-responder.ts';
 import { SHARED_CORE, EXECUTOR_INSERT } from '../core/agent-instructions.ts';
 
-const task = { from: 'orchestrator', type: 'text', payload: 'write a haiku to haiku.md' } as const;
+const task = { from: 'orchestrator', role: 'planner', type: 'text', payload: 'write a haiku to haiku.md' } as const;
 
 describe('DEFAULT_EXECUTOR_ROLE (executor instructions)', () => {
   it('composes the shared model, the executor insert, and operational guidance (#71)', () => {
@@ -37,9 +38,23 @@ describe('createClaudeCodeResponder', () => {
 
     expect(reply).toEqual({ type: 'result', payload: 'Created haiku.md with a haiku.' });
     expect(run).toHaveBeenCalledWith(
-      'write a haiku to haiku.md',
+      '[Message from architect — authoritative (id: orchestrator)]\n\nwrite a haiku to haiku.md',
       expect.objectContaining({ cwd: '/tmp/executor-1', appendSystemPrompt: DEFAULT_EXECUTOR_ROLE, resume: false }),
     );
+  });
+
+  it('prefixes the prompt with the sender attribution so the agent knows who it is hearing from (#86)', async () => {
+    const run = vi.fn().mockResolvedValue('ok');
+    const respond = createClaudeCodeResponder({ workdir: '/w', run });
+
+    // From the authoritative human (planner role) vs. a peer agent (executor role).
+    await respond(task);
+    await respond({ from: 'executor-2', role: 'executor', type: 'text', payload: 'please review' });
+
+    expect(run.mock.calls[0][0]).toBe(
+      '[Message from architect — authoritative (id: orchestrator)]\n\nwrite a haiku to haiku.md',
+    );
+    expect(run.mock.calls[1][0]).toBe('[Message from agent (id: executor-2)]\n\nplease review');
   });
 
   it('lets the caller override the appended executor-role prompt', async () => {
@@ -69,8 +84,18 @@ describe('createClaudeCodeResponder', () => {
   it('ignores permission interaction messages rather than treating them as prompts (#66)', async () => {
     const run = vi.fn().mockResolvedValue('x');
     const respond = createClaudeCodeResponder({ workdir: '/w', run });
-    const req = { from: 'p', type: 'interaction-request', payload: { requestId: 'r', toolName: 'Write', input: {} } };
-    const dec = { from: 'p', type: 'interaction-decision', payload: { requestId: 'r', behavior: 'allow' } };
+    const req = {
+      from: 'p',
+      role: 'planner',
+      type: 'interaction-request',
+      payload: { requestId: 'r', toolName: 'Write', input: {} },
+    } as const;
+    const dec = {
+      from: 'p',
+      role: 'planner',
+      type: 'interaction-decision',
+      payload: { requestId: 'r', behavior: 'allow' },
+    } as const;
     expect(await respond(req)).toBeUndefined();
     expect(await respond(dec)).toBeUndefined();
     expect(run).not.toHaveBeenCalled();
@@ -89,6 +114,20 @@ describe('createClaudeCodeResponder', () => {
       expect.any(String),
       expect.objectContaining({ permissionPromptTool: 'mcp__perm__approve', mcpConfigPath: '/cfg.json' }),
     );
+  });
+});
+
+describe('senderAttribution', () => {
+  it('marks the planner (human/architect) as the authoritative sender (#86)', () => {
+    expect(senderAttribution({ from: 'orchestrator', role: 'planner' })).toBe(
+      '[Message from architect — authoritative (id: orchestrator)]',
+    );
+  });
+
+  it('labels an executor sender as a (non-authoritative) agent, distinct from the architect (#86)', () => {
+    const attribution = senderAttribution({ from: 'executor-2', role: 'executor' });
+    expect(attribution).toBe('[Message from agent (id: executor-2)]');
+    expect(attribution).not.toContain('authoritative');
   });
 });
 
