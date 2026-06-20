@@ -18,7 +18,14 @@ md.renderer.rules.fence = (tokens, idx, options, env, self) => {
 };
 
 function escapeHtml(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // Also escapes quotes so the same helper is safe inside `data-` attributes
+  // (question text and option labels are carried there for the webview).
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /** Render Markdown to HTML, with `mermaid` code fences prepared for the webview. */
@@ -56,10 +63,62 @@ export function renderMessage(message: Message): string {
  */
 export function renderInteractionRequest(request: InteractionRequest): string {
   switch (request.toolName) {
-    // case 'AskUserQuestion': render the question's options (a later rung).
+    case 'AskUserQuestion':
+      return renderQuestionCard(request);
     default:
       return renderPermissionCard(request);
   }
+}
+
+/** One option of an `AskUserQuestion` (a label, with an optional description). */
+interface QuestionOption {
+  readonly label: string;
+  readonly description?: string;
+}
+/** One question Claude poses via `AskUserQuestion`. */
+interface Question {
+  readonly question: string;
+  readonly header?: string;
+  readonly options: QuestionOption[];
+  readonly multiSelect?: boolean;
+}
+
+/**
+ * A clarifying question (`AskUserQuestion`): each question's options as
+ * selectable buttons, with a Submit. The webview tracks selection and returns
+ * the picks; the answer is encoded back as `updatedInput = { questions, answers }`
+ * (the shape Claude's tool expects), so no server/protocol change is needed.
+ */
+function renderQuestionCard(request: InteractionRequest): string {
+  const questions = ((request.input as { questions?: Question[] } | undefined)?.questions) ?? [];
+  const hue = hueForSender('clarifying question');
+  const style = `border-inline-start:3px solid hsl(${hue} 70% 55%);background:hsl(${hue} 70% 55% / 0.08)`;
+  const questionsHtml = questions
+    .map((q) => {
+      const options = q.options
+        .map(
+          (o) =>
+            `<button class="opt" data-label="${escapeHtml(o.label)}">${escapeHtml(o.label)}` +
+            `${o.description ? `<span class="opt-desc"> — ${escapeHtml(o.description)}</span>` : ''}</button>`,
+        )
+        .join('');
+      const header = q.header ? `<strong>${escapeHtml(q.header)}</strong> · ` : '';
+      const hint = q.multiSelect ? ' <span class="q-hint">(choose one or more)</span>' : '';
+      return (
+        `<div class="question" data-question="${escapeHtml(q.question)}" data-multi="${q.multiSelect ? 'true' : 'false'}">` +
+        `<div class="q-text">${header}${escapeHtml(q.question)}${hint}</div>` +
+        `<div class="options">${options}</div></div>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="turn" style="${style}">` +
+    `<div class="from">clarifying question · AskUserQuestion</div>` +
+    questionsHtml +
+    `<div class="decision" data-request-id="${escapeHtml(request.requestId)}">` +
+    `<button class="submit-answers">Submit</button>` +
+    `</div></div>`
+  );
 }
 
 /** A permission request: what the worker wants to do, with allow/deny controls. */
