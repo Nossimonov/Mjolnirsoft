@@ -36,7 +36,14 @@ export function runExecutor(
         if (reply) executor.send(reply);
       })
       .catch((error: unknown) => {
-        process.stderr.write(`executor ${id} failed to respond: ${String(error)}\n`);
+        const failure = `executor ${id} failed to respond: ${String(error)}`;
+        // Surface the failure in the session, not just the host log: an `error`
+        // turn on the channel reaches every host (view + CLI) and the durable
+        // log, and — being a reply like any other — stops the view's "working"
+        // indicator instead of leaving it ticking forever (#89). Keep the stderr
+        // write too: it's useful host-log detail when a session view isn't open.
+        process.stderr.write(`${failure}\n`);
+        executor.send({ type: 'error', payload: failure });
       });
   });
   return executor;

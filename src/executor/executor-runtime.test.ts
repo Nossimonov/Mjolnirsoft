@@ -33,6 +33,29 @@ describe('runExecutor', () => {
     expect(inbox).toEqual([{ from: 'executor-1', role: 'executor', type: 'result', payload: 'done: X' }]);
   });
 
+  it('posts an error message on the channel when respond rejects (AC1/AC3)', async () => {
+    const channel = new InMemoryChannel();
+    const inbox: Message[] = [];
+    const orchestrator = channel.join('orchestrator', 'planner', (m) => inbox.push(m));
+    runExecutor(channel, 'executor-1', async () => {
+      throw new Error('claude exited 401');
+    });
+
+    orchestrator.send({ type: 'text', payload: 'X' });
+    await flush();
+
+    // The failure surfaces as an attributed `error` turn — reaching every host
+    // and the durable log, and stopping the view's "working" indicator (#89).
+    expect(inbox).toEqual([
+      {
+        from: 'executor-1',
+        role: 'executor',
+        type: 'error',
+        payload: 'executor executor-1 failed to respond: Error: claude exited 401',
+      },
+    ]);
+  });
+
   it('sends no reply when the behavior resolves undefined', async () => {
     const channel = new InMemoryChannel();
     const inbox: Message[] = [];

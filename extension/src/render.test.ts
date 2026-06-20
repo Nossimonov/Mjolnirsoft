@@ -43,6 +43,19 @@ describe('renderMessage', () => {
     expect(html).toContain('42');
   });
 
+  it('styles an error turn distinctly via the `error` class, not the sender hue (#89)', () => {
+    const html = renderMessage({
+      from: 'executor-1',
+      role: 'executor',
+      type: 'error',
+      payload: 'executor executor-1 failed to respond: Error: claude exited 401',
+    });
+    expect(html).toContain('class="turn error"'); // theme warning colour via CSS, not an inline hue
+    expect(html).not.toContain('hsl('); // not the per-sender hue style
+    expect(html).toContain('executor-1 · error');
+    expect(html).toContain('claude exited 401');
+  });
+
   it('colours the turn by its sender, keyed on `from`', () => {
     const user = renderMessage({ from: 'vscode-view', role: 'planner', type: 'text', payload: 'hi' });
     expect(user).toContain(`hsl(${hueForSender('vscode-view')} `); // styled by the sender's hue

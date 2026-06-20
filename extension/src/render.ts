@@ -46,9 +46,16 @@ export function renderMessage(message: Message): string {
     typeof message.payload === 'string'
       ? message.payload
       : `\`\`\`json\n${JSON.stringify(message.payload, null, 2)}\n\`\`\``;
-  // Colour each turn by its sender, so a multi-participant conversation (user,
-  // orchestrator, executors) is readable at a glance — keyed on `from`, scaling
-  // to any number of participants.
+  // An `error` turn (an executor failure, #89) is styled distinctly via the
+  // `.turn.error` class — a warning colour from the theme — rather than the
+  // sender hue, so a wedged/failed turn reads as a problem at a glance instead
+  // of blending into the conversation. #90 layers an auth-specific card on top.
+  if (message.type === 'error') {
+    return `<div class="turn error"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}</div>${renderMarkdown(body)}</div>`;
+  }
+  // Colour every other turn by its sender, so a multi-participant conversation
+  // (user, orchestrator, executors) is readable at a glance — keyed on `from`,
+  // scaling to any number of participants.
   const hue = hueForSender(message.from);
   const style = `border-inline-start:3px solid hsl(${hue} 70% 55%);background:hsl(${hue} 70% 55% / 0.08)`;
   return `<div class="turn" style="${style}"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}</div>${renderMarkdown(body)}</div>`;
