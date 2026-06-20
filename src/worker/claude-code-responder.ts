@@ -28,12 +28,23 @@ export type RunClaudeCode = (prompt: string, options: { cwd: string } & ClaudeRu
  * instructions, and the developer's branch review are the real boundary (Bash
  * can still escape this policy). A WSL sandbox would be the hard boundary. See #62.
  */
-export const WORKER_PERMISSIONS = JSON.stringify({
+export const WORKER_PERMISSION_POLICY = {
   permissions: {
     allow: ['Read', 'Glob', 'Grep', 'WebFetch', 'Edit(./**)', 'Write(./**)', 'Bash'],
     deny: ['Bash(rm -rf *)', 'Bash(git push *)', 'Bash(git reset --hard *)', 'Bash(sudo *)'],
   },
-});
+};
+
+/**
+ * The base policy serialized for `--settings`. The "Always"/learned-rule side of
+ * the permission card (#70) is *not* applied here: a learned allow rule in
+ * `--settings` doesn't reach out-of-cwd writes (Claude gates those at its access
+ * layer before allow rules are consulted — verified live), so remembering is
+ * consumed in the permission MCP server's `approve` instead (see
+ * `learned-permissions.ts`). The `deny` floor stays here, enforced before
+ * `approve` is ever called, so a denied foot-gun can't be auto-allowed.
+ */
+export const WORKER_PERMISSIONS = JSON.stringify(WORKER_PERMISSION_POLICY);
 
 /** Build the `claude` argv for a one-shot run from the task prompt and run options. */
 export function buildClaudeArgs(prompt: string, options: ClaudeRunArgs = {}): string[] {
@@ -68,7 +79,13 @@ export const runClaudeCodeCli: RunClaudeCode = (
   { cwd, appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath },
 ) =>
   new Promise((resolve, reject) => {
-    const args = buildClaudeArgs(prompt, { appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath });
+    const args = buildClaudeArgs(prompt, {
+      appendSystemPrompt,
+      sessionId,
+      resume,
+      permissionPromptTool,
+      mcpConfigPath,
+    });
     const child = spawn(resolveClaudeBin(), args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],

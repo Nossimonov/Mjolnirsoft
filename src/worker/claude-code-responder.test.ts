@@ -88,6 +88,13 @@ describe('buildClaudeArgs', () => {
     expect(policy.permissions.deny).toEqual(expect.arrayContaining(['Bash(rm -rf *)', 'Bash(git push *)']));
   });
 
+  it('always spawns with the exact base policy — learned "Always" rules are not merged here (#70)', () => {
+    // #70's remembering is consumed in the permission MCP server's approve, not
+    // in --settings (a learned allow rule doesn't reach out-of-cwd writes), so the
+    // spawn policy is unconditionally the base WORKER_PERMISSIONS.
+    expect(buildClaudeArgs('go')[buildClaudeArgs('go').indexOf('--settings') + 1]).toBe(WORKER_PERMISSIONS);
+  });
+
   it('appends --append-system-prompt with the role text when given', () => {
     const args = buildClaudeArgs('do it', { appendSystemPrompt: 'be a worker' });
     expect(args.slice(-2)).toEqual(['--append-system-prompt', 'be a worker']);
