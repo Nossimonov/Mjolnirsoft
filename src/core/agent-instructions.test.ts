@@ -50,6 +50,51 @@ describe('composeAgentInstructions (#57)', () => {
   });
 });
 
+describe('session-log literacy in the shared core (#102)', () => {
+  it('teaches reading a recorded interaction: outcome in updatedInput.answers', () => {
+    // The pick lives in the decision's answers map, keyed by question.
+    expect(SHARED_CORE).toContain('interaction-request');
+    expect(SHARED_CORE).toContain('interaction-decision');
+    expect(SHARED_CORE).toContain('updatedInput.answers');
+    // And explicitly NOT from the option list or the (recommended) marker —
+    // the misread that nearly stripped approved work on #100.
+    expect(SHARED_CORE).toContain('(Recommended)');
+    expect(SHARED_CORE.toLowerCase()).toContain('not what was decided');
+  });
+
+  it('reaches every log-reading role via composeAgentInstructions', () => {
+    // It rides in SHARED_CORE, so every composed role carries it. Assert on the
+    // roles that exist today; new log-reading roles inherit it for free.
+    expect(composeAgentInstructions('executor')).toContain('updatedInput.answers');
+    expect(composeAgentInstructions('evaluator')).toContain('updatedInput.answers');
+  });
+});
+
+describe('evaluator distinguishes legible findings from judgment calls (#104)', () => {
+  it('the role text carries the legible-vs-judgment classification', () => {
+    expect(EVALUATOR_OPERATIONS).toContain('legible');
+    expect(EVALUATOR_OPERATIONS).toContain('judgment');
+  });
+
+  it('marks which findings are legible vs. judgment-to-route', () => {
+    // The finding must tag the two kinds so the spawner knows what to act on.
+    expect(EVALUATOR_OPERATIONS).toContain('judgment-to-route');
+  });
+
+  it('raises judgment calls by reporting up the chain — spawner escalates', () => {
+    // Chosen mechanism (#104 fork): role-text-only, the spawner escalates.
+    expect(EVALUATOR_OPERATIONS).toContain('spawner escalates');
+  });
+
+  it('encodes the inversion: unreconstructable intent is a routed judgment, not a cold defect', () => {
+    expect(EVALUATOR_OPERATIONS).toContain("couldn't reconstruct the intent");
+  });
+
+  it('still carries the classification when composed for the evaluator role', () => {
+    expect(composeAgentInstructions('evaluator')).toContain('judgment-to-route');
+  });
+});
+
 describe('isAgentRole (#93)', () => {
   it('accepts the tool-spawnable agent roles and rejects the human/unknown roles', () => {
     expect(isAgentRole('executor')).toBe(true);
