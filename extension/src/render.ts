@@ -3,20 +3,39 @@ import type { Message } from '../../src/core/channel.ts';
 import type { InteractionRequest } from '../../src/core/interaction.ts';
 import { isAuthError } from '../../src/executor/auth-error.ts';
 
-const md = new MarkdownIt();
-const defaultFence = md.renderer.rules.fence;
+// Two Markdown renderers that differ only in how a *single* newline is treated.
+//
+// `md` is the default: a lone `\n` is a soft break (whitespace), a blank line a
+// paragraph — the semantics agent (executor/evaluator) output is authored
+// against. `mdComposed` sets `breaks: true`, so every `\n` becomes a `<br>`.
+//
+// The split is the #95 decision (chosen over a global `breaks: true`): content a
+// human composes — the planner's transcript turns typed into the chat box, and
+// the multi-line/Markdown content an interaction card shows for review — is
+// entered where pressing Enter means "new line", so its newlines must survive
+// verbatim. Agent prose, by contrast, is frequently soft-wrapped at a column and
+// relies on soft breaks to reflow; forcing `breaks: true` on it everywhere would
+// turn that into ragged hard breaks. Scoping `breaks` to composed content keeps
+// the composer faithful without regressing agent Markdown.
+function createMarkdown(options: ConstructorParameters<typeof MarkdownIt>[0] = {}): MarkdownIt {
+  const instance = new MarkdownIt(options);
+  const defaultFence = instance.renderer.rules.fence;
+  // Render fenced ```mermaid blocks as <pre class="mermaid">source</pre> so the
+  // webview's mermaid.run() picks them up; everything else is normal Markdown.
+  instance.renderer.rules.fence = (tokens, idx, opts, env, self) => {
+    const token = tokens[idx];
+    if (token.info.trim() === 'mermaid') {
+      return `<pre class="mermaid">${escapeHtml(token.content)}</pre>`;
+    }
+    return defaultFence
+      ? defaultFence(tokens, idx, opts, env, self)
+      : self.renderToken(tokens, idx, opts);
+  };
+  return instance;
+}
 
-// Render fenced ```mermaid blocks as <pre class="mermaid">source</pre> so the
-// webview's mermaid.run() picks them up; everything else is normal Markdown.
-md.renderer.rules.fence = (tokens, idx, options, env, self) => {
-  const token = tokens[idx];
-  if (token.info.trim() === 'mermaid') {
-    return `<pre class="mermaid">${escapeHtml(token.content)}</pre>`;
-  }
-  return defaultFence
-    ? defaultFence(tokens, idx, options, env, self)
-    : self.renderToken(tokens, idx, options);
-};
+const md = createMarkdown();
+const mdComposed = createMarkdown({ breaks: true });
 
 function escapeHtml(value: string): string {
   // Also escapes quotes so the same helper is safe inside `data-` attributes
@@ -32,6 +51,17 @@ function escapeHtml(value: string): string {
 /** Render Markdown to HTML, with `mermaid` code fences prepared for the webview. */
 export function renderMarkdown(markdown: string): string {
   return md.render(markdown);
+}
+
+/**
+ * Render human-composed Markdown (#95). Identical to {@link renderMarkdown}
+ * except a single newline becomes a `<br>` (`breaks: true`), so a multi-line
+ * message or card shows as entered instead of collapsing to one line. Use this
+ * for content a person typed into a box; use {@link renderMarkdown} for agent
+ * output, whose soft-break semantics must stay intact.
+ */
+export function renderComposed(markdown: string): string {
+  return mdComposed.render(markdown);
 }
 
 /** A stable hue (0–359) for a sender id, so each participant gets a consistent colour. */
@@ -57,12 +87,24 @@ export function renderMessage(message: Message): string {
     if (isAuthError(body)) return renderAuthErrorCard(message, body);
     return `<div class="turn error"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}</div>${renderMarkdown(body)}</div>`;
   }
+  // Composed turns preserve their newlines (#95); agent turns (executor/evaluator)
+  // keep soft-break Markdown semantics. Error turns above are always agent
+  // failures, so they stay on the default renderer.
+  //
+  // We key on `role === 'planner'` because, in the current wiring, the only
+  // `planner` turn the view renders is its *own* composed send (the channel
+  // doesn't echo a participant back to itself, and `vscode-view` is the sole
+  // planner on that channel). Note `role` encodes the authoritative *seat*, not
+  // *authorship* — if an automated orchestrator ever emitted prose to this
+  // channel as `planner`, it would get hard breaks too; revisit the discriminator
+  // (e.g. a per-message "composed" flag) if that day comes.
+  const renderBody = message.role === 'planner' ? renderComposed : renderMarkdown;
   // Colour every other turn by its sender, so a multi-participant conversation
   // (user, orchestrator, executors) is readable at a glance — keyed on `from`,
   // scaling to any number of participants.
   const hue = hueForSender(message.from);
   const style = `border-inline-start:3px solid hsl(${hue} 70% 55%);background:hsl(${hue} 70% 55% / 0.08)`;
-  return `<div class="turn" style="${style}"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}</div>${renderMarkdown(body)}</div>`;
+  return `<div class="turn" style="${style}"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}</div>${renderBody(body)}</div>`;
 }
 
 /**
@@ -136,11 +178,17 @@ function renderQuestionCard(request: InteractionRequest): string {
             `${o.description ? `<span class="opt-desc"> — ${escapeHtml(o.description)}</span>` : ''}</button>`,
         )
         .join('');
-      const header = q.header ? `<strong>${escapeHtml(q.header)}</strong> · ` : '';
-      const hint = q.multiSelect ? ' <span class="q-hint">(choose one or more)</span>' : '';
+      const header = q.header ? `<strong>${escapeHtml(q.header)}</strong>` : '';
+      const hint = q.multiSelect ? `<span class="q-hint">(choose one or more)</span>` : '';
+      const meta = [header, hint].filter(Boolean).join(' · ');
+      // Render the question itself as composed Markdown (#95): a question card may
+      // carry multi-line or Markdown content for review (e.g. an executor's drafted
+      // role text, #93), which collapses to one line under plain escaping. The raw
+      // text still rides in `data-question` — the webview reads it back as the
+      // answer key, so the display rendering must not touch it.
       return (
         `<div class="question" data-question="${escapeHtml(q.question)}" data-multi="${q.multiSelect ? 'true' : 'false'}">` +
-        `<div class="q-text">${header}${escapeHtml(q.question)}${hint}</div>` +
+        `<div class="q-text">${meta ? `${meta} ` : ''}${renderComposed(q.question)}</div>` +
         `<div class="options">${options}</div></div>`
       );
     })

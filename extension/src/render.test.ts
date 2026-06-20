@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderMarkdown, renderMessage, hueForSender, renderInteractionRequest } from './render.ts';
+import { renderMarkdown, renderComposed, renderMessage, hueForSender, renderInteractionRequest } from './render.ts';
 import type { Message } from '../../src/core/channel.ts';
 import type { InteractionRequest } from '../../src/core/interaction.ts';
 
@@ -20,6 +20,27 @@ describe('renderMarkdown', () => {
     const html = renderMarkdown('```js\nconst x = 1\n```');
     expect(html).toContain('<code');
     expect(html).not.toContain('class="mermaid"');
+  });
+
+  it('treats a lone newline as a soft break (no <br>), preserving agent Markdown semantics (#95)', () => {
+    // Agent prose is often soft-wrapped at a column; a single \n must stay a space,
+    // not a hard break — the regression `breaks:true` everywhere would have caused.
+    expect(renderMarkdown('line1\nline2')).not.toContain('<br');
+  });
+});
+
+describe('renderComposed', () => {
+  it('renders a lone newline as a hard <br>, so composed multi-line text shows as entered (#95)', () => {
+    const html = renderComposed('line1\nline2');
+    expect(html).toContain('<br');
+    expect(html).toContain('line1');
+    expect(html).toContain('line2');
+  });
+
+  it('still renders Markdown (a card may carry Markdown for review, #93)', () => {
+    const html = renderComposed('a **bold** word\nand a second line');
+    expect(html).toContain('<strong>bold</strong>');
+    expect(html).toContain('<br');
   });
 });
 
@@ -82,6 +103,20 @@ describe('renderMessage', () => {
     expect(html).toContain('class="turn error"');
     expect(html).not.toContain('auth'); // not the auth card — no log-in/retry affordance
     expect(html).not.toContain('auth-login');
+  });
+
+  it('preserves line breaks in a composed (planner) multi-line turn (#95)', () => {
+    const html = renderMessage({ from: 'vscode-view', role: 'planner', type: 'text', payload: 'first line\nsecond line' });
+    expect(html).toContain('<br');
+    expect(html).toContain('first line');
+    expect(html).toContain('second line');
+  });
+
+  it('keeps soft-break semantics for an agent (executor) turn — no <br> on a lone newline (#95)', () => {
+    // The scoped fix must not regress agent Markdown: soft-wrapped agent prose
+    // stays one flowing paragraph, unlike a global breaks:true.
+    const html = renderMessage({ from: 'executor-1', role: 'executor', type: 'result', payload: 'first line\nsecond line' });
+    expect(html).not.toContain('<br');
   });
 
   it('colours the turn by its sender, keyed on `from`', () => {
@@ -154,6 +189,21 @@ describe('renderInteractionRequest', () => {
       input: { questions: [{ question: 'Which sections?', options: [{ label: 'Intro' }, { label: 'Outro' }], multiSelect: true }] },
     });
     expect(html).toContain('data-multi="true"');
+  });
+
+  it('renders a multi-line question with its line breaks preserved, raw text kept as the answer key (#95/#93)', () => {
+    const html = renderInteractionRequest({
+      requestId: 'q-ml',
+      toolName: 'AskUserQuestion',
+      input: {
+        questions: [{ question: 'Draft role text:\nLine one\nLine two', options: [{ label: 'OK' }, { label: 'Edit' }], multiSelect: false }],
+      },
+    });
+    expect(html).toContain('<br'); // the display shows the line breaks
+    // The raw question (newlines as \n) still rides in data-question — the webview
+    // reads it back verbatim as the answer key, so the display rendering must not
+    // alter it.
+    expect(html).toContain('data-question="Draft role text:\nLine one\nLine two"');
   });
 
   it('escapes HTML in question text and option labels', () => {

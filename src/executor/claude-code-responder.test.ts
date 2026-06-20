@@ -95,6 +95,16 @@ describe('createClaudeCodeResponder', () => {
     expect(run.mock.calls[1][0]).toBe('[Message from agent (id: executor-2)]\n\nplease review');
   });
 
+  it('carries a multi-line payload through to the executor with its newlines intact (#95 regression guard)', async () => {
+    // The #95 fix is display-only (the VS Code view renders newlines as <br>); the
+    // transported payload must keep every newline so the executor reads the message
+    // as composed, not collapsed to one line.
+    const run = vi.fn().mockResolvedValue('ok');
+    const respond = createClaudeCodeResponder({ workdir: '/w', run });
+    await respond({ from: 'orchestrator', role: 'planner', type: 'text', payload: 'line one\nline two\n\npara two' });
+    expect(run.mock.calls[0][0]).toContain('line one\nline two\n\npara two');
+  });
+
   it('lets the caller override the appended executor-role prompt', async () => {
     const run = vi.fn().mockResolvedValue('done');
     const respond = createClaudeCodeResponder({ workdir: '/w', appendSystemPrompt: 'on branch X', run });
