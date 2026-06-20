@@ -4,10 +4,9 @@ import {
   resolveClaudeBin,
   buildClaudeArgs,
   DEFAULT_EXECUTOR_ROLE,
-  SHARED_CORE,
-  EXECUTOR_INSERT,
   EXECUTOR_PERMISSIONS,
 } from './claude-code-responder.ts';
+import { SHARED_CORE, EXECUTOR_INSERT } from '../core/agent-instructions.ts';
 
 const task = { from: 'orchestrator', type: 'text', payload: 'write a haiku to haiku.md' } as const;
 
