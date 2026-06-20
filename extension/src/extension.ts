@@ -7,6 +7,7 @@ import { WorktreeManager, type Worktree } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runWorker } from '../../src/worker/worker-runtime.ts';
 import { createClaudeCodeResponder } from '../../src/worker/claude-code-responder.ts';
+import { loadLearnedAllowRules, recordLearnedRule } from '../../src/core/learned-permissions.ts';
 import {
   INTERACTION_DECISION,
   INTERACTION_REQUEST,
@@ -45,7 +46,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    openSessionPanel(context, store, pick);
+    openSessionPanel(context, store, pick, folder.uri.fsPath);
   });
 
   const startWorker = vscode.commands.registerCommand('mjolnirsoft.startWorkerSession', async () => {
@@ -111,10 +112,13 @@ async function startWorkerSession(
       workdir: worktree.path,
       permissionPromptTool: PERMISSION_PROMPT_TOOL,
       mcpConfigPath,
+      // Read learned "Always" rules per turn from the project (not the worktree),
+      // so rules from prior sessions — and this session's own — auto-approve (#70).
+      loadLearnedRules: () => loadLearnedAllowRules(folder.uri.fsPath),
     }),
   );
 
-  openSessionPanel(context, store, sessionId, {
+  openSessionPanel(context, store, sessionId, folder.uri.fsPath, {
     onDispose: () => {
       worker.close();
       workerChannel.close();
@@ -154,6 +158,7 @@ function openSessionPanel(
   context: vscode.ExtensionContext,
   store: SessionStore,
   sessionId: string,
+  projectDir: string,
   options: { onDispose?: () => void } = {},
 ): void {
   const panel = vscode.window.createWebviewPanel(
@@ -198,7 +203,7 @@ function openSessionPanel(
       kind?: string;
       text?: string;
       requestId?: string;
-      behavior?: 'allow' | 'deny';
+      behavior?: 'allow' | 'deny' | 'always';
       answers?: Record<string, string | string[]>;
     }) => {
       if (event.kind === 'send' && event.text) {
@@ -220,8 +225,14 @@ function openSessionPanel(
           });
         } else if (event.behavior) {
           // Permission: a verdict + requestId is enough; the server fills the
-          // original input on a bare allow.
-          participant.send({ type: INTERACTION_DECISION, payload: { requestId: event.requestId, behavior: event.behavior } });
+          // original input on a bare allow. "Always" is *our* side-effect — we
+          // persist a learned allow rule for the action and then send a plain
+          // `allow`, so the worker/MCP server never sees "always" (#70).
+          if (event.behavior === 'always' && request) {
+            recordLearnedRule(projectDir, request.toolName, request.input);
+          }
+          const behavior = event.behavior === 'deny' ? 'deny' : 'allow';
+          participant.send({ type: INTERACTION_DECISION, payload: { requestId: event.requestId, behavior } });
         }
         // The worker resumes once it has our answer, so show "working" again.
         void panel.webview.postMessage({ kind: 'working', on: true });
@@ -274,6 +285,8 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   .decide { border: none; padding: 0.25rem 0.9rem; cursor: pointer; border-radius: 3px;
             background: var(--vscode-button-secondaryBackground, #444); color: var(--vscode-button-secondaryForeground, #fff); }
   .decide[data-behavior="allow"] { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .decide[data-behavior="always"] { background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+            box-shadow: inset 0 0 0 1px var(--vscode-button-foreground); }
   .decide:disabled { opacity: 0.5; cursor: default; }
   .decided { font-size: 0.85em; opacity: 0.8; align-self: center; }
   .question { margin: 0.5rem 0; }

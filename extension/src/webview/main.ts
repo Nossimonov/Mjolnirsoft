@@ -56,14 +56,15 @@ content?.addEventListener('click', (event: MouseEvent) => {
   const button = (event.target as HTMLElement).closest('button');
   if (!button) return;
 
-  // Permission allow/deny.
+  // Permission allow/always/deny. "Always" allows now and asks the host to
+  // remember the action so it stops escalating in future (#70).
   if (button.classList.contains('decide')) {
     const card = button.closest('.decision') as HTMLElement | null;
     const requestId = card?.getAttribute('data-request-id');
     const behavior = button.getAttribute('data-behavior');
-    if (!card || !requestId || (behavior !== 'allow' && behavior !== 'deny')) return;
+    if (!card || !requestId || (behavior !== 'allow' && behavior !== 'deny' && behavior !== 'always')) return;
     vscode.postMessage({ kind: 'decision', requestId, behavior });
-    lockCard(card, behavior === 'allow' ? 'allowed' : 'denied');
+    lockCard(card, behavior === 'allow' ? 'allowed' : behavior === 'always' ? 'always allowed' : 'denied');
     return;
   }
 

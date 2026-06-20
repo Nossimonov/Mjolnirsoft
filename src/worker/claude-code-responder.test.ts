@@ -3,6 +3,7 @@ import {
   createClaudeCodeResponder,
   resolveClaudeBin,
   buildClaudeArgs,
+  buildWorkerSettings,
   DEFAULT_WORKER_ROLE,
   WORKER_PERMISSIONS,
 } from './claude-code-responder.ts';
@@ -57,6 +58,20 @@ describe('createClaudeCodeResponder', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it('reads learned "Always" rules per turn and passes them to the run (#70)', async () => {
+    const run = vi.fn().mockResolvedValue('ok');
+    const loadLearnedRules = vi.fn().mockReturnValue(['Write(C:/x/**)']);
+    const respond = createClaudeCodeResponder({ workdir: '/w', loadLearnedRules, run });
+    await respond(task);
+    expect(loadLearnedRules).toHaveBeenCalledTimes(1); // read fresh each turn
+    expect(run).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ learnedAllowRules: ['Write(C:/x/**)'] }),
+    );
+    await respond(task);
+    expect(loadLearnedRules).toHaveBeenCalledTimes(2); // a rule learned mid-session is picked up next turn
+  });
+
   it('passes the permission-prompt tool and MCP config through to the run (#66)', async () => {
     const run = vi.fn().mockResolvedValue('ok');
     const respond = createClaudeCodeResponder({
@@ -86,6 +101,23 @@ describe('buildClaudeArgs', () => {
     };
     expect(policy.permissions.allow).toEqual(expect.arrayContaining(['Bash', 'Edit(./**)', 'Read']));
     expect(policy.permissions.deny).toEqual(expect.arrayContaining(['Bash(rm -rf *)', 'Bash(git push *)']));
+  });
+
+  it('merges learned "Always" allow rules into the spawn policy, leaving deny untouched (#70)', () => {
+    const args = buildClaudeArgs('go', { learnedAllowRules: ['Write(C:/x/**)', 'Read'] });
+    const settingsIndex = args.indexOf('--settings');
+    const policy = JSON.parse(args[settingsIndex + 1]) as { permissions: { allow: string[]; deny: string[] } };
+    // Base allows survive and the learned rule is added.
+    expect(policy.permissions.allow).toEqual(expect.arrayContaining(['Bash', 'Edit(./**)', 'Write(C:/x/**)']));
+    // 'Read' is already a base allow — merging dedups rather than duplicating.
+    expect(policy.permissions.allow.filter((r) => r === 'Read')).toHaveLength(1);
+    // The deny floor is never widened by a learned rule.
+    expect(policy.permissions.deny).toEqual(expect.arrayContaining(['Bash(rm -rf *)', 'Bash(git push *)']));
+  });
+
+  it('uses the exact base policy when nothing has been learned (#70)', () => {
+    expect(buildWorkerSettings()).toBe(WORKER_PERMISSIONS);
+    expect(buildClaudeArgs('go')[buildClaudeArgs('go').indexOf('--settings') + 1]).toBe(WORKER_PERMISSIONS);
   });
 
   it('appends --append-system-prompt with the role text when given', () => {

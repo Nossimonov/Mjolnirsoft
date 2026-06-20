@@ -15,6 +15,8 @@ export interface ClaudeRunArgs {
   readonly permissionPromptTool?: string;
   /** Path to the MCP config defining the server that backs {@link permissionPromptTool}. */
   readonly mcpConfigPath?: string;
+  /** Allow rules learned from "Always" decisions, merged into the policy for this run (#70). */
+  readonly learnedAllowRules?: readonly string[];
 }
 
 /** Runs a one-shot headless Claude Code task in `cwd`, returning its result text. */
@@ -28,16 +30,32 @@ export type RunClaudeCode = (prompt: string, options: { cwd: string } & ClaudeRu
  * instructions, and the developer's branch review are the real boundary (Bash
  * can still escape this policy). A WSL sandbox would be the hard boundary. See #62.
  */
-export const WORKER_PERMISSIONS = JSON.stringify({
+export const WORKER_PERMISSION_POLICY = {
   permissions: {
     allow: ['Read', 'Glob', 'Grep', 'WebFetch', 'Edit(./**)', 'Write(./**)', 'Bash'],
     deny: ['Bash(rm -rf *)', 'Bash(git push *)', 'Bash(git reset --hard *)', 'Bash(sudo *)'],
   },
-});
+};
+
+/** The base policy serialized for `--settings` — the spawn default when nothing is learned. */
+export const WORKER_PERMISSIONS = JSON.stringify(WORKER_PERMISSION_POLICY);
+
+/**
+ * Serialize the `--settings` policy, merging any learned "Always" allow rules
+ * into the base allow-list (#70). Learned rules only widen `allow`; the `deny`
+ * floor is untouched and still wins, so a learned rule can't unlock a denied
+ * foot-gun. With no learned rules this returns the exact base {@link WORKER_PERMISSIONS}.
+ */
+export function buildWorkerSettings(learnedAllowRules: readonly string[] = []): string {
+  if (learnedAllowRules.length === 0) return WORKER_PERMISSIONS;
+  const allow = [...WORKER_PERMISSION_POLICY.permissions.allow];
+  for (const rule of learnedAllowRules) if (!allow.includes(rule)) allow.push(rule);
+  return JSON.stringify({ permissions: { allow, deny: WORKER_PERMISSION_POLICY.permissions.deny } });
+}
 
 /** Build the `claude` argv for a one-shot run from the task prompt and run options. */
 export function buildClaudeArgs(prompt: string, options: ClaudeRunArgs = {}): string[] {
-  const args = ['-p', prompt, '--output-format', 'json', '--settings', WORKER_PERMISSIONS];
+  const args = ['-p', prompt, '--output-format', 'json', '--settings', buildWorkerSettings(options.learnedAllowRules)];
   if (options.appendSystemPrompt) args.push('--append-system-prompt', options.appendSystemPrompt);
   if (options.sessionId) args.push(options.resume ? '--resume' : '--session-id', options.sessionId);
   if (options.permissionPromptTool) args.push('--permission-prompt-tool', options.permissionPromptTool);
@@ -65,10 +83,17 @@ export function resolveClaudeBin(): string {
  */
 export const runClaudeCodeCli: RunClaudeCode = (
   prompt,
-  { cwd, appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath },
+  { cwd, appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath, learnedAllowRules },
 ) =>
   new Promise((resolve, reject) => {
-    const args = buildClaudeArgs(prompt, { appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath });
+    const args = buildClaudeArgs(prompt, {
+      appendSystemPrompt,
+      sessionId,
+      resume,
+      permissionPromptTool,
+      mcpConfigPath,
+      learnedAllowRules,
+    });
     const child = spawn(resolveClaudeBin(), args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -131,6 +156,12 @@ export interface ClaudeCodeResponderOptions {
    */
   readonly permissionPromptTool?: string;
   readonly mcpConfigPath?: string;
+  /**
+   * Supplies the allow rules learned from "Always" decisions (#70), read *per
+   * turn* so a rule recorded mid-session takes effect on the next turn's spawn
+   * (not only the next worker). Defaults to none.
+   */
+  readonly loadLearnedRules?: () => readonly string[];
   /** Override how Claude Code is run (tests inject a fake; default spawns the CLI). */
   readonly run?: RunClaudeCode;
 }
@@ -152,6 +183,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     claudeSessionId = randomUUID(),
     permissionPromptTool,
     mcpConfigPath,
+    loadLearnedRules = () => [],
     run = runClaudeCodeCli,
   } = options;
   let started = false; // first turn creates the session; later turns resume it
@@ -169,6 +201,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
         resume: started,
         permissionPromptTool,
         mcpConfigPath,
+        learnedAllowRules: loadLearnedRules(),
       })
     ).trim();
     started = true;

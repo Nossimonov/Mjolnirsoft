@@ -132,6 +132,8 @@ function renderPermissionCard(request: InteractionRequest): string {
     `<pre class="interaction-input">${escapeHtml(previewInput(request.input))}</pre>` +
     `<div class="decision" data-request-id="${escapeHtml(request.requestId)}">` +
     `<button class="decide" data-behavior="allow">Allow</button>` +
+    // "Always" allows now and remembers the action, so it stops escalating (#70).
+    `<button class="decide" data-behavior="always" title="Allow now and stop asking for this">Always</button>` +
     `<button class="decide" data-behavior="deny">Deny</button>` +
     `</div></div>`
   );
