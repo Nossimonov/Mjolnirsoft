@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { INTERACTION_DECISION, INTERACTION_REQUEST } from '../core/interaction.ts';
+import { composeAgentInstructions } from '../core/agent-instructions.ts';
 import type { Respond } from './executor-runtime.ts';
 
 /** Options shaping a one-shot `claude` run beyond the task prompt and cwd. */
@@ -114,41 +115,14 @@ export const runClaudeCodeCli: RunClaudeCode = (
   });
 
 /**
- * The extension's shared model, carried by *every* tool-spawned agent (#71): the
- * agent chain, the factual/design/permission classification, the
- * escalate-when-unsure bias, and the descriptive-record rule. Identical for all
- * roles — it tells an agent the chain it is structurally inside and where the
- * human's authority sits. Exported so other roles (orchestrator, evaluator) can
- * reuse it verbatim with their own insert once they are tool-spawned agents.
- */
-export const SHARED_CORE = `You operate in a chain of sessions coordinating one project. From the top: the architect (a human) holds final authority over design and permissions; an orchestrator plans, delegates, reviews its delegated work, and routes; executors implement delegated tasks in isolation; evaluators critique with fresh eyes and no stake in the plan. Work flows down; questions and decisions flow up.
-
-Classify every check-in you would make, and act on it:
-- Factual — answerable from already-decided design (the shared record, your brief, the code): answer it at the lowest session that knows.
-- Design — a choice with consequences the record does not settle, that a later session or the human would treat as endorsed direction: route it up; never invent it.
-- Permission — anything authorizing a consequential or boundary-crossing action: only the architect, or a rule the architect authored, grants it; no agent self-approves (the tool also enforces this).
-
-When unsure which a thing is, treat it as the more-escalated kind. Escalation is cheap; an un-endorsed decision compounds down the chain. The shared design record holds only decided design — read it as ground truth; never write speculation into it.`;
-
-/** The executor's one-line role insert: its position and standing rule in the chain (#71). */
-export const EXECUTOR_INSERT = `You are an executor: you implement the single task delegated to you. Decide implementation freely, but route design and permission questions up to your orchestrator, and do not expand scope.`;
-
-/** How an executor works within its worktree — operational guidance under the model and role insert. */
-const EXECUTOR_OPERATIONS = `As you implement:
-- Collaborate continuously — this is an interactive, multi-turn conversation, not fire-and-forget. Surface decisions, trade-offs, and progress as you go; the architect needs visibility while you work, not only at the end.
-- Read widely, write narrowly. Read anything in or beyond the repo you need to integrate cleanly, but only create, modify, or run things within your own worktree and branch — never touch other branches, refs, git history, or other executors' workspaces.
-- Don't commit; hand off. Leave your work in your branch's working tree with a final summary of what you changed and why — clear enough for the orchestrator to compose the commit and judge the result against the design.
-- Justify every change for the record — a brief rationale per meaningful change, so future sessions recover the reasoning without you present.`;
-
-/**
  * Default instructions appended to an executor's system prompt (not replacing
- * Claude Code's own): the shared model {@link SHARED_CORE} + the executor role
- * insert {@link EXECUTOR_INSERT} + the executor's {@link EXECUTOR_OPERATIONS}.
- * Composed from the reusable pieces so other roles can later carry the same core
- * with their own insert; layered atop the worktree's hard isolation and the
- * developer's branch review (#45, #71).
+ * Claude Code's own): the extension's shared model + the executor role insert +
+ * its operational guidance, composed through the layering framework (#57). The
+ * layered pieces live in `src/core/agent-instructions.ts`, so other roles can
+ * later carry the same core with their own insert; layered atop the worktree's
+ * hard isolation and the developer's branch review (#45, #71).
  */
-export const DEFAULT_EXECUTOR_ROLE = `${SHARED_CORE}\n\n${EXECUTOR_INSERT}\n\n${EXECUTOR_OPERATIONS}`;
+export const DEFAULT_EXECUTOR_ROLE = composeAgentInstructions('executor');
 
 export interface ClaudeCodeResponderOptions {
   readonly workdir: string;
