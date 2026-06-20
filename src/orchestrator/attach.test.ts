@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { attachInvitation } from './attach.ts';
 
 describe('attachInvitation', () => {
-  it('produces the attach handle and command for a spawned worker', () => {
-    expect(attachInvitation({ id: 'worker-1', sessionId: 'demo' })).toEqual({
-      workerId: 'worker-1',
+  it('produces the attach handle and command for a spawned executor', () => {
+    expect(attachInvitation({ id: 'executor-1', sessionId: 'demo' })).toEqual({
+      executorId: 'executor-1',
       sessionId: 'demo',
       command: 'npm run session -- planner user --session demo --replay',
     });

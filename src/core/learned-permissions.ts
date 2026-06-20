@@ -1,5 +1,5 @@
 /**
- * Learned worker permission rules (#70) — the "Always" side of the permission card.
+ * Learned executor permission rules (#70) — the "Always" side of the permission card.
  *
  * The permission escalation (#66) surfaces a gated tool use as an allow/deny card.
  * "Always" is a third choice that allows the action *and* remembers it, so the
@@ -21,7 +21,7 @@
  * an "Always" on a write to `C:/x/y.txt` remembers `Write(C:/x/**)`, not just that
  * one file — fewer future prompts, at the cost of auto-approving siblings in the
  * same directory the human never explicitly saw. The `deny` floor stays in the
- * worker's `--settings`, and Claude enforces deny *before* calling `approve`, so a
+ * executor's `--settings`, and Claude enforces deny *before* calling `approve`, so a
  * denied foot-gun never reaches the server's auto-allow path.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';

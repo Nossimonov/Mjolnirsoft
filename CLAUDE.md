@@ -1,6 +1,6 @@
 # Claude Code Instructions — Mjolnirsoft
 
-Mjolnirsoft is the umbrella for project-agnostic **tooling and methods** — reusable engineering infrastructure that is deliberately *not* tied to any one product codebase. Its founding initiative is **multi-session orchestration tooling** (epic #1): coordinating a planner/orchestrator session with worker sessions over a shared channel.
+Mjolnirsoft is the umbrella for project-agnostic **tooling and methods** — reusable engineering infrastructure that is deliberately *not* tied to any one product codebase. Its founding initiative is **multi-session orchestration tooling** (epic #1): coordinating a planner/orchestrator session with executor sessions over a shared channel.
 
 These instructions are bootstrapped from a sibling project's hard-won conventions, keeping only what is general. They will drift as Mjolnirsoft grows — keep them current.
 

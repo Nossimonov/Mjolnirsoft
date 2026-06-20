@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { SessionStore } from '../../src/core/session-store.ts';
 import { WorktreeManager, type Worktree } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
-import { runWorker } from '../../src/worker/worker-runtime.ts';
-import { createClaudeCodeResponder } from '../../src/worker/claude-code-responder.ts';
+import { runExecutor } from '../../src/executor/executor-runtime.ts';
+import { createClaudeCodeResponder } from '../../src/executor/claude-code-responder.ts';
 import { recordLearnedRule } from '../../src/core/learned-permissions.ts';
 import {
   INTERACTION_DECISION,
@@ -21,7 +21,7 @@ const PERMISSION_PROMPT_TOOL = 'mcp__perm__approve';
 
 // Quick-pick sentinel offered above the session list; the input validation for
 // session names forbids spaces/'+', so this can never collide with a real id.
-const START_NEW_SESSION = '+ Start a new worker session…';
+const START_NEW_SESSION = '+ Start a new executor session…';
 
 export function activate(context: vscode.ExtensionContext): void {
   const openView = vscode.commands.registerCommand('mjolnirsoft.openSessionView', async () => {
@@ -30,50 +30,50 @@ export function activate(context: vscode.ExtensionContext): void {
     const store = storeFor(folder);
 
     // List-or-create front door: with no sessions, skip the dead-end message and
-    // take the newcomer straight into starting a worker.
+    // take the newcomer straight into starting an executor.
     const sessions = store.list();
     if (sessions.length === 0) {
-      await startWorkerSession(context, folder, store);
+      await startExecutorSession(context, folder, store);
       return;
     }
     const pick = await vscode.window.showQuickPick([START_NEW_SESSION, ...sessions], {
       title: 'Open a Mjolnirsoft session',
-      placeHolder: 'Pick a session to open, or start a new worker',
+      placeHolder: 'Pick a session to open, or start a new executor',
     });
     if (!pick) return;
     if (pick === START_NEW_SESSION) {
-      await startWorkerSession(context, folder, store);
+      await startExecutorSession(context, folder, store);
       return;
     }
 
     openSessionPanel(context, store, pick, folder.uri.fsPath);
   });
 
-  const startWorker = vscode.commands.registerCommand('mjolnirsoft.startWorkerSession', async () => {
+  const startExecutor = vscode.commands.registerCommand('mjolnirsoft.startExecutorSession', async () => {
     const folder = requireFolder();
     if (!folder) return;
-    await startWorkerSession(context, folder, storeFor(folder));
+    await startExecutorSession(context, folder, storeFor(folder));
   });
 
-  context.subscriptions.push(openView, startWorker);
+  context.subscriptions.push(openView, startExecutor);
 }
 
 /**
- * Prompt for a name, spawn a worker in its own git worktree, and open its panel.
- * Shared by the "Start Worker Session" command and the "Open Session View" front
- * door, so the start-a-worker logic lives in exactly one place.
+ * Prompt for a name, spawn an executor in its own git worktree, and open its panel.
+ * Shared by the "Start Executor Session" command and the "Open Session View" front
+ * door, so the start-an-executor logic lives in exactly one place.
  */
-async function startWorkerSession(
+async function startExecutorSession(
   context: vscode.ExtensionContext,
   folder: vscode.WorkspaceFolder,
   store: SessionStore,
 ): Promise<void> {
-  // The in-process worker shells out to `claude`; load machine-specific config
+  // The in-process executor shells out to `claude`; load machine-specific config
   // (CLAUDE_BIN) so it's found even when the extension host's PATH lacks it.
   loadLocalEnv(join(folder.uri.fsPath, '.local.env'));
 
   const sessionId = await vscode.window.showInputBox({
-    title: 'Start a worker session',
+    title: 'Start an executor session',
     prompt: 'Name this session',
     placeHolder: 'e.g. add-feature-x',
     validateInput: (value) =>
@@ -86,7 +86,7 @@ async function startWorkerSession(
     return;
   }
 
-  // Give the worker an isolated git worktree on its own branch, so it edits
+  // Give the executor an isolated git worktree on its own branch, so it edits
   // the real repo without ever touching the developer's working tree.
   let worktree: Worktree;
   try {
@@ -96,7 +96,7 @@ async function startWorkerSession(
     return;
   }
 
-  // Give the worker an escalation path: a per-session MCP config wiring Claude's
+  // Give the executor an escalation path: a per-session MCP config wiring Claude's
   // `--permission-prompt-tool` to our server, which bridges a gated tool use to
   // this session's channel so the human can allow/deny it in the panel (#66).
   // The server also reads the project's learned "Always" rules to auto-allow a
@@ -109,12 +109,12 @@ async function startWorkerSession(
     folder.uri.fsPath,
   );
 
-  // Spawn the worker in-process: it joins the session and answers each message
+  // Spawn the executor in-process: it joins the session and answers each message
   // by running a headless Claude Code agent with the worktree as its workspace.
-  const workerChannel = store.open(sessionId);
-  const worker = runWorker(
-    workerChannel,
-    `${sessionId}-worker`,
+  const executorChannel = store.open(sessionId);
+  const executor = runExecutor(
+    executorChannel,
+    `${sessionId}-executor`,
     createClaudeCodeResponder({
       workdir: worktree.path,
       permissionPromptTool: PERMISSION_PROMPT_TOOL,
@@ -123,24 +123,24 @@ async function startWorkerSession(
   );
 
   openSessionPanel(context, store, sessionId, folder.uri.fsPath, {
-    workerAttached: true,
+    executorAttached: true,
     onDispose: () => {
-      worker.close();
-      workerChannel.close();
+      executor.close();
+      executorChannel.close();
       rmSync(mcpConfigPath, { force: true });
-      // System capture: commit whatever the worker changed onto its branch,
+      // System capture: commit whatever the executor changed onto its branch,
       // then drop the worktree (the branch survives for review).
-      const captured = worktree.commit(`Mjolnir worker session ${sessionId}`);
+      const captured = worktree.commit(`Mjolnir executor session ${sessionId}`);
       worktree.remove();
       void vscode.window.showInformationMessage(
         captured
-          ? `Worker session "${sessionId}" ended — review its work on branch ${worktree.branch}.`
-          : `Worker session "${sessionId}" ended — it made no changes (branch ${worktree.branch}).`,
+          ? `Executor session "${sessionId}" ended — review its work on branch ${worktree.branch}.`
+          : `Executor session "${sessionId}" ended — it made no changes (branch ${worktree.branch}).`,
       );
     },
   });
   void vscode.window.showInformationMessage(
-    `Worker session "${sessionId}" started on branch ${worktree.branch} — type a task in the panel.`,
+    `Executor session "${sessionId}" started on branch ${worktree.branch} — type a task in the panel.`,
   );
 }
 
@@ -161,9 +161,9 @@ function storeFor(folder: vscode.WorkspaceFolder): SessionStore {
 /**
  * Open a webview panel attached to a session: replay history, stream live, compose.
  *
- * `workerAttached` says whether a live worker is answering this session. Only the
- * worker-spawning caller sets it true; the "open existing session" front door
- * attaches a viewer with no worker, so its panel must never show "working" (the
+ * `executorAttached` says whether a live executor is answering this session. Only the
+ * executor-spawning caller sets it true; the "open existing session" front door
+ * attaches a viewer with no executor, so its panel must never show "working" (the
  * indicator once lied for 49 minutes on a session nobody was running) and warns
  * before a typed message vanishes into an unanswered log (#76).
  */
@@ -172,9 +172,9 @@ function openSessionPanel(
   store: SessionStore,
   sessionId: string,
   projectDir: string,
-  options: { onDispose?: () => void; workerAttached?: boolean } = {},
+  options: { onDispose?: () => void; executorAttached?: boolean } = {},
 ): void {
-  const workerAttached = options.workerAttached ?? false;
+  const executorAttached = options.executorAttached ?? false;
   const panel = vscode.window.createWebviewPanel(
     'mjolnirsoftSessionView',
     `Session: ${sessionId}`,
@@ -197,7 +197,7 @@ function openSessionPanel(
   // request — e.g. echoing a question's `questions` back alongside the answers.
   const pendingRequests = new Map<string, InteractionRequest>();
   const participant = channel.join('vscode-view', 'planner', (message) => {
-    // An interaction request means the worker is blocked waiting on us — render
+    // An interaction request means the executor is blocked waiting on us — render
     // its card and keep the "working" indicator on (it hasn't replied yet).
     if (message.type === INTERACTION_REQUEST) {
       const request = message.payload as InteractionRequest;
@@ -206,7 +206,7 @@ function openSessionPanel(
       return;
     }
     void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
-    // A reply (result/text) from another participant means the worker is done — stop "working".
+    // A reply (result/text) from another participant means the executor is done — stop "working".
     void panel.webview.postMessage({ kind: 'working', on: false });
   });
 
@@ -224,16 +224,16 @@ function openSessionPanel(
         const sent = { from: 'vscode-view', type: 'text', payload: event.text };
         void panel.webview.postMessage({ kind: 'message', html: renderMessage(sent) });
         participant.send({ type: 'text', payload: event.text });
-        // We just sent. With a worker attached, show "working" until a reply
+        // We just sent. With an executor attached, show "working" until a reply
         // arrives. Without one, warn — the message is logged but unanswered.
-        // Both decisions are made here, where `workerAttached` is reliable, so
+        // Both decisions are made here, where `executorAttached` is reliable, so
         // the webview never needs attachment state (no init-race to lose).
-        if (workerAttached) {
+        if (executorAttached) {
           void panel.webview.postMessage({ kind: 'working', on: true });
         } else {
           void panel.webview.postMessage({
             kind: 'notice',
-            text: '⚠ No worker is attached — this message is logged but won’t be answered.',
+            text: '⚠ No executor is attached — this message is logged but won’t be answered.',
           });
         }
       } else if (event.kind === 'decision' && event.requestId) {
@@ -251,16 +251,16 @@ function openSessionPanel(
           // Permission: a verdict + requestId is enough; the server fills the
           // original input on a bare allow. "Always" is *our* side-effect — we
           // persist a learned allow rule for the action and then send a plain
-          // `allow`, so the worker/MCP server never sees "always" (#70).
+          // `allow`, so the executor/MCP server never sees "always" (#70).
           if (event.behavior === 'always' && request) {
             recordLearnedRule(projectDir, request.toolName, request.input);
           }
           const behavior = event.behavior === 'deny' ? 'deny' : 'allow';
           participant.send({ type: INTERACTION_DECISION, payload: { requestId: event.requestId, behavior } });
         }
-        // The worker resumes once it has our answer, so show "working" again.
-        // (Interaction requests only come from a live worker, but stay honest.)
-        if (workerAttached) {
+        // The executor resumes once it has our answer, so show "working" again.
+        // (Interaction requests only come from a live executor, but stay honest.)
+        if (executorAttached) {
           void panel.webview.postMessage({ kind: 'working', on: true });
         }
       }
@@ -335,7 +335,7 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 </head>
 <body>
 <div id="content"></div>
-<div id="working" hidden>● worker is working…</div>
+<div id="working" hidden>● executor is working…</div>
 <div id="notice" hidden></div>
 <div id="composer">
   <textarea id="input" placeholder="Type a message (Markdown + Mermaid). Enter to send, Shift+Enter for a new line."></textarea>

@@ -1,7 +1,7 @@
 {
   "name": "mjolnirsoft-session-view",
   "displayName": "Mjolnirsoft Session View",
-  "description": "Render a Mjolnirsoft worker session as Markdown and Mermaid.",
+  "description": "Render a Mjolnirsoft executor session as Markdown and Mermaid.",
   "version": "0.0.0",
   "private": true,
   "publisher": "mjolnirsoft",
@@ -16,8 +16,8 @@
         "title": "Mjolnirsoft: Open Session View"
       },
       {
-        "command": "mjolnirsoft.startWorkerSession",
-        "title": "Mjolnirsoft: Start Worker Session"
+        "command": "mjolnirsoft.startExecutorSession",
+        "title": "Mjolnirsoft: Start Executor Session"
       }
     ]
   },
