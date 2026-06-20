@@ -43,17 +43,45 @@ describe('renderMessage', () => {
     expect(html).toContain('42');
   });
 
-  it('styles an error turn distinctly via the `error` class, not the sender hue (#89)', () => {
+  it('styles a (non-auth) error turn distinctly via the `error` class, not the sender hue (#89)', () => {
+    // A generic failure — not an auth signature (#90 reroutes those to the auth
+    // card), so this still exercises the plain #89 error turn.
     const html = renderMessage({
       from: 'executor-1',
       role: 'executor',
       type: 'error',
-      payload: 'executor executor-1 failed to respond: Error: claude exited 401',
+      payload: 'executor executor-1 failed to respond: Error: claude exited 1',
     });
     expect(html).toContain('class="turn error"'); // theme warning colour via CSS, not an inline hue
     expect(html).not.toContain('hsl('); // not the per-sender hue style
     expect(html).toContain('executor-1 · error');
-    expect(html).toContain('claude exited 401');
+    expect(html).toContain('claude exited 1');
+  });
+
+  it('renders an auth failure as a guided re-login card with log-in and retry actions (#90)', () => {
+    const html = renderMessage({
+      from: 'executor-1',
+      role: 'executor',
+      type: 'error',
+      payload: 'executor executor-1 failed to respond: Error: OAuth token has expired',
+    });
+    expect(html).toContain('class="turn error auth"');
+    expect(html).toContain('authentication failed');
+    expect(html).toContain('class="auth-login"'); // opens `claude auth login` host-side
+    expect(html).toContain('class="auth-retry"'); // re-sends the held failed task
+    expect(html).toContain('OAuth token has expired'); // the raw failure, for context
+  });
+
+  it('falls back to the plain error turn for a non-auth failure (#89), not the auth card', () => {
+    const html = renderMessage({
+      from: 'executor-1',
+      role: 'executor',
+      type: 'error',
+      payload: 'executor executor-1 failed to respond: Error: ENOENT spawn claude',
+    });
+    expect(html).toContain('class="turn error"');
+    expect(html).not.toContain('auth'); // not the auth card — no log-in/retry affordance
+    expect(html).not.toContain('auth-login');
   });
 
   it('colours the turn by its sender, keyed on `from`', () => {
