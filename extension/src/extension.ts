@@ -299,6 +299,10 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   body { font-family: var(--vscode-font-family); display: flex; flex-direction: column; }
   #content { flex: 1; overflow-y: auto; padding: 0 1rem; }
   .turn { padding: 0.4rem 0.6rem; margin: 0.45rem 0; border-radius: 4px; }
+  /* An executor-failure turn (#89): a theme warning colour so it reads as a problem. */
+  .turn.error { border-inline-start: 3px solid var(--vscode-inputValidation-warningBorder, #cca700);
+                background: var(--vscode-inputValidation-warningBackground, rgba(204,167,0,0.1)); }
+  .turn.error .from { color: var(--vscode-inputValidation-warningForeground, #cca700); opacity: 1; }
   .from { font-size: 0.8em; opacity: 0.7; margin-bottom: 0.25rem; }
   .mermaid { background: #fff; padding: 0.5rem; border-radius: 4px; }
   #working { padding: 0.25rem 1rem; font-size: 0.85em; opacity: 0.75; }
