@@ -19,8 +19,8 @@ export class InMemoryChannel implements Channel {
     return {
       id,
       role,
-      send: (message: Omit<Message, 'from'>) => {
-        const delivered: Message = { from: id, ...message };
+      send: (message: Omit<Message, 'from' | 'role'>) => {
+        const delivered: Message = { from: id, role, ...message };
         for (const [participantId, participant] of this.participants) {
           if (participantId !== id) {
             participant.onMessage(delivered);

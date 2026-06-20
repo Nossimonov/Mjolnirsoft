@@ -14,7 +14,7 @@ import { createPermissionBridge } from './permission-bridge.ts';
  * side of one channel, the way the MCP server and the VS Code panel meet over a
  * session's FileChannel — but in-memory, so the round-trip is synchronous.
  */
-function wire(respond: (request: InteractionRequest) => Omit<Message, 'from'>) {
+function wire(respond: (request: InteractionRequest) => Omit<Message, 'from' | 'role'>) {
   const channel = new InMemoryChannel();
   const view = channel.join('view', 'planner', (message) => {
     if (message.type === INTERACTION_REQUEST) {
@@ -56,7 +56,12 @@ describe('permission bridge', () => {
     const { bridge } = wire(() => ({ type: 'noop' }));
     // A stray decision must not throw or resolve anything.
     expect(() =>
-      bridge.handleMessage({ from: 'view', type: INTERACTION_DECISION, payload: { requestId: 'ghost', behavior: 'allow' } }),
+      bridge.handleMessage({
+        from: 'view',
+        role: 'planner',
+        type: INTERACTION_DECISION,
+        payload: { requestId: 'ghost', behavior: 'allow' },
+      }),
     ).not.toThrow();
   });
 });

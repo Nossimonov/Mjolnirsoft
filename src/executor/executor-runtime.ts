@@ -1,7 +1,7 @@
 import type { Channel, Message, Participant } from '../core/channel.ts';
 
 /** Computes an executor's reply to an incoming message, or undefined for no reply. */
-export type Respond = (message: Message) => Promise<Omit<Message, 'from'> | undefined>;
+export type Respond = (message: Message) => Promise<Omit<Message, 'from' | 'role'> | undefined>;
 
 /**
  * A trivial {@link Respond} that echoes the message back as an `ack`. It is the

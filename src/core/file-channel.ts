@@ -62,8 +62,8 @@ export class FileChannel implements Channel {
     return {
       id,
       role,
-      send: (message: Omit<Message, 'from'>) => {
-        const delivered: Message = { from: id, ...message };
+      send: (message: Omit<Message, 'from' | 'role'>) => {
+        const delivered: Message = { from: id, role, ...message };
         appendFileSync(this.logPath, `${JSON.stringify(delivered)}\n`);
       },
       close: () => {

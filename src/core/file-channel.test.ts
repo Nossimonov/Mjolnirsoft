@@ -40,7 +40,7 @@ describe('FileChannel', () => {
     planner.send({ type: 'text', payload: 'do it' });
     b.poll();
 
-    expect(inbox).toEqual([{ from: 'planner-1', type: 'text', payload: 'do it' }]);
+    expect(inbox).toEqual([{ from: 'planner-1', role: 'planner', type: 'text', payload: 'do it' }]);
   });
 
   it('writes a faithful, replayable transcript to the log (AC2)', () => {
@@ -50,8 +50,8 @@ describe('FileChannel', () => {
 
     const transcript = readFileSync(logPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     expect(transcript).toEqual([
-      { from: 'planner-1', type: 'text', payload: 'one' },
-      { from: 'planner-1', type: 'task', payload: { n: 2 } },
+      { from: 'planner-1', role: 'planner', type: 'text', payload: 'one' },
+      { from: 'planner-1', role: 'planner', type: 'task', payload: { n: 2 } },
     ]);
   });
 
@@ -96,7 +96,7 @@ describe('FileChannel', () => {
     const live = channel();
     live.join('boss', 'planner', () => {}).send({ type: 'text', payload: 'and write tests' });
     attached.poll();
-    expect(inbox).toContainEqual({ from: 'boss', type: 'text', payload: 'and write tests' });
+    expect(inbox).toContainEqual({ from: 'boss', role: 'planner', type: 'text', payload: 'and write tests' });
   });
 
   it('rejects joining with a duplicate participant id', () => {

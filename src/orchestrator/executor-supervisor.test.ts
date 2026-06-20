@@ -76,6 +76,8 @@ describe('spawnExecutor', () => {
     executor.orchestrator.send({ type: 'text', payload: 'implement the login form' });
 
     const transcript = readFileSync(join(baseDir, 's1.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-    expect(transcript).toEqual([{ from: 'orchestrator', type: 'text', payload: 'implement the login form' }]);
+    expect(transcript).toEqual([
+      { from: 'orchestrator', role: 'planner', type: 'text', payload: 'implement the login form' },
+    ]);
   });
 });

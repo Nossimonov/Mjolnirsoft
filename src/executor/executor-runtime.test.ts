@@ -17,7 +17,7 @@ describe('runExecutor', () => {
     await flush();
 
     expect(orchestratorInbox).toEqual([
-      { from: 'executor-1', type: 'ack', payload: 'received: implement #88' },
+      { from: 'executor-1', role: 'executor', type: 'ack', payload: 'received: implement #88' },
     ]);
   });
 
@@ -30,7 +30,7 @@ describe('runExecutor', () => {
     orchestrator.send({ type: 'text', payload: 'X' });
     await flush();
 
-    expect(inbox).toEqual([{ from: 'executor-1', type: 'result', payload: 'done: X' }]);
+    expect(inbox).toEqual([{ from: 'executor-1', role: 'executor', type: 'result', payload: 'done: X' }]);
   });
 
   it('sends no reply when the behavior resolves undefined', async () => {

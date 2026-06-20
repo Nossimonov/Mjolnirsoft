@@ -18,7 +18,7 @@ describe('InMemoryChannel', () => {
 
     planner.send({ type: 'task', payload: { id: 42 } });
 
-    expect(executorInbox).toEqual([{ from: 'planner-1', type: 'task', payload: { id: 42 } }]);
+    expect(executorInbox).toEqual([{ from: 'planner-1', role: 'planner', type: 'task', payload: { id: 42 } }]);
   });
 
   it('does not echo a message back to its sender', () => {

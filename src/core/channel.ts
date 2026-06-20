@@ -17,6 +17,14 @@ export type Role = 'planner' | 'executor';
 export interface Message {
   /** id of the participant that sent the message */
   readonly from: string;
+  /**
+   * Role the sender holds on the channel, stamped by `send` alongside `from`.
+   * Carried in the delivered message (not looked up at the receiver) so a
+   * cross-process recipient — which doesn't know the remote sender's role —
+   * can still attribute authority: an `executor` peer must never be mistaken
+   * for the authoritative human (`planner`). See #86.
+   */
+  readonly role: Role;
   /** discriminator for the kind of message */
   readonly type: string;
   /** optional message body */
@@ -30,8 +38,8 @@ export type MessageHandler = (message: Message) => void;
 export interface Participant {
   readonly id: string;
   readonly role: Role;
-  /** Send a message to the other participants on the channel. */
-  send(message: Omit<Message, 'from'>): void;
+  /** Send a message to the other participants on the channel. `from` and `role` are stamped by the channel. */
+  send(message: Omit<Message, 'from' | 'role'>): void;
   /** Leave the channel and release any resources held for this participant. */
   close(): void;
 }

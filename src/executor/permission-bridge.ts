@@ -7,7 +7,7 @@ import {
 } from '../core/interaction.ts';
 
 /** Sends a message on behalf of a joined participant (the participant's `send`). */
-type Send = (message: Omit<Message, 'from'>) => void;
+type Send = (message: Omit<Message, 'from' | 'role'>) => void;
 
 /**
  * Bridges Claude's permission prompt to a human over the channel: {@link request}
