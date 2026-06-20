@@ -173,6 +173,26 @@ describe('createClaudeCodeResponder', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it('ignores delegation control messages rather than treating them as prompts (#93)', async () => {
+    const run = vi.fn().mockResolvedValue('x');
+    const respond = createClaudeCodeResponder({ workdir: '/w', run });
+    const req = {
+      from: 'd',
+      role: 'executor',
+      type: 'delegation-request',
+      payload: { requestId: 'r', action: 'spawn', role: 'evaluator', task: 'review' },
+    } as const;
+    const res = {
+      from: 'host',
+      role: 'planner',
+      type: 'delegation-response',
+      payload: { requestId: 'r', delegateId: 'x-evaluator-1' },
+    } as const;
+    expect(await respond(req)).toBeUndefined();
+    expect(await respond(res)).toBeUndefined();
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('passes the permission-prompt tool and MCP config through to the run (#66)', async () => {
     const run = vi.fn().mockResolvedValue('ok');
     const respond = createClaudeCodeResponder({
@@ -199,6 +219,14 @@ describe('senderAttribution', () => {
   it('labels an executor sender as a (non-authoritative) agent, distinct from the architect (#86)', () => {
     const attribution = senderAttribution({ from: 'executor-2', role: 'executor' });
     expect(attribution).toBe('[Message from agent (id: executor-2)]');
+    expect(attribution).not.toContain('authoritative');
+  });
+
+  it('labels an evaluator delegate\'s report as a (non-authoritative) agent too (#93)', () => {
+    // A delegate's bridged finding carries its `evaluator` role; it must read as a
+    // non-authoritative agent, never able to borrow the architect's authority.
+    const attribution = senderAttribution({ from: 'w1-executor-evaluator-1', role: 'evaluator' });
+    expect(attribution).toBe('[Message from agent (id: w1-executor-evaluator-1)]');
     expect(attribution).not.toContain('authoritative');
   });
 });

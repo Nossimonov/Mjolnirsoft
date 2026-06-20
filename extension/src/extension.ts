@@ -7,12 +7,15 @@ import { WorktreeManager, currentRemoteBase, type Worktree } from '../../src/cor
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runExecutor } from '../../src/executor/executor-runtime.ts';
 import { createClaudeCodeResponder, resolveClaudeBin } from '../../src/executor/claude-code-responder.ts';
+import { createDelegationHost } from '../../src/executor/delegation-host.ts';
+import { composeAgentInstructions } from '../../src/core/agent-instructions.ts';
 import { recordLearnedRule } from '../../src/core/learned-permissions.ts';
 import {
   INTERACTION_DECISION,
   INTERACTION_REQUEST,
   type InteractionRequest,
 } from '../../src/core/interaction.ts';
+import { DELEGATION_REQUEST, DELEGATION_RESPONSE } from '../../src/core/delegation-protocol.ts';
 import { renderMessage, renderInteractionRequest } from './render.ts';
 
 // The MCP server is named `perm` in the generated config, so its `approve` tool
@@ -99,25 +102,28 @@ async function startExecutorSession(
     return;
   }
 
-  // Give the executor an escalation path: a per-session MCP config wiring Claude's
-  // `--permission-prompt-tool` to our server, which bridges a gated tool use to
-  // this session's channel so the human can allow/deny it in the panel (#66).
-  // The server also reads the project's learned "Always" rules to auto-allow a
-  // remembered action without prompting, so it's given the project dir (#70).
+  // Give the executor its MCP-backed capabilities: one per-session config wiring
+  // Claude to both bundled servers — the permission server for escalation (#66/#70)
+  // and the delegation server for spawning delegates (#93) — each bridging over
+  // this session's channel. The human allows/denies gated tool uses in the panel;
+  // a delegation request is answered by the in-host delegation manager wired below.
   const permParticipantId = `${sessionId}-perms`;
-  const mcpConfigPath = writePermissionMcpConfig(
+  const delegateParticipantId = `${sessionId}-delegate`;
+  const mcpConfigPath = writeExecutorMcpConfig(
     context,
     store.logPath(sessionId),
     permParticipantId,
+    delegateParticipantId,
     folder.uri.fsPath,
   );
 
   // Spawn the executor in-process: it joins the session and answers each message
   // by running a headless Claude Code agent with the worktree as its workspace.
   const executorChannel = store.open(sessionId);
+  const executorId = `${sessionId}-executor`;
   const executor = runExecutor(
     executorChannel,
-    `${sessionId}-executor`,
+    executorId,
     createClaudeCodeResponder({
       workdir: worktree.path,
       permissionPromptTool: PERMISSION_PROMPT_TOOL,
@@ -125,9 +131,30 @@ async function startExecutorSession(
     }),
   );
 
+  // Host the live side of delegation (#93): answer the executor's spawn/shutdown
+  // requests by running the delegation manager in-process. A spawned delegate
+  // (e.g. an evaluator) runs a headless Claude Code agent with **the executor's
+  // own worktree** as its workspace — so it reviews "what is" — on its own
+  // sub-channel session log, composing that role's instructions; its finding
+  // bridges back up onto this session, attributed as an agent (#86).
+  const delegationHost = createDelegationHost({
+    spawnerChannel: executorChannel,
+    spawnerId: executorId,
+    hostId: `${sessionId}-delegation-host`,
+    openSubChannel: (id) => store.open(id),
+    createResponder: (role) =>
+      createClaudeCodeResponder({
+        workdir: worktree.path,
+        appendSystemPrompt: composeAgentInstructions(role),
+        // claudeSessionId defaults to a fresh UUID — the delegate's *channel* id
+        // is not a valid `--session-id`, and a delegate is short-lived anyway.
+      }),
+  });
+
   openSessionPanel(context, store, sessionId, folder.uri.fsPath, {
     executorAttached: true,
     onDispose: () => {
+      delegationHost.close();
       executor.close();
       executorChannel.close();
       rmSync(mcpConfigPath, { force: true });
@@ -204,6 +231,11 @@ function openSessionPanel(
   // message is the one that failed.
   let lastSentText: string | undefined;
   const participant = channel.join('vscode-view', 'planner', (message) => {
+    // Delegation control messages (#93) are plumbing between the executor's MCP
+    // server and the in-host delegation manager — not conversation. Skip them so
+    // they don't render as noisy turns or toggle the working indicator; the
+    // delegate's *report* arrives as an ordinary message and renders normally.
+    if (message.type === DELEGATION_REQUEST || message.type === DELEGATION_RESPONSE) return;
     // An interaction request means the executor is blocked waiting on us — render
     // its card and keep the "working" indicator on (it hasn't replied yet).
     if (message.type === INTERACTION_REQUEST) {
@@ -394,35 +426,55 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 }
 
 /**
- * Write a per-session MCP config that wires Claude's `--permission-prompt-tool`
- * to our bundled permission server, and return its path. The server is launched
- * with the extension host's own Node (Electron run as Node, so no separate Node
- * on PATH is needed) and told — via env — which session log to bridge over, what
- * channel id to use, and which project dir holds the learned "Always" rules it
- * consults to auto-allow (#70). Returns the temp path; the caller deletes it on close.
+ * Write a per-session MCP config wiring Claude to *both* bundled servers an
+ * executor needs, and return its path. One config file declares two servers, so
+ * a single `--mcp-config` carries both (Claude merges all servers from the file):
+ *
+ *  - `perm` (#66) — backs `--permission-prompt-tool mcp__perm__approve`: bridges a
+ *    gated tool use to the session channel for the human, and consults the
+ *    project's learned "Always" rules to auto-allow (#70), so it's given the
+ *    project dir.
+ *  - `delegate` (#93) — exposes `mcp__delegate__spawn`/`mcp__delegate__shutdown`:
+ *    bridges a delegation request to the in-host delegation manager over the same
+ *    session channel.
+ *
+ * Both servers are launched with the extension host's own Node (Electron run as
+ * Node, so no separate Node on PATH is needed) and bridge over the same session
+ * log under their own distinct channel ids. Returns the temp path; the caller
+ * deletes it on close.
  */
-function writePermissionMcpConfig(
+function writeExecutorMcpConfig(
   context: vscode.ExtensionContext,
   sessionLogPath: string,
-  participantId: string,
+  permParticipantId: string,
+  delegateParticipantId: string,
   projectDir: string,
 ): string {
-  const serverPath = vscode.Uri.joinPath(context.extensionUri, 'dist', 'permission-mcp-server.js').fsPath;
+  const dist = (name: string) => vscode.Uri.joinPath(context.extensionUri, 'dist', name).fsPath;
   const config = {
     mcpServers: {
       perm: {
         command: process.execPath,
-        args: [serverPath],
+        args: [dist('permission-mcp-server.js')],
         env: {
           ELECTRON_RUN_AS_NODE: '1',
           MJOLNIR_SESSION_LOG: sessionLogPath,
-          MJOLNIR_PERM_ID: participantId,
+          MJOLNIR_PERM_ID: permParticipantId,
           MJOLNIR_PROJECT_DIR: projectDir,
+        },
+      },
+      delegate: {
+        command: process.execPath,
+        args: [dist('delegation-mcp-server.js')],
+        env: {
+          ELECTRON_RUN_AS_NODE: '1',
+          MJOLNIR_SESSION_LOG: sessionLogPath,
+          MJOLNIR_DELEGATE_ID: delegateParticipantId,
         },
       },
     },
   };
-  const configPath = join(tmpdir(), `mjolnir-perm-${participantId}-${Date.now()}.json`);
+  const configPath = join(tmpdir(), `mjolnir-mcp-${permParticipantId}-${Date.now()}.json`);
   writeFileSync(configPath, JSON.stringify(config));
   return configPath;
 }
