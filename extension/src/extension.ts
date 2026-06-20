@@ -123,6 +123,7 @@ async function startWorkerSession(
   );
 
   openSessionPanel(context, store, sessionId, folder.uri.fsPath, {
+    workerAttached: true,
     onDispose: () => {
       worker.close();
       workerChannel.close();
@@ -157,14 +158,23 @@ function storeFor(folder: vscode.WorkspaceFolder): SessionStore {
   return new SessionStore({ baseDir: vscode.Uri.joinPath(folder.uri, '.mjolnir', 'sessions').fsPath });
 }
 
-/** Open a webview panel attached to a session: replay history, stream live, compose. */
+/**
+ * Open a webview panel attached to a session: replay history, stream live, compose.
+ *
+ * `workerAttached` says whether a live worker is answering this session. Only the
+ * worker-spawning caller sets it true; the "open existing session" front door
+ * attaches a viewer with no worker, so its panel must never show "working" (the
+ * indicator once lied for 49 minutes on a session nobody was running) and warns
+ * before a typed message vanishes into an unanswered log (#76).
+ */
 function openSessionPanel(
   context: vscode.ExtensionContext,
   store: SessionStore,
   sessionId: string,
   projectDir: string,
-  options: { onDispose?: () => void } = {},
+  options: { onDispose?: () => void; workerAttached?: boolean } = {},
 ): void {
+  const workerAttached = options.workerAttached ?? false;
   const panel = vscode.window.createWebviewPanel(
     'mjolnirsoftSessionView',
     `Session: ${sessionId}`,
@@ -214,8 +224,18 @@ function openSessionPanel(
         const sent = { from: 'vscode-view', type: 'text', payload: event.text };
         void panel.webview.postMessage({ kind: 'message', html: renderMessage(sent) });
         participant.send({ type: 'text', payload: event.text });
-        // We just sent — show "working" until a reply arrives.
-        void panel.webview.postMessage({ kind: 'working', on: true });
+        // We just sent. With a worker attached, show "working" until a reply
+        // arrives. Without one, warn — the message is logged but unanswered.
+        // Both decisions are made here, where `workerAttached` is reliable, so
+        // the webview never needs attachment state (no init-race to lose).
+        if (workerAttached) {
+          void panel.webview.postMessage({ kind: 'working', on: true });
+        } else {
+          void panel.webview.postMessage({
+            kind: 'notice',
+            text: '⚠ No worker is attached — this message is logged but won’t be answered.',
+          });
+        }
       } else if (event.kind === 'decision' && event.requestId) {
         const request = pendingRequests.get(event.requestId);
         pendingRequests.delete(event.requestId);
@@ -239,7 +259,10 @@ function openSessionPanel(
           participant.send({ type: INTERACTION_DECISION, payload: { requestId: event.requestId, behavior } });
         }
         // The worker resumes once it has our answer, so show "working" again.
-        void panel.webview.postMessage({ kind: 'working', on: true });
+        // (Interaction requests only come from a live worker, but stay honest.)
+        if (workerAttached) {
+          void panel.webview.postMessage({ kind: 'working', on: true });
+        }
       }
     },
   );
@@ -277,6 +300,8 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   .mermaid { background: #fff; padding: 0.5rem; border-radius: 4px; }
   #working { padding: 0.25rem 1rem; font-size: 0.85em; opacity: 0.75; }
   #working[hidden] { display: none; }
+  #notice { padding: 0.25rem 1rem; font-size: 0.85em; color: var(--vscode-inputValidation-warningForeground, #cca700); }
+  #notice[hidden] { display: none; }
   #composer { display: flex; gap: 0.5rem; padding: 0.5rem 1rem; border-top: 1px solid var(--vscode-panel-border); }
   #input { flex: 1; min-height: 3em; font: inherit; resize: vertical; padding: 0.4rem;
            background: var(--vscode-input-background); color: var(--vscode-input-foreground);
@@ -311,6 +336,7 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 <body>
 <div id="content"></div>
 <div id="working" hidden>● worker is working…</div>
+<div id="notice" hidden></div>
 <div id="composer">
   <textarea id="input" placeholder="Type a message (Markdown + Mermaid). Enter to send, Shift+Enter for a new line."></textarea>
   <button id="send">Send</button>
