@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { Message } from '../core/channel.ts';
 import { INTERACTION_DECISION, INTERACTION_REQUEST } from '../core/interaction.ts';
+import { DELEGATION_REQUEST, DELEGATION_RESPONSE } from '../core/delegation-protocol.ts';
 import { composeAgentInstructions } from '../core/agent-instructions.ts';
 import type { Respond } from './executor-runtime.ts';
 
@@ -16,8 +17,10 @@ import type { Respond } from './executor-runtime.ts';
  * a separate concern and deliberately untouched here.
  */
 export function senderAttribution(message: Pick<Message, 'from' | 'role'>): string {
-  const descriptor =
-    message.role === 'planner' ? 'architect — authoritative' : message.role === 'executor' ? 'agent' : 'unknown role';
+  // `planner` is the authoritative human; every spawned agent role (executor,
+  // evaluator, …) reads as a non-authoritative `agent`, so a delegate's bridged
+  // report (#93) can never be mistaken for the architect's instruction (#86).
+  const descriptor = message.role === 'planner' ? 'architect — authoritative' : 'agent';
   return `[Message from ${descriptor} (id: ${message.from})]`;
 }
 
@@ -48,7 +51,22 @@ export type RunClaudeCode = (prompt: string, options: { cwd: string } & ClaudeRu
  */
 export const EXECUTOR_PERMISSION_POLICY = {
   permissions: {
-    allow: ['Read', 'Glob', 'Grep', 'WebFetch', 'Edit(./**)', 'Write(./**)', 'Bash'],
+    // The delegation MCP tools (#93) are pre-allowed so an executor can delegate
+    // (e.g. spawn an evaluator to cold-read its diff) without each spawn dead-
+    // ending on a prompt — spawning is a safe, read-only-by-role action gated by
+    // protocol, not by a human decision. The actual spawn still bridges to the
+    // host, which decides what a role may do.
+    allow: [
+      'Read',
+      'Glob',
+      'Grep',
+      'WebFetch',
+      'Edit(./**)',
+      'Write(./**)',
+      'Bash',
+      'mcp__delegate__spawn',
+      'mcp__delegate__shutdown',
+    ],
     deny: ['Bash(rm -rf *)', 'Bash(git push *)', 'Bash(git reset --hard *)', 'Bash(sudo *)'],
   },
 };
@@ -222,10 +240,19 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
   let sessionId = claudeSessionId;
   let started = false;
   return async (message) => {
-    // Permission requests/decisions are a side-channel between the MCP server and
-    // the view — not task prompts. Ignoring them keeps the executor from feeding
-    // its own mid-run permission request back into Claude as a new turn (#66).
-    if (message.type === INTERACTION_REQUEST || message.type === INTERACTION_DECISION) return undefined;
+    // Permission requests/decisions (#66) and delegation control messages (#93)
+    // are side-channels between an MCP server and the host — not task prompts.
+    // Ignoring them keeps the executor from feeding its own mid-run request back
+    // into Claude as a new turn. (A delegate's *report* is an ordinary message,
+    // not one of these, so it still reaches the executor as a turn.)
+    if (
+      message.type === INTERACTION_REQUEST ||
+      message.type === INTERACTION_DECISION ||
+      message.type === DELEGATION_REQUEST ||
+      message.type === DELEGATION_RESPONSE
+    ) {
+      return undefined;
+    }
     const body = typeof message.payload === 'string' ? message.payload : JSON.stringify(message.payload);
     // Prefix the sender's identity + role so the agent reads who it's hearing
     // from — the authoritative architect vs. a peer/subordinate agent (#86).

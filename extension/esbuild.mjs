@@ -31,6 +31,17 @@ await esbuild.build({
   outfile: 'dist/permission-mcp-server.js',
 });
 
+// Delegation MCP server: a second standalone Node process Claude Code spawns for
+// an executor run (#93). Like the permission server, it bundles the MCP SDK so it
+// runs from dist/ alone and is launched via the extension host's Node.
+await esbuild.build({
+  ...common,
+  entryPoints: ['../src/executor/delegation-mcp-server.ts'],
+  format: 'cjs',
+  platform: 'node',
+  outfile: 'dist/delegation-mcp-server.js',
+});
+
 // Webview: browser bundle that pulls in mermaid.
 await esbuild.build({
   ...common,
