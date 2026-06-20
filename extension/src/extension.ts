@@ -6,7 +6,7 @@ import { SessionStore } from '../../src/core/session-store.ts';
 import { WorktreeManager, currentRemoteBase, type Worktree } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runExecutor } from '../../src/executor/executor-runtime.ts';
-import { createClaudeCodeResponder } from '../../src/executor/claude-code-responder.ts';
+import { createClaudeCodeResponder, resolveClaudeBin } from '../../src/executor/claude-code-responder.ts';
 import { recordLearnedRule } from '../../src/core/learned-permissions.ts';
 import {
   INTERACTION_DECISION,
@@ -199,6 +199,10 @@ function openSessionPanel(
   // only knows the id + the user's picks) can be assembled against the original
   // request — e.g. echoing a question's `questions` back alongside the answers.
   const pendingRequests = new Map<string, InteractionRequest>();
+  // The last task we sent, held so an auth-failure card's "Retry" can re-send it
+  // (#90). A single interactive executor answers this session, so the last-sent
+  // message is the one that failed.
+  let lastSentText: string | undefined;
   const participant = channel.join('vscode-view', 'planner', (message) => {
     // An interaction request means the executor is blocked waiting on us — render
     // its card and keep the "working" indicator on (it hasn't replied yet).
@@ -213,8 +217,28 @@ function openSessionPanel(
     void panel.webview.postMessage({ kind: 'working', on: false });
   });
 
-  // Compose-and-send: one (possibly multi-line) message per send. The channel
-  // doesn't echo a participant's own messages, so render the sent turn locally.
+  // Send one (possibly multi-line) message: render the sent turn locally (the
+  // channel doesn't echo a participant's own messages), put it on the channel,
+  // and hold it as the last-sent task for an auth "Retry" (#90). With an executor
+  // attached, show "working" until a reply arrives; without one, warn — the
+  // message is logged but unanswered. Both decisions are made here, where
+  // `executorAttached` is reliable, so the webview never needs attachment state.
+  const dispatchSend = (text: string): void => {
+    const sent = { from: participant.id, role: participant.role, type: 'text', payload: text };
+    void panel.webview.postMessage({ kind: 'message', html: renderMessage(sent) });
+    participant.send({ type: 'text', payload: text });
+    lastSentText = text;
+    if (executorAttached) {
+      void panel.webview.postMessage({ kind: 'working', on: true });
+    } else {
+      void panel.webview.postMessage({
+        kind: 'notice',
+        text: '⚠ No executor is attached — this message is logged but won’t be answered.',
+      });
+    }
+  };
+
+  // Compose-and-send: one (possibly multi-line) message per send.
   panel.webview.onDidReceiveMessage(
     (event: {
       kind?: string;
@@ -224,21 +248,21 @@ function openSessionPanel(
       answers?: Record<string, string | string[]>;
     }) => {
       if (event.kind === 'send' && event.text) {
-        const sent = { from: participant.id, role: participant.role, type: 'text', payload: event.text };
-        void panel.webview.postMessage({ kind: 'message', html: renderMessage(sent) });
-        participant.send({ type: 'text', payload: event.text });
-        // We just sent. With an executor attached, show "working" until a reply
-        // arrives. Without one, warn — the message is logged but unanswered.
-        // Both decisions are made here, where `executorAttached` is reliable, so
-        // the webview never needs attachment state (no init-race to lose).
-        if (executorAttached) {
-          void panel.webview.postMessage({ kind: 'working', on: true });
-        } else {
-          void panel.webview.postMessage({
-            kind: 'notice',
-            text: '⚠ No executor is attached — this message is logged but won’t be answered.',
-          });
-        }
+        dispatchSend(event.text);
+      } else if (event.kind === 'auth-login') {
+        // Guided re-login (#90): the official Claude Code extension exposes no
+        // command API to invoke its OAuth flow, so open an integrated terminal
+        // running `<CLAUDE_BIN> auth login`. The user completes the browser flow;
+        // refreshed per-machine credentials are picked up by the next executor
+        // spawn. Reuse `resolveClaudeBin()` so a `.local.env` CLAUDE_BIN is honored.
+        const terminal = vscode.window.createTerminal({ name: 'Claude login' });
+        terminal.sendText(`${resolveClaudeBin()} auth login`);
+        terminal.show();
+      } else if (event.kind === 'auth-retry') {
+        // Re-send the held failed task to the still-alive executor (runExecutor's
+        // catch doesn't tear it down), which re-spawns claude and reads the
+        // refreshed creds. Show "working" like a normal send.
+        if (lastSentText !== undefined) dispatchSend(lastSentText);
       } else if (event.kind === 'decision' && event.requestId) {
         const request = pendingRequests.get(event.requestId);
         pendingRequests.delete(event.requestId);
@@ -303,6 +327,13 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   .turn.error { border-inline-start: 3px solid var(--vscode-inputValidation-warningBorder, #cca700);
                 background: var(--vscode-inputValidation-warningBackground, rgba(204,167,0,0.1)); }
   .turn.error .from { color: var(--vscode-inputValidation-warningForeground, #cca700); opacity: 1; }
+  /* The auth-failure recovery card (#90): the warning frame plus log-in/retry actions. */
+  .auth-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+  .auth-login { border: none; padding: 0.25rem 0.9rem; cursor: pointer; border-radius: 3px;
+                background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .auth-retry { border: none; padding: 0.25rem 0.9rem; cursor: pointer; border-radius: 3px;
+                background: var(--vscode-button-secondaryBackground, #444); color: var(--vscode-button-secondaryForeground, #fff); }
+  .auth-actions button:disabled { opacity: 0.5; cursor: default; }
   .from { font-size: 0.8em; opacity: 0.7; margin-bottom: 0.25rem; }
   .mermaid { background: #fff; padding: 0.5rem; border-radius: 4px; }
   #working { padding: 0.25rem 1rem; font-size: 0.85em; opacity: 0.75; }

@@ -1,6 +1,7 @@
 import MarkdownIt from 'markdown-it';
 import type { Message } from '../../src/core/channel.ts';
 import type { InteractionRequest } from '../../src/core/interaction.ts';
+import { isAuthError } from '../../src/executor/auth-error.ts';
 
 const md = new MarkdownIt();
 const defaultFence = md.renderer.rules.fence;
@@ -49,8 +50,11 @@ export function renderMessage(message: Message): string {
   // An `error` turn (an executor failure, #89) is styled distinctly via the
   // `.turn.error` class — a warning colour from the theme — rather than the
   // sender hue, so a wedged/failed turn reads as a problem at a glance instead
-  // of blending into the conversation. #90 layers an auth-specific card on top.
+  // of blending into the conversation. #90 layers an auth-specific card on top:
+  // when the failure text matches a known auth signature, render a guided
+  // re-login card instead; otherwise fall back to the plain #89 error turn.
   if (message.type === 'error') {
+    if (isAuthError(body)) return renderAuthErrorCard(message, body);
     return `<div class="turn error"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}</div>${renderMarkdown(body)}</div>`;
   }
   // Colour every other turn by its sender, so a multi-participant conversation
@@ -59,6 +63,29 @@ export function renderMessage(message: Message): string {
   const hue = hueForSender(message.from);
   const style = `border-inline-start:3px solid hsl(${hue} 70% 55%);background:hsl(${hue} 70% 55% / 0.08)`;
   return `<div class="turn" style="${style}"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}</div>${renderMarkdown(body)}</div>`;
+}
+
+/**
+ * Render an auth failure (#90) as a guided-recovery card instead of a bare error
+ * turn: it names the problem as expired/invalid credentials, shows the raw
+ * failure for context, and offers two host-handled actions — "Log in again"
+ * (opens an integrated terminal running `claude auth login`) and "Retry"
+ * (re-sends the held failed task once the user is back in). No request id is
+ * carried: there is a single interactive executor, so the host re-sends the
+ * last-sent task on Retry. The webview wires the buttons (see `main.ts`).
+ */
+function renderAuthErrorCard(message: Message, body: string): string {
+  return (
+    `<div class="turn error auth">` +
+    `<div class="from">${escapeHtml(message.from)} · authentication failed</div>` +
+    `<div>The executor couldn’t authenticate — your Claude Code credentials look expired or invalid. ` +
+    `Log in again, then retry the task.</div>` +
+    `<pre class="interaction-input">${escapeHtml(body)}</pre>` +
+    `<div class="auth-actions">` +
+    `<button class="auth-login" title="Run claude auth login in an integrated terminal">Log in again</button>` +
+    `<button class="auth-retry" title="Re-send the failed task">Retry</button>` +
+    `</div></div>`
+  );
 }
 
 /**
