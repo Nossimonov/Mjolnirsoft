@@ -4,12 +4,50 @@ import {
   resolveClaudeBin,
   buildClaudeArgs,
   senderAttribution,
+  interpretClaudeResult,
   DEFAULT_EXECUTOR_ROLE,
   EXECUTOR_PERMISSIONS,
 } from './claude-code-responder.ts';
+import { isAuthError } from './auth-error.ts';
 import { SHARED_CORE, EXECUTOR_INSERT } from '../core/agent-instructions.ts';
 
 const task = { from: 'orchestrator', role: 'planner', type: 'text', payload: 'write a haiku to haiku.md' } as const;
+
+describe('interpretClaudeResult', () => {
+  it('returns the result on a successful run', () => {
+    const stdout = JSON.stringify({ type: 'result', is_error: false, result: 'wrote haiku.md' });
+    expect(interpretClaudeResult(stdout, '', 0)).toBe('wrote haiku.md');
+  });
+
+  it('surfaces the JSON `result` on failure — where claude puts the error, not stderr (#90)', () => {
+    // The actual shape `claude -p --output-format json` emits when logged out:
+    // exit 1, empty stderr, the error in stdout's `result` with is_error:true.
+    const stdout = JSON.stringify({ type: 'result', is_error: true, result: 'Not logged in · Please run /login' });
+    let message = '';
+    try {
+      interpretClaudeResult(stdout, '', 1);
+    } catch (e) {
+      message = String(e);
+    }
+    expect(message).toContain('Not logged in · Please run /login');
+    // The whole point: the surfaced failure now carries the auth signal, so the
+    // re-login card (#90) classifies it instead of seeing a blank stderr.
+    expect(isAuthError(message)).toBe(true);
+  });
+
+  it('treats is_error:true as a failure even on a zero exit', () => {
+    const stdout = JSON.stringify({ is_error: true, result: 'OAuth token has expired' });
+    expect(() => interpretClaudeResult(stdout, '', 0)).toThrow(/OAuth token has expired/);
+  });
+
+  it('falls back to a code message when neither stdout nor stderr carries detail', () => {
+    expect(() => interpretClaudeResult('', '', 1)).toThrow(/exit 1/);
+  });
+
+  it('reports unparseable output on an otherwise-clean exit', () => {
+    expect(() => interpretClaudeResult('not json', '', 0)).toThrow(/could not parse/);
+  });
+});
 
 describe('DEFAULT_EXECUTOR_ROLE (executor instructions)', () => {
   it('composes the shared model, the executor insert, and operational guidance (#71)', () => {
@@ -74,6 +112,40 @@ describe('createClaudeCodeResponder', () => {
     await respond(task);
     expect(run.mock.calls[0][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: false });
     expect(run.mock.calls[1][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: true });
+  });
+
+  it('rotates the session id after a failed first turn so a retry creates cleanly, not "already in use" (#90)', async () => {
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('claude failed (exit 1): Not logged in · Please run /login'))
+      .mockResolvedValueOnce('ok');
+    const respond = createClaudeCodeResponder({ workdir: '/w', claudeSessionId: 'fixed-uuid', run });
+
+    await expect(respond(task)).rejects.toThrow(); // first turn fails (logged out)
+    await respond(task); // retry, after the user logs in
+
+    // The retry must still *create* (no session was established), but with a
+    // fresh id — reusing the failed id would collide with claude's registration.
+    expect(run.mock.calls[1][1].resume).toBe(false);
+    expect(run.mock.calls[1][1].sessionId).not.toBe(run.mock.calls[0][1].sessionId);
+  });
+
+  it('keeps the session id after an established session, resuming on a later failure (#90)', async () => {
+    const run = vi
+      .fn()
+      .mockResolvedValueOnce('ok') // first turn establishes the session
+      .mockRejectedValueOnce(new Error('claude failed (exit 1): transient'))
+      .mockResolvedValueOnce('ok'); // a later retry
+    const respond = createClaudeCodeResponder({ workdir: '/w', claudeSessionId: 'fixed-uuid', run });
+
+    await respond(task);
+    await expect(respond(task)).rejects.toThrow();
+    await respond(task);
+
+    // Once established, the id is kept and later turns resume — context preserved.
+    const ids = run.mock.calls.map((c) => c[1].sessionId);
+    expect(ids).toEqual(['fixed-uuid', 'fixed-uuid', 'fixed-uuid']);
+    expect(run.mock.calls[2][1].resume).toBe(true);
   });
 
   it('returns undefined when Claude Code produces no result', async () => {

@@ -107,6 +107,21 @@ content?.addEventListener('click', (event: MouseEvent) => {
     return;
   }
 
+  // Auth-failure card (#90). "Log in again" asks the host to open a terminal
+  // running `claude auth login`; it stays clickable (you may need to log in
+  // before retrying). "Retry" re-sends the held failed task and locks the card —
+  // if it fails again, a fresh failure renders its own new card.
+  if (button.classList.contains('auth-login')) {
+    vscode.postMessage({ kind: 'auth-login' });
+    return;
+  }
+  if (button.classList.contains('auth-retry')) {
+    vscode.postMessage({ kind: 'auth-retry' });
+    const actions = button.closest('.auth-actions') as HTMLElement | null;
+    if (actions) lockCard(actions, 'retried');
+    return;
+  }
+
   // Clarifying-question option: single-select replaces, multi-select toggles.
   if (button.classList.contains('opt')) {
     const question = button.closest('.question') as HTMLElement | null;

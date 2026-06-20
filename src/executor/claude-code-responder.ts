@@ -86,6 +86,38 @@ export function resolveClaudeBin(): string {
 }
 
 /**
+ * Interpret a finished `claude -p --output-format json` run into its result text,
+ * or throw an informative Error. `claude` writes a JSON object to stdout *even on
+ * failure* — the human-readable error lands in `result` (an expired/absent login
+ * surfaces `"Not logged in · Please run /login"`) with `is_error: true` and a
+ * non-zero exit, while stderr is typically empty. So the failure detail must be
+ * taken from the JSON `result` first (then stderr, then raw stdout): a stderr-only
+ * path drops it and leaves the surfaced error turn blank and unclassifiable —
+ * which is exactly what hid the auth signal from the re-login card (#90, #89).
+ * Pure (no I/O), so the parsing is unit-tested without spawning `claude`.
+ */
+export function interpretClaudeResult(stdout: string, stderr: string, code: number | null): string {
+  let parsed: { result?: string; is_error?: boolean } | undefined;
+  try {
+    parsed = JSON.parse(stdout) as { result?: string; is_error?: boolean };
+  } catch {
+    parsed = undefined;
+  }
+  if (code !== 0 || parsed?.is_error) {
+    const detail =
+      (typeof parsed?.result === 'string' && parsed.result.trim()) ||
+      stderr.trim() ||
+      stdout.trim() ||
+      `exited with code ${code}`;
+    throw new Error(`claude failed (exit ${code}): ${detail}`);
+  }
+  if (!parsed) {
+    throw new Error(`could not parse claude output: ${stdout.slice(0, 300)}`);
+  }
+  return parsed.result ?? '';
+}
+
+/**
  * Default launcher: spawn `claude -p` headless. A non-`--bare` run uses the
  * logged-in Claude Code session (the user's subscription), `--output-format
  * json` returns a `.result` field, and `--permission-mode acceptEdits` lets the
@@ -118,15 +150,10 @@ export const runClaudeCodeCli: RunClaudeCode = (
     });
     child.on('error', reject);
     child.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`claude exited with code ${code}: ${stderr.trim()}`));
-        return;
-      }
       try {
-        const parsed = JSON.parse(stdout) as { result?: string };
-        resolve(parsed.result ?? '');
-      } catch {
-        reject(new Error(`could not parse claude output: ${stdout.slice(0, 300)}`));
+        resolve(interpretClaudeResult(stdout, stderr, code));
+      } catch (error) {
+        reject(error as Error);
       }
     });
   });
@@ -185,7 +212,15 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     mcpConfigPath,
     run = runClaudeCodeCli,
   } = options;
-  let started = false; // first turn creates the session; later turns resume it
+  // The pinned Claude session: the first turn creates it (`--session-id`), later
+  // turns resume it (`--resume`). `sessionId` is mutable because a turn that fails
+  // *before* any session is established may still have made `claude` register the
+  // id (an auth failure does), so a retry that re-creates the same id would hit
+  // "Session ID … already in use" — rotate to a fresh id so the retry creates
+  // cleanly. Once a session is established, the id is kept so a later-turn failure
+  // can resume without losing the conversation (#90).
+  let sessionId = claudeSessionId;
+  let started = false;
   return async (message) => {
     // Permission requests/decisions are a side-channel between the MCP server and
     // the view — not task prompts. Ignoring them keeps the executor from feeding
@@ -195,16 +230,25 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     // Prefix the sender's identity + role so the agent reads who it's hearing
     // from — the authoritative architect vs. a peer/subordinate agent (#86).
     const prompt = `${senderAttribution(message)}\n\n${body}`;
-    const result = (
-      await run(prompt, {
-        cwd: workdir,
-        appendSystemPrompt,
-        sessionId: claudeSessionId,
-        resume: started,
-        permissionPromptTool,
-        mcpConfigPath,
-      })
-    ).trim();
+    let result: string;
+    try {
+      result = (
+        await run(prompt, {
+          cwd: workdir,
+          appendSystemPrompt,
+          sessionId,
+          resume: started,
+          permissionPromptTool,
+          mcpConfigPath,
+        })
+      ).trim();
+    } catch (error) {
+      // A turn failed before the session was established: the id may already be
+      // claimed by `claude`, so rotate it so the retry creates fresh instead of
+      // colliding. An established session (started) keeps its id and resumes.
+      if (!started) sessionId = randomUUID();
+      throw error;
+    }
     started = true;
     return result ? { type: 'result', payload: result } : undefined;
   };
