@@ -16,6 +16,9 @@
  *   MJOLNIR_PROJECT_DIR  — project root holding learned "Always" rules (#70);
  *                          a request matching one is auto-allowed without a
  *                          prompt. Unset disables auto-allow (every request asks).
+ *   MJOLNIR_WORKTREE_DIR — the executor's worktree, its confinement boundary (#101);
+ *                          a write resolving outside it is auto-denied before any
+ *                          prompt. Unset disables the guardrail (requests escalate).
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -27,6 +30,7 @@ import { approveToolUse } from './permission-approval.ts';
 const logPath = process.env.MJOLNIR_SESSION_LOG;
 const participantId = process.env.MJOLNIR_PERM_ID ?? 'perms';
 const projectDir = process.env.MJOLNIR_PROJECT_DIR;
+const worktreePath = process.env.MJOLNIR_WORKTREE_DIR;
 if (!logPath) {
   process.stderr.write('permission-mcp-server: MJOLNIR_SESSION_LOG is required\n');
   process.exit(1);
@@ -63,7 +67,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   // Re-read learned rules per request (cheap) so a rule learned earlier this
   // session also auto-allows; on no match this escalates exactly as #66 did.
   const verdict = await approveToolUse(
-    { projectDir, bridge, postAudit: (text) => participant.send({ type: 'text', payload: text }) },
+    { projectDir, worktreePath, bridge, postAudit: (text) => participant.send({ type: 'text', payload: text }) },
     toolName,
     args.input,
     args.tool_use_id,
