@@ -1,4 +1,5 @@
 import mermaid from 'mermaid';
+import { formatElapsed } from '../elapsed.ts';
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void };
 
@@ -9,19 +10,55 @@ const content = document.getElementById('content');
 const input = document.getElementById('input') as HTMLTextAreaElement | null;
 const send = document.getElementById('send');
 const working = document.getElementById('working');
+const notice = document.getElementById('notice');
+
+// Client-side elapsed timer for the "working" indicator. The host only tells us
+// when a turn starts and ends; we tick the seconds locally so a long run
+// visibly progresses (and looks alive rather than wedged). Reset each turn.
+let workingSince: number | null = null;
+let tick: ReturnType<typeof setInterval> | null = null;
+
+function renderWorking(): void {
+  if (!working || workingSince === null) return;
+  working.textContent = `● worker is working… ${formatElapsed(Date.now() - workingSince)}`;
+}
+
+function startWorking(): void {
+  if (!working) return;
+  workingSince = Date.now();
+  renderWorking();
+  working.removeAttribute('hidden');
+  if (tick !== null) clearInterval(tick);
+  tick = setInterval(renderWorking, 1000);
+}
+
+function stopWorking(): void {
+  workingSince = null;
+  if (tick !== null) {
+    clearInterval(tick);
+    tick = null;
+  }
+  working?.setAttribute('hidden', '');
+}
 
 // The extension host posts one rendered message (HTML) at a time — replayed
-// history first, then live (and a local echo of what we send) — and toggles a
-// "working" indicator while a reply is pending. Append messages and render any
-// new Mermaid diagrams.
+// history first, then live (and a local echo of what we send) — plus "working"
+// toggles while a reply is pending and a "notice" when a send has no worker to
+// answer it. The host owns both decisions (it knows whether a worker is
+// attached), so the webview just renders what it's told. Append messages and
+// render any new Mermaid diagrams.
 window.addEventListener('message', (event: MessageEvent) => {
-  const data = event.data as { kind?: string; html?: string; on?: boolean };
+  const data = event.data as { kind?: string; html?: string; on?: boolean; text?: string };
   if (data.kind === 'message' && data.html && content) {
     content.insertAdjacentHTML('beforeend', data.html);
     void mermaid.run();
     content.scrollTop = content.scrollHeight;
-  } else if (data.kind === 'working' && working) {
-    working.toggleAttribute('hidden', !data.on);
+  } else if (data.kind === 'working') {
+    if (data.on) startWorking();
+    else stopWorking();
+  } else if (data.kind === 'notice' && notice) {
+    notice.textContent = data.text ?? '';
+    notice.removeAttribute('hidden');
   }
 });
 
@@ -33,6 +70,8 @@ function sendMessage(): void {
   if (!text) return;
   vscode.postMessage({ kind: 'send', text });
   input.value = '';
+  // The host decides whether this send gets a "working" indicator or a "no
+  // worker attached" notice, since only it reliably knows the attachment state.
 }
 
 send?.addEventListener('click', sendMessage);
