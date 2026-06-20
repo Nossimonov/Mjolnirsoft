@@ -58,11 +58,12 @@ describe('renderInteractionRequest', () => {
     toolUseId: 'toolu_1',
   };
 
-  it('renders a permission card naming the tool, with allow/deny keyed by request id', () => {
+  it('renders a permission card naming the tool, with allow/always/deny keyed by request id', () => {
     const html = renderInteractionRequest(request);
     expect(html).toContain('<strong>Write</strong>');
     expect(html).toContain('data-request-id="req-7"');
     expect(html).toContain('data-behavior="allow"');
+    expect(html).toContain('data-behavior="always"'); // the learn-from-decision choice (#70)
     expect(html).toContain('data-behavior="deny"');
   });
 

@@ -7,6 +7,7 @@ import { WorktreeManager, type Worktree } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runWorker } from '../../src/worker/worker-runtime.ts';
 import { createClaudeCodeResponder } from '../../src/worker/claude-code-responder.ts';
+import { recordLearnedRule } from '../../src/core/learned-permissions.ts';
 import {
   INTERACTION_DECISION,
   INTERACTION_REQUEST,
@@ -45,7 +46,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    openSessionPanel(context, store, pick);
+    openSessionPanel(context, store, pick, folder.uri.fsPath);
   });
 
   const startWorker = vscode.commands.registerCommand('mjolnirsoft.startWorkerSession', async () => {
@@ -98,8 +99,15 @@ async function startWorkerSession(
   // Give the worker an escalation path: a per-session MCP config wiring Claude's
   // `--permission-prompt-tool` to our server, which bridges a gated tool use to
   // this session's channel so the human can allow/deny it in the panel (#66).
+  // The server also reads the project's learned "Always" rules to auto-allow a
+  // remembered action without prompting, so it's given the project dir (#70).
   const permParticipantId = `${sessionId}-perms`;
-  const mcpConfigPath = writePermissionMcpConfig(context, store.logPath(sessionId), permParticipantId);
+  const mcpConfigPath = writePermissionMcpConfig(
+    context,
+    store.logPath(sessionId),
+    permParticipantId,
+    folder.uri.fsPath,
+  );
 
   // Spawn the worker in-process: it joins the session and answers each message
   // by running a headless Claude Code agent with the worktree as its workspace.
@@ -114,7 +122,7 @@ async function startWorkerSession(
     }),
   );
 
-  openSessionPanel(context, store, sessionId, {
+  openSessionPanel(context, store, sessionId, folder.uri.fsPath, {
     onDispose: () => {
       worker.close();
       workerChannel.close();
@@ -154,6 +162,7 @@ function openSessionPanel(
   context: vscode.ExtensionContext,
   store: SessionStore,
   sessionId: string,
+  projectDir: string,
   options: { onDispose?: () => void } = {},
 ): void {
   const panel = vscode.window.createWebviewPanel(
@@ -198,7 +207,7 @@ function openSessionPanel(
       kind?: string;
       text?: string;
       requestId?: string;
-      behavior?: 'allow' | 'deny';
+      behavior?: 'allow' | 'deny' | 'always';
       answers?: Record<string, string | string[]>;
     }) => {
       if (event.kind === 'send' && event.text) {
@@ -220,8 +229,14 @@ function openSessionPanel(
           });
         } else if (event.behavior) {
           // Permission: a verdict + requestId is enough; the server fills the
-          // original input on a bare allow.
-          participant.send({ type: INTERACTION_DECISION, payload: { requestId: event.requestId, behavior: event.behavior } });
+          // original input on a bare allow. "Always" is *our* side-effect — we
+          // persist a learned allow rule for the action and then send a plain
+          // `allow`, so the worker/MCP server never sees "always" (#70).
+          if (event.behavior === 'always' && request) {
+            recordLearnedRule(projectDir, request.toolName, request.input);
+          }
+          const behavior = event.behavior === 'deny' ? 'deny' : 'allow';
+          participant.send({ type: INTERACTION_DECISION, payload: { requestId: event.requestId, behavior } });
         }
         // The worker resumes once it has our answer, so show "working" again.
         void panel.webview.postMessage({ kind: 'working', on: true });
@@ -274,6 +289,8 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   .decide { border: none; padding: 0.25rem 0.9rem; cursor: pointer; border-radius: 3px;
             background: var(--vscode-button-secondaryBackground, #444); color: var(--vscode-button-secondaryForeground, #fff); }
   .decide[data-behavior="allow"] { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .decide[data-behavior="always"] { background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+            box-shadow: inset 0 0 0 1px var(--vscode-button-foreground); }
   .decide:disabled { opacity: 0.5; cursor: default; }
   .decided { font-size: 0.85em; opacity: 0.8; align-self: center; }
   .question { margin: 0.5rem 0; }
@@ -307,13 +324,15 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
  * Write a per-session MCP config that wires Claude's `--permission-prompt-tool`
  * to our bundled permission server, and return its path. The server is launched
  * with the extension host's own Node (Electron run as Node, so no separate Node
- * on PATH is needed) and told — via env — which session log to bridge over and
- * what channel id to use. Returns the temp path; the caller deletes it on close.
+ * on PATH is needed) and told — via env — which session log to bridge over, what
+ * channel id to use, and which project dir holds the learned "Always" rules it
+ * consults to auto-allow (#70). Returns the temp path; the caller deletes it on close.
  */
 function writePermissionMcpConfig(
   context: vscode.ExtensionContext,
   sessionLogPath: string,
   participantId: string,
+  projectDir: string,
 ): string {
   const serverPath = vscode.Uri.joinPath(context.extensionUri, 'dist', 'permission-mcp-server.js').fsPath;
   const config = {
@@ -325,6 +344,7 @@ function writePermissionMcpConfig(
           ELECTRON_RUN_AS_NODE: '1',
           MJOLNIR_SESSION_LOG: sessionLogPath,
           MJOLNIR_PERM_ID: participantId,
+          MJOLNIR_PROJECT_DIR: projectDir,
         },
       },
     },
