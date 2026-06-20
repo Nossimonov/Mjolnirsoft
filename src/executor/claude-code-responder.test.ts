@@ -5,8 +5,11 @@ import {
   buildClaudeArgs,
   senderAttribution,
   interpretClaudeResult,
+  parseStreamEvent,
+  createStreamReader,
   DEFAULT_EXECUTOR_ROLE,
   EXECUTOR_PERMISSIONS,
+  type ViewEvent,
 } from './claude-code-responder.ts';
 import { isAuthError } from './auth-error.ts';
 import { SHARED_CORE, EXECUTOR_INSERT } from '../core/agent-instructions.ts';
@@ -46,6 +49,116 @@ describe('interpretClaudeResult', () => {
 
   it('reports unparseable output on an otherwise-clean exit', () => {
     expect(() => interpretClaudeResult('not json', '', 0)).toThrow(/could not parse/);
+  });
+});
+
+describe('parseStreamEvent (NDJSON → live view event, #109)', () => {
+  // The exact line shapes `claude --output-format stream-json --verbose
+  // --include-partial-messages` emits, captured live (#109).
+  const sid = '15c3f03f';
+  const streamEvent = (event: unknown) =>
+    JSON.stringify({ type: 'stream_event', event, session_id: sid, parent_tool_use_id: null, uuid: 'u' });
+
+  it('reads a text_delta as streaming answer text', () => {
+    const line = streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi there fri' } });
+    expect(parseStreamEvent(line)).toEqual({ kind: 'text', text: 'Hi there fri' });
+  });
+
+  it('reads a thinking_delta as streaming reasoning', () => {
+    const line = streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '91 = 7 × 13' } });
+    expect(parseStreamEvent(line)).toEqual({ kind: 'thinking', text: '91 = 7 × 13' });
+  });
+
+  it('reads a tool_use content_block_start as a tool-use by name', () => {
+    const line = streamEvent({ type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: 'toolu_01', name: 'Bash', input: {} } });
+    expect(parseStreamEvent(line)).toEqual({ kind: 'tool-use', name: 'Bash' });
+  });
+
+  it('returns the terminal result line as a raw marker for interpretClaudeResult', () => {
+    const line = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'Hi there friend.' });
+    expect(parseStreamEvent(line)).toEqual({ kind: 'result', raw: line });
+    // The raw it carries round-trips through interpretClaudeResult unchanged.
+    const parsed = parseStreamEvent(line);
+    expect(parsed?.kind === 'result' && interpretClaudeResult(parsed.raw, '', 0)).toBe('Hi there friend.');
+  });
+
+  it('ignores lifecycle/bookkeeping lines the live view does not render', () => {
+    const ignored = [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: sid }),
+      JSON.stringify({ type: 'system', subtype: 'status', status: 'requesting' }),
+      JSON.stringify({ type: 'rate_limit_event', rate_limit_info: {} }),
+      // The periodic `assistant` snapshot restates the whole message — streaming it
+      // would double-render against the token deltas, so it must be skipped.
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Hi there friend.' }] } }),
+      streamEvent({ type: 'message_start', message: { id: 'msg_01' } }),
+      streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+      streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } }),
+      streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'abc' } }),
+      streamEvent({ type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"command": "echo' } }),
+      streamEvent({ type: 'content_block_stop', index: 0 }),
+      streamEvent({ type: 'message_delta', delta: { stop_reason: 'end_turn' } }),
+      streamEvent({ type: 'message_stop' }),
+    ];
+    for (const line of ignored) expect(parseStreamEvent(line)).toBeNull();
+  });
+
+  it('returns null for blank and unparseable lines (chunk boundaries, banners)', () => {
+    expect(parseStreamEvent('')).toBeNull();
+    expect(parseStreamEvent('   ')).toBeNull();
+    expect(parseStreamEvent('not json')).toBeNull();
+    expect(parseStreamEvent('42')).toBeNull();
+  });
+});
+
+describe('createStreamReader (NDJSON line-buffering, #109)', () => {
+  const textLine = (t: string) =>
+    JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: t } } });
+  const resultLine = (r: string) => JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: r });
+
+  function collect(): { reader: ReturnType<typeof createStreamReader>; events: ViewEvent[]; results: string[] } {
+    const events: ViewEvent[] = [];
+    const results: string[] = [];
+    const reader = createStreamReader({ onEvent: (e) => events.push(e), onResult: (raw) => results.push(raw) });
+    return { reader, events, results };
+  }
+
+  it('emits a parsed event only once its line is complete (chunk split mid-line)', () => {
+    const { reader, events } = collect();
+    const line = textLine('hello');
+    const cut = line.length - 4;
+    reader.feed(line.slice(0, cut)); // first chunk ends mid-line — nothing parses yet
+    expect(events).toEqual([]);
+    reader.feed(line.slice(cut) + '\n'); // rest arrives, line completes
+    expect(events).toEqual([{ kind: 'text', text: 'hello' }]);
+  });
+
+  it('parses several newline-delimited lines from a single chunk, in order', () => {
+    const { reader, events } = collect();
+    reader.feed(`${textLine('a')}\n${textLine('b')}\n${textLine('c')}\n`);
+    expect(events).toEqual([
+      { kind: 'text', text: 'a' },
+      { kind: 'text', text: 'b' },
+      { kind: 'text', text: 'c' },
+    ]);
+  });
+
+  it('captures a final result line that arrives without a trailing newline via flush()', () => {
+    const { reader, events, results } = collect();
+    reader.feed(`${textLine('done')}\n`);
+    reader.feed(resultLine('done')); // no trailing newline, as the CLI often emits it
+    expect(results).toEqual([]); // not parsed until flushed
+    reader.flush();
+    expect(results).toEqual([resultLine('done')]);
+    expect(events).toEqual([{ kind: 'text', text: 'done' }]);
+  });
+
+  it('tolerates CRLF line endings and blank lines', () => {
+    const { reader, events } = collect();
+    reader.feed(`${textLine('x')}\r\n\r\n${textLine('y')}\r\n`);
+    expect(events).toEqual([
+      { kind: 'text', text: 'x' },
+      { kind: 'text', text: 'y' },
+    ]);
   });
 });
 
@@ -158,6 +271,30 @@ describe('createClaudeCodeResponder', () => {
     expect(run.mock.calls[2][1].resume).toBe(true);
   });
 
+  it('forwards each run\'s live events to the onEvent seam, ephemerally (#109)', async () => {
+    const events: ViewEvent[] = [];
+    // The injected run plays the role of the streaming CLI: it pushes intermediate
+    // events through the seam, then returns the final result (the only thing that
+    // reaches the channel). The seam must receive every event, untouched.
+    const run = vi.fn(async (_prompt: string, options: { onEvent?: (e: ViewEvent) => void }) => {
+      options.onEvent?.({ kind: 'thinking', text: 'is 91 prime?' });
+      options.onEvent?.({ kind: 'tool-use', name: 'Bash' });
+      options.onEvent?.({ kind: 'text', text: 'No, 7 × 13.' });
+      return 'No, 7 × 13.';
+    });
+    const respond = createClaudeCodeResponder({ workdir: '/w', run, onEvent: (e) => events.push(e) });
+
+    const reply = await respond(task);
+
+    expect(events).toEqual([
+      { kind: 'thinking', text: 'is 91 prime?' },
+      { kind: 'tool-use', name: 'Bash' },
+      { kind: 'text', text: 'No, 7 × 13.' },
+    ]);
+    // The reply is still just the final result text — streaming changed nothing here.
+    expect(reply).toEqual({ type: 'result', payload: 'No, 7 × 13.' });
+  });
+
   it('returns undefined when Claude Code produces no result', async () => {
     const respond = createClaudeCodeResponder({ workdir: '/tmp/executor-1', run: async () => '   ' });
     expect(await respond(task)).toBeUndefined();
@@ -242,9 +379,18 @@ describe('senderAttribution', () => {
 });
 
 describe('buildClaudeArgs', () => {
-  it('omits --append-system-prompt when no role prompt is given', () => {
+  it('streams as NDJSON with token-level partial messages, omitting --append-system-prompt with no role (#109)', () => {
     const args = buildClaudeArgs('do it');
-    expect(args).toEqual(['-p', 'do it', '--output-format', 'json', '--settings', EXECUTOR_PERMISSIONS]);
+    expect(args).toEqual([
+      '-p',
+      'do it',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--include-partial-messages',
+      '--settings',
+      EXECUTOR_PERMISSIONS,
+    ]);
     expect(args).not.toContain('--append-system-prompt');
   });
 

@@ -1,5 +1,6 @@
 import mermaid from 'mermaid';
 import { formatElapsed } from '../elapsed.ts';
+import type { ViewEvent } from '../../../src/executor/claude-code-responder.ts';
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void };
 
@@ -10,6 +11,7 @@ const content = document.getElementById('content');
 const input = document.getElementById('input') as HTMLTextAreaElement | null;
 const send = document.getElementById('send');
 const working = document.getElementById('working');
+const workingHeader = document.getElementById('working-header');
 const queued = document.getElementById('queued');
 const notice = document.getElementById('notice');
 
@@ -20,8 +22,8 @@ let workingSince: number | null = null;
 let tick: ReturnType<typeof setInterval> | null = null;
 
 function renderWorking(): void {
-  if (!working || workingSince === null) return;
-  working.textContent = `● executor is working… ${formatElapsed(Date.now() - workingSince)}`;
+  if (!workingHeader || workingSince === null) return;
+  workingHeader.textContent = `● executor is working… ${formatElapsed(Date.now() - workingSince)}`;
 }
 
 function startWorking(): void {
@@ -40,6 +42,88 @@ function stopWorking(): void {
     tick = null;
   }
   working?.setAttribute('hidden', '');
+  // The turn is over — drop its ephemeral live stream so a reopened "working"
+  // block (next turn) never inherits the previous turn's thinking/text (#109).
+  clearReasoning();
+}
+
+// The executor's live reasoning (#109) streams in as ephemeral host posts (never
+// from the channel, never logged). Everything it emits live — thinking, response
+// text, and tool uses — accumulates in a per-turn **collapsible trail** in the
+// conversation, open while it works so you can watch, then auto-collapsed when the
+// turn's durable result lands: preserved (one twisty-click to review) instead of
+// vanishing, while the clean result renders below it. The bottom block carries
+// only the elapsed timer.
+let currentTrail: HTMLDetailsElement | null = null;
+let trailSpan: HTMLElement | null = null; // running text/thinking span in the trail
+let trailSpanKind: 'thinking' | 'text' | null = null;
+
+// The body of the current turn's trail, creating the <details> (open) in the
+// conversation on first use. Lives in `#content` so it persists, collapsed, after
+// the turn.
+function trailBody(): HTMLElement | null {
+  if (!content) return null;
+  if (!currentTrail) {
+    currentTrail = document.createElement('details');
+    currentTrail.className = 'reasoning-trail';
+    currentTrail.open = true;
+    const summary = document.createElement('summary');
+    summary.textContent = '💭 Thinking';
+    const body = document.createElement('div');
+    body.className = 'trail-body';
+    currentTrail.append(summary, body);
+    content.appendChild(currentTrail);
+    content.scrollTop = content.scrollHeight;
+  }
+  return currentTrail.querySelector('.trail-body');
+}
+
+// Append a thinking or response-text token to the trail, coalescing consecutive
+// deltas of the same kind into one span and starting a fresh span when the kind
+// switches — thinking renders dimmed, response text normal-weight.
+function appendToTrail(kind: 'thinking' | 'text', text: string): void {
+  const body = trailBody();
+  if (!body) return;
+  if (!trailSpan || trailSpanKind !== kind) {
+    trailSpan = document.createElement('span');
+    trailSpan.className = kind === 'thinking' ? 'trail-thinking' : 'trail-text';
+    body.appendChild(trailSpan);
+    trailSpanKind = kind;
+  }
+  trailSpan.textContent += text;
+  if (content) content.scrollTop = content.scrollHeight;
+}
+
+function appendReasoning(event: ViewEvent): void {
+  if (event.kind === 'thinking') {
+    // Some CLI builds stream `thinking_delta` redacted to empty (only a token
+    // count); skip those so an empty span never appears.
+    if (event.text) appendToTrail('thinking', event.text);
+  } else if (event.kind === 'text') {
+    appendToTrail('text', event.text);
+  } else if (event.kind === 'tool-use') {
+    const body = trailBody();
+    if (!body) return;
+    const chip = document.createElement('span');
+    chip.className = 'tool-chip';
+    chip.textContent = `⚙ ${event.name}`;
+    body.appendChild(chip);
+    trailSpan = null; // text/thinking after a tool starts a fresh span past the chip
+    trailSpanKind = null;
+    if (content) content.scrollTop = content.scrollHeight;
+  }
+}
+
+function clearReasoning(): void {
+  // Collapse the turn's trail (keep it in the conversation, twisty shut) so the
+  // live reasoning + work stays reviewable rather than vanishing; the clean durable
+  // result message renders below it (#109).
+  if (currentTrail) {
+    currentTrail.open = false;
+    currentTrail = null;
+  }
+  trailSpan = null;
+  trailSpanKind = null;
 }
 
 // Show how many messages are waiting behind the in-flight turn. The executor
@@ -62,7 +146,14 @@ function setQueued(count: number): void {
 // attached), so the webview just renders what it's told. Append messages and
 // render any new Mermaid diagrams.
 window.addEventListener('message', (event: MessageEvent) => {
-  const data = event.data as { kind?: string; html?: string; on?: boolean; text?: string; count?: number };
+  const data = event.data as {
+    kind?: string;
+    html?: string;
+    on?: boolean;
+    text?: string;
+    count?: number;
+    event?: ViewEvent;
+  };
   if (data.kind === 'message' && data.html && content) {
     content.insertAdjacentHTML('beforeend', data.html);
     void mermaid.run();
@@ -70,6 +161,10 @@ window.addEventListener('message', (event: MessageEvent) => {
   } else if (data.kind === 'working') {
     if (data.on) startWorking();
     else stopWorking();
+  } else if (data.kind === 'reasoning' && data.event) {
+    appendReasoning(data.event);
+  } else if (data.kind === 'reasoning-clear') {
+    clearReasoning();
   } else if (data.kind === 'queued') {
     setQueued(data.count ?? 0);
   } else if (data.kind === 'notice' && notice) {

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import type { Message } from '../core/channel.ts';
 import { INTERACTION_DECISION, INTERACTION_REQUEST } from '../core/interaction.ts';
 import { DELEGATION_REQUEST, DELEGATION_RESPONSE } from '../core/delegation-protocol.ts';
@@ -24,6 +25,20 @@ export function senderAttribution(message: Pick<Message, 'from' | 'role'>): stri
   return `[Message from ${descriptor} (id: ${message.from})]`;
 }
 
+/**
+ * A live, intermediate event parsed from the `claude` NDJSON stream and forwarded
+ * to the view as the agent works (#109). These are *ephemeral* — they never touch
+ * the durable channel or the JSONL log; only the final `result` persists, as today.
+ *
+ *  - `thinking` — a token chunk of the agent's reasoning (a `thinking_delta`).
+ *  - `text` — a token chunk of the agent's answer text (a `text_delta`).
+ *  - `tool-use` — the agent started a tool call; `name` is the tool (e.g. `Bash`).
+ */
+export type ViewEvent =
+  | { readonly kind: 'thinking'; readonly text: string }
+  | { readonly kind: 'text'; readonly text: string }
+  | { readonly kind: 'tool-use'; readonly name: string };
+
 /** Options shaping a one-shot `claude` run beyond the task prompt and cwd. */
 export interface ClaudeRunArgs {
   /** Executor-role instructions appended to Claude's system prompt. */
@@ -36,6 +51,110 @@ export interface ClaudeRunArgs {
   readonly permissionPromptTool?: string;
   /** Path to the MCP config defining the server that backs {@link permissionPromptTool}. */
   readonly mcpConfigPath?: string;
+  /**
+   * Live-event seam (#109): called for each intermediate {@link ViewEvent} parsed
+   * from the stream as the agent works (thinking/text tokens, tool starts). The
+   * host forwards these to the webview ephemerally; the durable channel/log is
+   * untouched. Omit to ignore the stream and only take the final result.
+   */
+  readonly onEvent?: (event: ViewEvent) => void;
+}
+
+/**
+ * Parse one NDJSON line from `claude --output-format stream-json --verbose
+ * --include-partial-messages` into a live {@link ViewEvent}, the final `result`
+ * marker, or `null` for a line the live view ignores. Pure (no I/O), so it's
+ * unit-tested against fake stream lines without ever spawning `claude`.
+ *
+ * The stream emits one JSON object per line. We consume only the `stream_event`
+ * lifecycle deltas for the live view — the periodic `assistant` snapshot lines
+ * re-state the whole message so far and would double-render if streamed. Token
+ * deltas: `text_delta` (answer text) and `thinking_delta` (reasoning); a tool
+ * call is announced by a `content_block_start` whose block is a `tool_use`. The
+ * terminal `{"type":"result",…}` line is returned as a `result` marker carrying
+ * its raw JSON, which the runner feeds to {@link interpretClaudeResult} exactly
+ * as the old single-object `--output-format json` stdout was. Everything else
+ * (system init/status, rate-limit events, `message_start`/`_stop`, block stops,
+ * `signature_delta`, `input_json_delta`) is bookkeeping the view skips.
+ */
+export function parseStreamEvent(line: string): ViewEvent | { kind: 'result'; raw: string } | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (typeof obj !== 'object' || obj === null) return null;
+  const record = obj as { type?: unknown; event?: unknown };
+  if (record.type === 'result') return { kind: 'result', raw: trimmed };
+  if (record.type !== 'stream_event' || typeof record.event !== 'object' || record.event === null) return null;
+  const event = record.event as { type?: unknown; delta?: unknown; content_block?: unknown };
+  if (event.type === 'content_block_start') {
+    const block = event.content_block as { type?: unknown; name?: unknown } | null;
+    if (block && block.type === 'tool_use' && typeof block.name === 'string') {
+      return { kind: 'tool-use', name: block.name };
+    }
+    return null;
+  }
+  if (event.type === 'content_block_delta') {
+    const delta = event.delta as { type?: unknown; text?: unknown; thinking?: unknown } | null;
+    if (delta && delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+      return { kind: 'thinking', text: delta.thinking };
+    }
+    if (delta && delta.type === 'text_delta' && typeof delta.text === 'string') {
+      return { kind: 'text', text: delta.text };
+    }
+    return null;
+  }
+  return null;
+}
+
+/** Receives the parsed output of an NDJSON stream: live view events and the final result line. */
+export interface StreamReaderHandlers {
+  /** Each intermediate {@link ViewEvent} parsed from a complete line, in order. */
+  readonly onEvent: (event: ViewEvent) => void;
+  /** The raw JSON of the terminal `result` line, captured for {@link interpretClaudeResult}. */
+  readonly onResult: (raw: string) => void;
+}
+
+/**
+ * A line-buffering reader for the `claude` NDJSON stream. `feed` is called with
+ * each raw stdout string chunk — which split on arbitrary byte boundaries, not
+ * line boundaries — so it buffers and only parses on a complete `\n`-terminated
+ * line; `flush` parses any trailing line left without a newline (the terminal
+ * `result` line frequently is one). Each complete line goes through
+ * {@link parseStreamEvent}: a {@link ViewEvent} fires `onEvent`, the `result`
+ * marker fires `onResult`. Pure of I/O (it never touches the process), so the
+ * buffering — chunk-split-mid-line, no-trailing-newline, CRLF — is unit-tested
+ * directly without spawning `claude`.
+ */
+export function createStreamReader(handlers: StreamReaderHandlers): {
+  feed(chunk: string): void;
+  flush(): void;
+} {
+  let buffer = '';
+  const handleLine = (line: string): void => {
+    const event = parseStreamEvent(line);
+    if (!event) return;
+    if (event.kind === 'result') handlers.onResult(event.raw);
+    else handlers.onEvent(event);
+  };
+  return {
+    feed(chunk) {
+      buffer += chunk;
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) !== -1) {
+        handleLine(buffer.slice(0, newline));
+        buffer = buffer.slice(newline + 1);
+      }
+    },
+    flush() {
+      if (buffer.trim()) handleLine(buffer);
+      buffer = '';
+    },
+  };
 }
 
 /** Runs a one-shot headless Claude Code task in `cwd`, returning its result text. */
@@ -84,7 +203,21 @@ export const EXECUTOR_PERMISSIONS = JSON.stringify(EXECUTOR_PERMISSION_POLICY);
 
 /** Build the `claude` argv for a one-shot run from the task prompt and run options. */
 export function buildClaudeArgs(prompt: string, options: ClaudeRunArgs = {}): string[] {
-  const args = ['-p', prompt, '--output-format', 'json', '--settings', EXECUTOR_PERMISSIONS];
+  // `--output-format stream-json` (which requires `--verbose`) emits the run as
+  // NDJSON; `--include-partial-messages` adds the token-level `stream_event`
+  // deltas the live view streams (#109). The terminal `result` line carries the
+  // same final text the old single-object `json` format put on stdout, so the
+  // durable channel/log is unchanged — only the intermediate events are new.
+  const args = [
+    '-p',
+    prompt,
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--include-partial-messages',
+    '--settings',
+    EXECUTOR_PERMISSIONS,
+  ];
   if (options.appendSystemPrompt) args.push('--append-system-prompt', options.appendSystemPrompt);
   if (options.sessionId) args.push(options.resume ? '--resume' : '--session-id', options.sessionId);
   if (options.permissionPromptTool) args.push('--permission-prompt-tool', options.permissionPromptTool);
@@ -104,15 +237,21 @@ export function resolveClaudeBin(): string {
 }
 
 /**
- * Interpret a finished `claude -p --output-format json` run into its result text,
- * or throw an informative Error. `claude` writes a JSON object to stdout *even on
- * failure* — the human-readable error lands in `result` (an expired/absent login
- * surfaces `"Not logged in · Please run /login"`) with `is_error: true` and a
- * non-zero exit, while stderr is typically empty. So the failure detail must be
- * taken from the JSON `result` first (then stderr, then raw stdout): a stderr-only
- * path drops it and leaves the surfaced error turn blank and unclassifiable —
- * which is exactly what hid the auth signal from the re-login card (#90, #89).
- * Pure (no I/O), so the parsing is unit-tested without spawning `claude`.
+ * Interpret a finished `claude` run's terminal `result` event into its result
+ * text, or throw an informative Error. Under `--output-format stream-json` (#109)
+ * the run is NDJSON and this is fed the single `{"type":"result",…}` line — the
+ * same object the old `--output-format json` wrote to stdout whole, so the contract
+ * is unchanged. `claude` emits a result event *even on failure* — the human-readable
+ * error lands in `result` (an expired/absent login surfaces `"Not logged in ·
+ * Please run /login"`) with `is_error: true` and a non-zero exit, while stderr is
+ * typically empty. So the failure detail must be taken from the JSON `result` first
+ * (then stderr, then the raw line): a stderr-only path drops it and leaves the
+ * surfaced error turn blank and unclassifiable — which is exactly what hid the auth
+ * signal from the re-login card (#90, #89). When no result line was captured (a
+ * crash before one is emitted), the caller feeds the whole raw stream instead: it
+ * won't `JSON.parse`, so the detail falls through to the raw text — which still
+ * carries any auth wording for isAuthError to classify — before the exit-code last
+ * resort. Pure (no I/O), so the parsing is unit-tested without spawning `claude`.
  */
 export function interpretClaudeResult(stdout: string, stderr: string, code: number | null): string {
   let parsed: { result?: string; is_error?: boolean } | undefined;
@@ -137,14 +276,18 @@ export function interpretClaudeResult(stdout: string, stderr: string, code: numb
 
 /**
  * Default launcher: spawn `claude -p` headless. A non-`--bare` run uses the
- * logged-in Claude Code session (the user's subscription), `--output-format
- * json` returns a `.result` field, and `--permission-mode acceptEdits` lets the
- * agent write files without prompting. The task is passed as an argv element
- * (no shell), so prompt contents are not interpreted by a shell.
+ * logged-in Claude Code session (the user's subscription). With `--output-format
+ * stream-json` the run streams as NDJSON: stdout is read line-by-line, each line
+ * parsed by {@link parseStreamEvent}. Intermediate {@link ViewEvent}s are pushed
+ * through `onEvent` for the live view (#109); the terminal `result` line is held
+ * and passed to {@link interpretClaudeResult} on close, so the returned final
+ * text — the only thing that reaches the durable channel — is exactly as before.
+ * The task is passed as an argv element (no shell), so prompt contents are not
+ * interpreted by a shell.
  */
 export const runClaudeCodeCli: RunClaudeCode = (
   prompt,
-  { cwd, appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath },
+  { cwd, appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath, onEvent },
 ) =>
   new Promise((resolve, reject) => {
     const args = buildClaudeArgs(prompt, {
@@ -158,18 +301,43 @@ export const runClaudeCodeCli: RunClaudeCode = (
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let stdout = '';
     let stderr = '';
+    // The terminal `result` line, captured by the reader, is what feeds
+    // interpretClaudeResult. `stdout` accumulates the *whole* raw stream as a
+    // fallback: if no result line is ever emitted (a crash, or an error routed to
+    // a different line shape), interpretClaudeResult is given the raw stream so its
+    // error detail — and the #90 auth signal isAuthError scans for — isn't lost to
+    // a bare "exited with code N".
+    let resultRaw = '';
+    let stdout = '';
+    const reader = createStreamReader({
+      onEvent: (event) => onEvent?.(event),
+      onResult: (raw) => {
+        resultRaw = raw;
+      },
+    });
+    // Decode stdout through a StringDecoder so a multi-byte UTF-8 char split across
+    // two `data` chunks isn't mangled into U+FFFD — it would otherwise corrupt a
+    // live delta or, worse, the durable result text.
+    const decoder = new StringDecoder('utf8');
     child.stdout.on('data', (chunk) => {
-      stdout += chunk;
+      const text = decoder.write(chunk as Buffer);
+      stdout += text;
+      reader.feed(text);
     });
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
     });
     child.on('error', reject);
     child.on('close', (code) => {
+      const tail = decoder.end();
+      if (tail) {
+        stdout += tail;
+        reader.feed(tail);
+      }
+      reader.flush(); // parse a final line with no trailing newline (the `result` line often is one)
       try {
-        resolve(interpretClaudeResult(stdout, stderr, code));
+        resolve(interpretClaudeResult(resultRaw || stdout, stderr, code));
       } catch (error) {
         reject(error as Error);
       }
@@ -209,6 +377,12 @@ export interface ClaudeCodeResponderOptions {
   readonly mcpConfigPath?: string;
   /** Override how Claude Code is run (tests inject a fake; default spawns the CLI). */
   readonly run?: RunClaudeCode;
+  /**
+   * Live-event seam (#109): forwarded to each run as its `onEvent`, so the host
+   * receives the executor's intermediate {@link ViewEvent}s (thinking/text tokens,
+   * tool starts) and streams them to the view ephemerally. Omit for no streaming.
+   */
+  readonly onEvent?: (event: ViewEvent) => void;
 }
 
 /**
@@ -229,6 +403,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     permissionPromptTool,
     mcpConfigPath,
     run = runClaudeCodeCli,
+    onEvent,
   } = options;
   // The pinned Claude session: the first turn creates it (`--session-id`), later
   // turns resume it (`--resume`). `sessionId` is mutable because a turn that fails
@@ -267,6 +442,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
           resume: started,
           permissionPromptTool,
           mcpConfigPath,
+          onEvent,
         })
       ).trim();
     } catch (error) {
