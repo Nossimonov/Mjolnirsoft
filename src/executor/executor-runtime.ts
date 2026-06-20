@@ -30,12 +30,22 @@ export function runExecutor(
   role: Role = 'executor',
 ): Participant {
   let executor: Participant;
+  // Serialize turns: the Claude responder pins one session id, so two concurrent
+  // `claude --resume <same id>` runs collide ("Session ID … is already in use").
+  // This most often bites while a turn is blocked on a permission/question card —
+  // a message arriving then would otherwise start a second, overlapping run. We
+  // chain each turn on a tail promise so the turn for message N+1 begins only
+  // after N's turn settles. The tail must always resolve (the catch swallows the
+  // failure) so one failed turn can't wedge the queue (#100). Interaction-decision
+  // and delegation messages short-circuit to `undefined` in the responder, so they
+  // pass through the chain fast and never hold the queue on a claude run.
+  let tail = Promise.resolve();
   executor = channel.join(id, role, (message) => {
-    respond(message)
-      .then((reply) => {
+    tail = tail.then(async () => {
+      try {
+        const reply = await respond(message);
         if (reply) executor.send(reply);
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
         const failure = `executor ${id} failed to respond: ${String(error)}`;
         // Surface the failure in the session, not just the host log: an `error`
         // turn on the channel reaches every host (view + CLI) and the durable
@@ -44,7 +54,8 @@ export function runExecutor(
         // write too: it's useful host-log detail when a session view isn't open.
         process.stderr.write(`${failure}\n`);
         executor.send({ type: 'error', payload: failure });
-      });
+      }
+    });
   });
   return executor;
 }
