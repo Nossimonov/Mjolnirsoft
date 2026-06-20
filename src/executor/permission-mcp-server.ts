@@ -1,11 +1,11 @@
 /**
- * The worker's permission-prompt MCP server (#66).
+ * The executor's permission-prompt MCP server (#66).
  *
- * Claude Code spawns this as a subprocess for a worker run, named by
- * `--permission-prompt-tool mcp__perm__approve`. When the worker's agent tries a
+ * Claude Code spawns this as a subprocess for an executor run, named by
+ * `--permission-prompt-tool mcp__perm__approve`. When the executor's agent tries a
  * tool use Claude won't auto-approve (e.g. a write outside its worktree), Claude
  * calls our `approve` tool with `{ tool_name, input, tool_use_id }`; we surface
- * it to the human over the worker's session channel and block until they decide,
+ * it to the human over the executor's session channel and block until they decide,
  * then return the allow/deny verdict Claude expects. The session channel is the
  * bridge — file-backed and cross-process — so this standalone process and the
  * VS Code view meet on the same log without any extra transport.
@@ -34,7 +34,7 @@ if (!logPath) {
 
 // Tail the live session log: see the human's decisions, not replayed history.
 const channel = new FileChannel(logPath);
-const participant = channel.join(participantId, 'worker', (message) => bridge.handleMessage(message));
+const participant = channel.join(participantId, 'executor', (message) => bridge.handleMessage(message));
 const bridge = createPermissionBridge(participant.send);
 
 const server = new Server({ name: 'mjolnir-permission', version: '0.0.1' }, { capabilities: { tools: {} } });
@@ -43,7 +43,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'approve',
-      description: 'Decide whether a tool use the worker is not pre-allowed to make may proceed.',
+      description: 'Decide whether a tool use the executor is not pre-allowed to make may proceed.',
       inputSchema: {
         type: 'object',
         properties: {

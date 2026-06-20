@@ -12,20 +12,20 @@ describe('InMemoryChannel', () => {
 
   it('delivers a message from one participant to another (AC2)', () => {
     const channel = new InMemoryChannel();
-    const workerInbox: Message[] = [];
-    channel.join('worker-1', 'worker', (m) => workerInbox.push(m));
+    const executorInbox: Message[] = [];
+    channel.join('executor-1', 'executor', (m) => executorInbox.push(m));
     const planner = channel.join('planner-1', 'planner', () => {});
 
     planner.send({ type: 'task', payload: { id: 42 } });
 
-    expect(workerInbox).toEqual([{ from: 'planner-1', type: 'task', payload: { id: 42 } }]);
+    expect(executorInbox).toEqual([{ from: 'planner-1', type: 'task', payload: { id: 42 } }]);
   });
 
   it('does not echo a message back to its sender', () => {
     const channel = new InMemoryChannel();
     const plannerInbox: Message[] = [];
     const planner = channel.join('planner-1', 'planner', (m) => plannerInbox.push(m));
-    channel.join('worker-1', 'worker', () => {});
+    channel.join('executor-1', 'executor', () => {});
 
     planner.send({ type: 'ping' });
 
@@ -35,6 +35,6 @@ describe('InMemoryChannel', () => {
   it('rejects joining with a duplicate participant id', () => {
     const channel = new InMemoryChannel();
     channel.join('dup', 'planner', () => {});
-    expect(() => channel.join('dup', 'worker', () => {})).toThrow(/already joined/);
+    expect(() => channel.join('dup', 'executor', () => {})).toThrow(/already joined/);
   });
 });

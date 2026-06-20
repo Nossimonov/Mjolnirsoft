@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { INTERACTION_DECISION, INTERACTION_REQUEST } from '../core/interaction.ts';
-import type { Respond } from './worker-runtime.ts';
+import type { Respond } from './executor-runtime.ts';
 
 /** Options shaping a one-shot `claude` run beyond the task prompt and cwd. */
 export interface ClaudeRunArgs {
-  /** Worker-role instructions appended to Claude's system prompt. */
+  /** Executor-role instructions appended to Claude's system prompt. */
   readonly appendSystemPrompt?: string;
-  /** The Claude session UUID to pin, so a worker's turns continue one conversation. */
+  /** The Claude session UUID to pin, so an executor's turns continue one conversation. */
   readonly sessionId?: string;
   /** When a session is pinned, resume it (later turns) instead of creating it (first turn). */
   readonly resume?: boolean;
@@ -21,14 +21,14 @@ export interface ClaudeRunArgs {
 export type RunClaudeCode = (prompt: string, options: { cwd: string } & ClaudeRunArgs) => Promise<string>;
 
 /**
- * Permission policy for the worker's headless `claude`: no prompts for what a
+ * Permission policy for the executor's headless `claude`: no prompts for what a
  * normal dev task needs (reads, cwd-scoped edits, shell commands), with a few
  * clearly-dangerous commands denied. This is *soft* confinement — on native
- * Windows there's no OS sandbox, so the worktree cwd, the worker-role
+ * Windows there's no OS sandbox, so the worktree cwd, the executor-role
  * instructions, and the developer's branch review are the real boundary (Bash
  * can still escape this policy). A WSL sandbox would be the hard boundary. See #62.
  */
-export const WORKER_PERMISSION_POLICY = {
+export const EXECUTOR_PERMISSION_POLICY = {
   permissions: {
     allow: ['Read', 'Glob', 'Grep', 'WebFetch', 'Edit(./**)', 'Write(./**)', 'Bash'],
     deny: ['Bash(rm -rf *)', 'Bash(git push *)', 'Bash(git reset --hard *)', 'Bash(sudo *)'],
@@ -44,11 +44,11 @@ export const WORKER_PERMISSION_POLICY = {
  * `learned-permissions.ts`). The `deny` floor stays here, enforced before
  * `approve` is ever called, so a denied foot-gun can't be auto-allowed.
  */
-export const WORKER_PERMISSIONS = JSON.stringify(WORKER_PERMISSION_POLICY);
+export const EXECUTOR_PERMISSIONS = JSON.stringify(EXECUTOR_PERMISSION_POLICY);
 
 /** Build the `claude` argv for a one-shot run from the task prompt and run options. */
 export function buildClaudeArgs(prompt: string, options: ClaudeRunArgs = {}): string[] {
-  const args = ['-p', prompt, '--output-format', 'json', '--settings', WORKER_PERMISSIONS];
+  const args = ['-p', prompt, '--output-format', 'json', '--settings', EXECUTOR_PERMISSIONS];
   if (options.appendSystemPrompt) args.push('--append-system-prompt', options.appendSystemPrompt);
   if (options.sessionId) args.push(options.resume ? '--resume' : '--session-id', options.sessionId);
   if (options.permissionPromptTool) args.push('--permission-prompt-tool', options.permissionPromptTool);
@@ -136,7 +136,7 @@ export const EXECUTOR_INSERT = `You are an executor: you implement the single ta
 /** How an executor works within its worktree — operational guidance under the model and role insert. */
 const EXECUTOR_OPERATIONS = `As you implement:
 - Collaborate continuously — this is an interactive, multi-turn conversation, not fire-and-forget. Surface decisions, trade-offs, and progress as you go; the architect needs visibility while you work, not only at the end.
-- Read widely, write narrowly. Read anything in or beyond the repo you need to integrate cleanly, but only create, modify, or run things within your own worktree and branch — never touch other branches, refs, git history, or other workers' workspaces.
+- Read widely, write narrowly. Read anything in or beyond the repo you need to integrate cleanly, but only create, modify, or run things within your own worktree and branch — never touch other branches, refs, git history, or other executors' workspaces.
 - Don't commit; hand off. Leave your work in your branch's working tree with a final summary of what you changed and why — clear enough for the orchestrator to compose the commit and judge the result against the design.
 - Justify every change for the record — a brief rationale per meaningful change, so future sessions recover the reasoning without you present.`;
 
@@ -148,26 +148,26 @@ const EXECUTOR_OPERATIONS = `As you implement:
  * with their own insert; layered atop the worktree's hard isolation and the
  * developer's branch review (#45, #71).
  */
-export const DEFAULT_WORKER_ROLE = `${SHARED_CORE}\n\n${EXECUTOR_INSERT}\n\n${EXECUTOR_OPERATIONS}`;
+export const DEFAULT_EXECUTOR_ROLE = `${SHARED_CORE}\n\n${EXECUTOR_INSERT}\n\n${EXECUTOR_OPERATIONS}`;
 
 export interface ClaudeCodeResponderOptions {
   readonly workdir: string;
   /**
-   * Worker-role instructions appended to Claude's system prompt
-   * (default: {@link DEFAULT_WORKER_ROLE}; pass `''` to append nothing).
+   * Executor-role instructions appended to Claude's system prompt
+   * (default: {@link DEFAULT_EXECUTOR_ROLE}; pass `''` to append nothing).
    */
   readonly appendSystemPrompt?: string;
   /**
-   * The worker's Claude session UUID (default: a fresh UUID). Pinned so the
-   * worker's turns continue one conversation, and known up front so the
+   * The executor's Claude session UUID (default: a fresh UUID). Pinned so the
+   * executor's turns continue one conversation, and known up front so the
    * keystone (#40) can record it.
    */
   readonly claudeSessionId?: string;
   /**
    * MCP tool that handles permission prompts (e.g. `mcp__perm__approve`) plus
-   * the config path defining its server, so a tool use the worker isn't
+   * the config path defining its server, so a tool use the executor isn't
    * pre-allowed to make is surfaced to the human instead of dead-ending (#66).
-   * Both must be set together; omit for a worker with no escalation path.
+   * Both must be set together; omit for an executor with no escalation path.
    */
   readonly permissionPromptTool?: string;
   readonly mcpConfigPath?: string;
@@ -176,11 +176,11 @@ export interface ClaudeCodeResponderOptions {
 }
 
 /**
- * A worker {@link Respond} backed by Claude Code: each task runs a headless
- * `claude` agent in a per-worker workspace, with worker-role instructions
+ * An executor {@link Respond} backed by Claude Code: each task runs a headless
+ * `claude` agent in a per-executor workspace, with executor-role instructions
  * appended to its system prompt, and its result text is returned as the reply.
  * Turns share one pinned Claude session — created on the first turn
- * (`--session-id`) and resumed on later ones (`--resume`) — so the worker
+ * (`--session-id`) and resumed on later ones (`--resume`) — so the executor
  * retains context across an interactive exchange. The agent's own tools and
  * agent loop do the work — runs on the user's Claude Code subscription, no API
  * key required.
@@ -188,7 +188,7 @@ export interface ClaudeCodeResponderOptions {
 export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): Respond {
   const {
     workdir,
-    appendSystemPrompt = DEFAULT_WORKER_ROLE,
+    appendSystemPrompt = DEFAULT_EXECUTOR_ROLE,
     claudeSessionId = randomUUID(),
     permissionPromptTool,
     mcpConfigPath,
@@ -197,7 +197,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
   let started = false; // first turn creates the session; later turns resume it
   return async (message) => {
     // Permission requests/decisions are a side-channel between the MCP server and
-    // the view — not task prompts. Ignoring them keeps the worker from feeding
+    // the view — not task prompts. Ignoring them keeps the executor from feeding
     // its own mid-run permission request back into Claude as a new turn (#66).
     if (message.type === INTERACTION_REQUEST || message.type === INTERACTION_DECISION) return undefined;
     const prompt = typeof message.payload === 'string' ? message.payload : JSON.stringify(message.payload);

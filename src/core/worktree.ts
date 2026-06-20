@@ -14,9 +14,9 @@ export interface WorktreeManagerOptions {
 }
 
 export interface Worktree {
-  /** Absolute path of the worktree checkout — a worker's isolated workspace. */
+  /** Absolute path of the worktree checkout — an executor's isolated workspace. */
   readonly path: string;
-  /** The branch the worktree is on; survives removal and holds the worker's commits. */
+  /** The branch the worktree is on; survives removal and holds the executor's commits. */
   readonly branch: string;
   /**
    * Stage and commit everything in the worktree onto its branch (the system
@@ -38,10 +38,10 @@ const COMMIT_IDENTITY = {
 };
 
 /**
- * Creates and tears down isolated git worktrees for workers. Each worktree is a
- * checkout on its own branch, so a worker edits the project repo without
+ * Creates and tears down isolated git worktrees for executors. Each worktree is a
+ * checkout on its own branch, so an executor edits the project repo without
  * touching the developer's working tree, index, or HEAD; removing the worktree
- * leaves the branch (and the worker's commits) for review. Uses git plumbing
+ * leaves the branch (and the executor's commits) for review. Uses git plumbing
  * only and never changes the current checkout.
  */
 export class WorktreeManager {
@@ -87,7 +87,7 @@ export class WorktreeManager {
     };
   }
 
-  /** Clear stale worktree registrations (e.g. after a killed worker left one behind). */
+  /** Clear stale worktree registrations (e.g. after a killed executor left one behind). */
   prune(): void {
     this.git(['worktree', 'prune']);
   }
@@ -100,7 +100,7 @@ export class WorktreeManager {
       });
     } catch {
       throw new Error(
-        `worktree workers need git and a git repository at ${this.repoDir} — run \`git init\` or use a non-repo workdir`,
+        `worktree executors need git and a git repository at ${this.repoDir} — run \`git init\` or use a non-repo workdir`,
       );
     }
   }

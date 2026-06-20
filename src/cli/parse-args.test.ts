@@ -4,11 +4,11 @@ import { parseArgs, CliUsageError } from './parse-args.ts';
 describe('parseArgs', () => {
   it('parses a role and defaults the id', () => {
     expect(parseArgs(['planner'])).toEqual({ role: 'planner', id: 'planner-1' });
-    expect(parseArgs(['worker'])).toEqual({ role: 'worker', id: 'worker-1' });
+    expect(parseArgs(['executor'])).toEqual({ role: 'executor', id: 'executor-1' });
   });
 
   it('accepts an explicit participant id', () => {
-    expect(parseArgs(['worker', 'w-7'])).toEqual({ role: 'worker', id: 'w-7' });
+    expect(parseArgs(['executor', 'w-7'])).toEqual({ role: 'executor', id: 'w-7' });
   });
 
   it('rejects a missing role', () => {
@@ -20,9 +20,9 @@ describe('parseArgs', () => {
   });
 
   it('parses --session to join a shared session by id', () => {
-    expect(parseArgs(['worker', '--session', 'demo'])).toEqual({
-      role: 'worker',
-      id: 'worker-1',
+    expect(parseArgs(['executor', '--session', 'demo'])).toEqual({
+      role: 'executor',
+      id: 'executor-1',
       sessionId: 'demo',
     });
     expect(parseArgs(['planner', 'p-2', '-s', 'demo'])).toEqual({
@@ -33,7 +33,7 @@ describe('parseArgs', () => {
   });
 
   it('rejects --session without an id', () => {
-    expect(() => parseArgs(['worker', '--session'])).toThrow(CliUsageError);
+    expect(() => parseArgs(['executor', '--session'])).toThrow(CliUsageError);
   });
 
   it('parses --replay (attach with history) when a session is given', () => {
@@ -49,9 +49,9 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['planner', '--replay'])).toThrow(CliUsageError);
   });
 
-  it('parses --auto (automated worker)', () => {
-    expect(parseArgs(['worker', 'w1', '--session', 'demo', '--auto'])).toEqual({
-      role: 'worker',
+  it('parses --auto (automated executor)', () => {
+    expect(parseArgs(['executor', 'w1', '--session', 'demo', '--auto'])).toEqual({
+      role: 'executor',
       id: 'w1',
       sessionId: 'demo',
       auto: true,

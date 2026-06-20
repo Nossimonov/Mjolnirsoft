@@ -16,10 +16,10 @@ describe('SessionStore', () => {
 
   it('opens a channel by id whose messages persist under that session (file hidden)', () => {
     const store = new SessionStore({ baseDir });
-    const channel = store.open('worker-1');
+    const channel = store.open('executor-1');
     channel.join('planner-1', 'planner', () => {}).send({ type: 'text', payload: 'hi' });
 
-    const logged = readFileSync(join(baseDir, 'worker-1.jsonl'), 'utf8');
+    const logged = readFileSync(join(baseDir, 'executor-1.jsonl'), 'utf8');
     expect(logged).toContain('"from":"planner-1"');
     expect(logged).toContain('"payload":"hi"');
   });

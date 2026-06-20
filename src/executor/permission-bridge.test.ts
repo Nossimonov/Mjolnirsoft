@@ -10,7 +10,7 @@ import {
 import { createPermissionBridge } from './permission-bridge.ts';
 
 /**
- * Join the bridge as the worker's permission side and a fake "view" as the human
+ * Join the bridge as the executor's permission side and a fake "view" as the human
  * side of one channel, the way the MCP server and the VS Code panel meet over a
  * session's FileChannel — but in-memory, so the round-trip is synchronous.
  */
@@ -21,7 +21,7 @@ function wire(respond: (request: InteractionRequest) => Omit<Message, 'from'>) {
       view.send(respond(message.payload as InteractionRequest));
     }
   });
-  const perms = channel.join('perms', 'worker', (message) => bridge.handleMessage(message));
+  const perms = channel.join('perms', 'executor', (message) => bridge.handleMessage(message));
   const bridge = createPermissionBridge(perms.send);
   return { bridge };
 }

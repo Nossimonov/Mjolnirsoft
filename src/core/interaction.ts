@@ -1,7 +1,7 @@
 /**
  * The structured-interaction layer over the channel (#65).
  *
- * A worker's agent sometimes needs a human decision mid-run: permission for a
+ * An executor's agent sometimes needs a human decision mid-run: permission for a
  * tool use it isn't pre-allowed to make, or an `AskUserQuestion` clarification.
  * Claude Code surfaces both through one `--permission-prompt-tool` contract —
  * the tool is called with `{ tool_name, input, tool_use_id }` and returns an
@@ -12,9 +12,9 @@
  * `AskUserQuestion` (a later rung) renders its choices — same envelope either way.
  */
 
-/** Message `type` for a worker → human request needing a decision. */
+/** Message `type` for an executor → human request needing a decision. */
 export const INTERACTION_REQUEST = 'interaction-request';
-/** Message `type` for the human → worker decision answering a request. */
+/** Message `type` for the human → executor decision answering a request. */
 export const INTERACTION_DECISION = 'interaction-decision';
 
 /** An agent-initiated tool request awaiting a human decision. */

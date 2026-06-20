@@ -7,7 +7,7 @@
  */
 
 /** The role a session plays in coordination. */
-export type Role = 'planner' | 'worker';
+export type Role = 'planner' | 'executor';
 
 /**
  * A message exchanged over the channel. Intentionally minimal: `type` is a
