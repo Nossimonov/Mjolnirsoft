@@ -28,7 +28,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 /** Path (relative to a project root) of the gitignored learned-rules file. */
-export const LEARNED_PERMISSIONS_RELPATH = path.join('.mjolnir', 'worker-permissions.json');
+export const LEARNED_PERMISSIONS_RELPATH = path.join('.mjolnir', 'executor-permissions.json');
 
 /** The on-disk shape: a single list of `--settings` allow-rule strings. */
 interface LearnedPermissionsFile {
