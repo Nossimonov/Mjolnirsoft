@@ -441,19 +441,20 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   .auth-actions button:disabled { opacity: 0.5; cursor: default; }
   .from { font-size: 0.8em; opacity: 0.7; margin-bottom: 0.25rem; }
   .mermaid { background: #fff; padding: 0.5rem; border-radius: 4px; }
-  /* The in-progress block (#109): replaces the bare "working…" line — its header
-     carries the #76 elapsed timer, and the executor's live reasoning streams below
-     it (dimmed thinking, inline tool chips, then the answer text). Cleared when the
-     turn's durable result lands. */
+  /* The in-progress "working" block (#109): the #76 elapsed-timer header, with the
+     live answer text streaming below it; cleared when the turn's durable result lands. */
   #working { padding: 0.4rem 1rem; font-size: 0.85em; }
   #working[hidden] { display: none; }
   #working-header { opacity: 0.75; }
-  #reasoning { margin-top: 0.3rem; max-height: 16em; overflow-y: auto; }
-  /* Thinking: a dimmed, italic block above the answer (the settled #109 shape). */
-  #reasoning-thinking { opacity: 0.6; font-style: italic; border-inline-start: 2px solid var(--vscode-panel-border);
-                        padding-inline-start: 0.5rem; margin-bottom: 0.35rem; }
-  .reasoning-label { font-style: normal; font-weight: 600; opacity: 0.85; margin-bottom: 0.15rem; }
-  #reasoning-thinking-text, #reasoning-body { white-space: pre-wrap; word-break: break-word; }
+  /* Per-turn reasoning trail (#109): everything the executor emits live — thinking,
+     response text, tool uses — streams into a collapsible <details> in the
+     conversation, open while it works, then auto-collapsed when the result lands, so
+     it's preserved for review while the clean result renders below. */
+  .reasoning-trail { margin: 0.35rem 0; border-inline-start: 2px solid var(--vscode-panel-border);
+                     padding-inline-start: 0.5rem; font-size: 0.9em; }
+  .reasoning-trail > summary { cursor: pointer; opacity: 0.75; font-style: italic; user-select: none; }
+  .trail-body { margin-top: 0.25rem; white-space: pre-wrap; word-break: break-word; }
+  .trail-thinking { opacity: 0.6; font-style: italic; }
   /* Each tool use as a compact inline chip (e.g. ⚙ Bash) as the agent calls it. */
   .tool-chip { display: inline-block; background: var(--vscode-badge-background, #4d4d4d);
                color: var(--vscode-badge-foreground, #fff); border-radius: 3px; padding: 0 0.4rem;
@@ -497,10 +498,6 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 <div id="content"></div>
 <div id="working" hidden>
   <div id="working-header">● executor is working…</div>
-  <div id="reasoning">
-    <div id="reasoning-thinking" hidden><div class="reasoning-label">💭 thinking…</div><span id="reasoning-thinking-text"></span></div>
-    <div id="reasoning-body"></div>
-  </div>
 </div>
 <div id="queued" hidden></div>
 <div id="notice" hidden></div>

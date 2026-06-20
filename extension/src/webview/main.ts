@@ -12,9 +12,6 @@ const input = document.getElementById('input') as HTMLTextAreaElement | null;
 const send = document.getElementById('send');
 const working = document.getElementById('working');
 const workingHeader = document.getElementById('working-header');
-const reasoningThinking = document.getElementById('reasoning-thinking');
-const reasoningThinkingText = document.getElementById('reasoning-thinking-text');
-const reasoningBody = document.getElementById('reasoning-body');
 const queued = document.getElementById('queued');
 const notice = document.getElementById('notice');
 
@@ -50,47 +47,83 @@ function stopWorking(): void {
   clearReasoning();
 }
 
-// The executor's live reasoning (#109) streams into the in-progress block as
-// ephemeral host posts (never from the channel, never logged). Thinking tokens
-// accumulate in a dimmed block; answer text and inline tool chips build the body
-// in arrival order. `currentText` is the running text span the next text delta
-// extends — reset to null by a tool chip so post-tool text starts after it.
-let currentText: HTMLElement | null = null;
+// The executor's live reasoning (#109) streams in as ephemeral host posts (never
+// from the channel, never logged). Everything it emits live — thinking, response
+// text, and tool uses — accumulates in a per-turn **collapsible trail** in the
+// conversation, open while it works so you can watch, then auto-collapsed when the
+// turn's durable result lands: preserved (one twisty-click to review) instead of
+// vanishing, while the clean result renders below it. The bottom block carries
+// only the elapsed timer.
+let currentTrail: HTMLDetailsElement | null = null;
+let trailSpan: HTMLElement | null = null; // running text/thinking span in the trail
+let trailSpanKind: 'thinking' | 'text' | null = null;
+
+// The body of the current turn's trail, creating the <details> (open) in the
+// conversation on first use. Lives in `#content` so it persists, collapsed, after
+// the turn.
+function trailBody(): HTMLElement | null {
+  if (!content) return null;
+  if (!currentTrail) {
+    currentTrail = document.createElement('details');
+    currentTrail.className = 'reasoning-trail';
+    currentTrail.open = true;
+    const summary = document.createElement('summary');
+    summary.textContent = '💭 Thinking';
+    const body = document.createElement('div');
+    body.className = 'trail-body';
+    currentTrail.append(summary, body);
+    content.appendChild(currentTrail);
+    content.scrollTop = content.scrollHeight;
+  }
+  return currentTrail.querySelector('.trail-body');
+}
+
+// Append a thinking or response-text token to the trail, coalescing consecutive
+// deltas of the same kind into one span and starting a fresh span when the kind
+// switches — thinking renders dimmed, response text normal-weight.
+function appendToTrail(kind: 'thinking' | 'text', text: string): void {
+  const body = trailBody();
+  if (!body) return;
+  if (!trailSpan || trailSpanKind !== kind) {
+    trailSpan = document.createElement('span');
+    trailSpan.className = kind === 'thinking' ? 'trail-thinking' : 'trail-text';
+    body.appendChild(trailSpan);
+    trailSpanKind = kind;
+  }
+  trailSpan.textContent += text;
+  if (content) content.scrollTop = content.scrollHeight;
+}
 
 function appendReasoning(event: ViewEvent): void {
   if (event.kind === 'thinking') {
-    // Some CLI builds stream `thinking_delta` with the reasoning text redacted to
-    // empty (only an estimated-token count). Skip those so an empty "thinking…"
-    // block never appears; when real thinking text streams, it renders unchanged.
-    if (!event.text) return;
-    if (reasoningThinking) reasoningThinking.removeAttribute('hidden');
-    if (reasoningThinkingText) reasoningThinkingText.textContent += event.text;
+    // Some CLI builds stream `thinking_delta` redacted to empty (only a token
+    // count); skip those so an empty span never appears.
+    if (event.text) appendToTrail('thinking', event.text);
   } else if (event.kind === 'text') {
-    if (!reasoningBody) return;
-    if (!currentText) {
-      currentText = document.createElement('span');
-      currentText.className = 'reasoning-text';
-      reasoningBody.appendChild(currentText);
-    }
-    currentText.textContent += event.text;
+    appendToTrail('text', event.text);
   } else if (event.kind === 'tool-use') {
-    if (!reasoningBody) return;
+    const body = trailBody();
+    if (!body) return;
     const chip = document.createElement('span');
     chip.className = 'tool-chip';
     chip.textContent = `⚙ ${event.name}`;
-    reasoningBody.appendChild(chip);
-    currentText = null; // text after a tool starts a fresh span past the chip
+    body.appendChild(chip);
+    trailSpan = null; // text/thinking after a tool starts a fresh span past the chip
+    trailSpanKind = null;
+    if (content) content.scrollTop = content.scrollHeight;
   }
-  // Keep the latest stream in view as it grows.
-  const reasoning = document.getElementById('reasoning');
-  if (reasoning) reasoning.scrollTop = reasoning.scrollHeight;
 }
 
 function clearReasoning(): void {
-  currentText = null;
-  if (reasoningThinking) reasoningThinking.setAttribute('hidden', '');
-  if (reasoningThinkingText) reasoningThinkingText.textContent = '';
-  if (reasoningBody) reasoningBody.textContent = '';
+  // Collapse the turn's trail (keep it in the conversation, twisty shut) so the
+  // live reasoning + work stays reviewable rather than vanishing; the clean durable
+  // result message renders below it (#109).
+  if (currentTrail) {
+    currentTrail.open = false;
+    currentTrail = null;
+  }
+  trailSpan = null;
+  trailSpanKind = null;
 }
 
 // Show how many messages are waiting behind the in-flight turn. The executor
