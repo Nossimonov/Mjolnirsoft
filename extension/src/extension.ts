@@ -153,6 +153,7 @@ async function startExecutorSession(
 
   openSessionPanel(context, store, sessionId, folder.uri.fsPath, {
     executorAttached: true,
+    executorId,
     onDispose: () => {
       delegationHost.close();
       executor.close();
@@ -202,9 +203,13 @@ function openSessionPanel(
   store: SessionStore,
   sessionId: string,
   projectDir: string,
-  options: { onDispose?: () => void; executorAttached?: boolean } = {},
+  options: { onDispose?: () => void; executorAttached?: boolean; executorId?: string } = {},
 ): void {
   const executorAttached = options.executorAttached ?? false;
+  // The executor whose replies settle a sent turn. Only this participant's
+  // messages advance the queue/indicator — a bridged delegate report (#93) is
+  // someone else's id, so it renders but never counts as a turn completion (#100).
+  const executorId = options.executorId;
   const panel = vscode.window.createWebviewPanel(
     'mjolnirsoftSessionView',
     `Session: ${sessionId}`,
@@ -230,6 +235,11 @@ function openSessionPanel(
   // (#90). A single interactive executor answers this session, so the last-sent
   // message is the one that failed.
   let lastSentText: string | undefined;
+  // How many sent turns are awaiting a reply. The executor serializes turns
+  // (#100), running them one at a time, so when more than one is outstanding the
+  // extras are queued behind the in-flight turn — the count drives a "queued" cue
+  // so a message typed mid-turn doesn't look ignored.
+  let outstanding = 0;
   const participant = channel.join('vscode-view', 'planner', (message) => {
     // Delegation control messages (#93) are plumbing between the executor's MCP
     // server and the in-host delegation manager — not conversation. Skip them so
@@ -245,8 +255,24 @@ function openSessionPanel(
       return;
     }
     void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
-    // A reply (result/text) from another participant means the executor is done — stop "working".
-    void panel.webview.postMessage({ kind: 'working', on: false });
+    // Only the executor's own reply settles a sent turn. A bridged delegate
+    // report (#93) — e.g. an evaluator's finding — renders above, but the executor
+    // is still mid-turn (about to react to it), so it must not advance the queue or
+    // flip the indicator off (#100). Anything that isn't the executor's reply
+    // renders and stops here.
+    if (message.from !== executorId) return;
+    // A reply settles the in-flight turn. With serialization (#100) the executor
+    // runs queued turns one at a time, so if more were sent while this one ran the
+    // next now starts: keep "working" on and drop the queued count by one. Only
+    // when nothing is left outstanding does "working" stop.
+    if (outstanding > 0) outstanding -= 1;
+    if (outstanding === 0) {
+      void panel.webview.postMessage({ kind: 'working', on: false });
+      void panel.webview.postMessage({ kind: 'queued', count: 0 });
+    } else {
+      void panel.webview.postMessage({ kind: 'working', on: true });
+      void panel.webview.postMessage({ kind: 'queued', count: outstanding - 1 });
+    }
   });
 
   // Send one (possibly multi-line) message: render the sent turn locally (the
@@ -261,7 +287,15 @@ function openSessionPanel(
     participant.send({ type: 'text', payload: text });
     lastSentText = text;
     if (executorAttached) {
-      void panel.webview.postMessage({ kind: 'working', on: true });
+      outstanding += 1;
+      if (outstanding === 1) {
+        // First turn: the executor starts on it immediately.
+        void panel.webview.postMessage({ kind: 'working', on: true });
+      } else {
+        // A turn is already in flight; #100 serialization queues this one behind
+        // it. Show how many are waiting so a mid-turn send doesn't look ignored.
+        void panel.webview.postMessage({ kind: 'queued', count: outstanding - 1 });
+      }
     } else {
       void panel.webview.postMessage({
         kind: 'notice',
@@ -379,6 +413,8 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   .mermaid { background: #fff; padding: 0.5rem; border-radius: 4px; }
   #working { padding: 0.25rem 1rem; font-size: 0.85em; opacity: 0.75; }
   #working[hidden] { display: none; }
+  #queued { padding: 0.25rem 1rem; font-size: 0.85em; opacity: 0.75; }
+  #queued[hidden] { display: none; }
   #notice { padding: 0.25rem 1rem; font-size: 0.85em; color: var(--vscode-inputValidation-warningForeground, #cca700); }
   #notice[hidden] { display: none; }
   #composer { display: flex; gap: 0.5rem; padding: 0.5rem 1rem; border-top: 1px solid var(--vscode-panel-border); }
@@ -415,6 +451,7 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 <body>
 <div id="content"></div>
 <div id="working" hidden>● executor is working…</div>
+<div id="queued" hidden></div>
 <div id="notice" hidden></div>
 <div id="composer">
   <textarea id="input" placeholder="Type a message (Markdown + Mermaid). Enter to send, Shift+Enter for a new line."></textarea>

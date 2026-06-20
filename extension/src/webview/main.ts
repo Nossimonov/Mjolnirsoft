@@ -10,6 +10,7 @@ const content = document.getElementById('content');
 const input = document.getElementById('input') as HTMLTextAreaElement | null;
 const send = document.getElementById('send');
 const working = document.getElementById('working');
+const queued = document.getElementById('queued');
 const notice = document.getElementById('notice');
 
 // Client-side elapsed timer for the "working" indicator. The host only tells us
@@ -41,6 +42,19 @@ function stopWorking(): void {
   working?.setAttribute('hidden', '');
 }
 
+// Show how many messages are waiting behind the in-flight turn. The executor
+// serializes turns (#100), so a message typed mid-turn is queued, not run now;
+// the cue keeps that visible rather than letting it look ignored. Count 0 hides.
+function setQueued(count: number): void {
+  if (!queued) return;
+  if (count > 0) {
+    queued.textContent = `↳ ${count} message${count === 1 ? '' : 's'} queued — waiting for the current turn to finish`;
+    queued.removeAttribute('hidden');
+  } else {
+    queued.setAttribute('hidden', '');
+  }
+}
+
 // The extension host posts one rendered message (HTML) at a time — replayed
 // history first, then live (and a local echo of what we send) — plus "working"
 // toggles while a reply is pending and a "notice" when a send has no executor to
@@ -48,7 +62,7 @@ function stopWorking(): void {
 // attached), so the webview just renders what it's told. Append messages and
 // render any new Mermaid diagrams.
 window.addEventListener('message', (event: MessageEvent) => {
-  const data = event.data as { kind?: string; html?: string; on?: boolean; text?: string };
+  const data = event.data as { kind?: string; html?: string; on?: boolean; text?: string; count?: number };
   if (data.kind === 'message' && data.html && content) {
     content.insertAdjacentHTML('beforeend', data.html);
     void mermaid.run();
@@ -56,6 +70,8 @@ window.addEventListener('message', (event: MessageEvent) => {
   } else if (data.kind === 'working') {
     if (data.on) startWorking();
     else stopWorking();
+  } else if (data.kind === 'queued') {
+    setQueued(data.count ?? 0);
   } else if (data.kind === 'notice' && notice) {
     notice.textContent = data.text ?? '';
     notice.removeAttribute('hidden');
