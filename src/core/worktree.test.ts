@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { WorktreeManager } from './worktree.ts';
+import { WorktreeManager, currentRemoteBase } from './worktree.ts';
 
 function initRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'mjolnir-wt-'));
@@ -91,5 +91,45 @@ describe('WorktreeManager', () => {
   it('prune runs cleanly', () => {
     const mgr = new WorktreeManager({ repoDir: initRepo() });
     expect(() => mgr.prune()).not.toThrow();
+  });
+});
+
+describe('currentRemoteBase (#83)', () => {
+  it('falls back to HEAD when there is no remote', () => {
+    expect(currentRemoteBase(initRepo())).toBe('HEAD');
+  });
+
+  it('bases a session on origin/main when the remote is ahead of stale local main', () => {
+    // The trap that put #57 on stale code: a repo pushed to origin, then origin/main
+    // advanced from elsewhere, leaving this checkout's local main behind.
+    const remote = mkdtempSync(join(tmpdir(), 'mjolnir-remote-'));
+    execFileSync('git', ['init', '--bare', '-b', 'main', remote], { stdio: 'ignore' });
+    const repo = initRepo();
+    const g = (...a: string[]) => execFileSync('git', a, { cwd: repo, stdio: 'ignore' });
+    g('branch', '-M', 'main');
+    g('remote', 'add', 'origin', remote);
+    g('push', '-u', 'origin', 'main');
+
+    // Advance origin/main from a second clone (repo's local main stays behind).
+    const other = mkdtempSync(join(tmpdir(), 'mjolnir-other-'));
+    const o = (...a: string[]) => execFileSync('git', a, { cwd: other, stdio: 'ignore' });
+    o('clone', remote, '.');
+    o('config', 'user.email', 't@t');
+    o('config', 'user.name', 'T');
+    writeFileSync(join(other, 'merged.txt'), 'fresh\n');
+    o('add', '-A');
+    o('commit', '-m', 'advance origin');
+    o('push', 'origin', 'HEAD:main');
+
+    const localHead = git(repo, 'rev-parse', 'HEAD').trim();
+
+    // Fetches and prefers origin/main…
+    expect(currentRemoteBase(repo)).toBe('origin/main');
+
+    // …and a worktree on that base carries the merged commit local HEAD lacks.
+    const wt = new WorktreeManager({ repoDir: repo, base: currentRemoteBase(repo) }).create('fresh1');
+    expect(existsSync(join(wt.path, 'merged.txt'))).toBe(true);
+    expect(git(repo, 'rev-parse', wt.branch).trim()).toBe(git(repo, 'rev-parse', 'origin/main').trim());
+    expect(git(repo, 'rev-parse', wt.branch).trim()).not.toBe(localHead); // not the stale local base
   });
 });
