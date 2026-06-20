@@ -109,3 +109,29 @@ export class WorktreeManager {
     return execFileSync('git', args as string[], { cwd: this.repoDir }).toString().trim();
   }
 }
+
+/**
+ * The freshest base to fork a new executor worktree from (#83): `origin/main`
+ * after a best-effort fetch, so a session starts from the latest *merged* code
+ * even when the local checkout is behind (e.g. a PR merged but `git pull` hasn't
+ * run). Pass the result as {@link WorktreeManagerOptions.base}.
+ *
+ * Falls back to `HEAD` — today's local state — when there is no remote, the fetch
+ * fails (offline), or the remote branch doesn't resolve, so remote-less and
+ * offline repos still spawn. Only adopts `origin/main` when the fetch *succeeds*,
+ * so a failed fetch can't hand back a cached ref that's older than local `HEAD`.
+ */
+export function currentRemoteBase(repoDir: string, remoteBranch = 'origin/main'): string {
+  const [remote] = remoteBranch.split('/');
+  try {
+    execFileSync('git', ['fetch', remote], { cwd: repoDir, stdio: 'ignore' });
+    // Fetch succeeded — use the remote branch only if it actually resolves to a commit.
+    execFileSync('git', ['rev-parse', '--verify', '--quiet', `${remoteBranch}^{commit}`], {
+      cwd: repoDir,
+      stdio: 'ignore',
+    });
+    return remoteBranch;
+  } catch {
+    return 'HEAD';
+  }
+}
