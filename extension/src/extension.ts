@@ -251,12 +251,21 @@ function openSessionPanel(
         dispatchSend(event.text);
       } else if (event.kind === 'auth-login') {
         // Guided re-login (#90): the official Claude Code extension exposes no
-        // command API to invoke its OAuth flow, so open an integrated terminal
-        // running `<CLAUDE_BIN> auth login`. The user completes the browser flow;
-        // refreshed per-machine credentials are picked up by the next executor
-        // spawn. Reuse `resolveClaudeBin()` so a `.local.env` CLAUDE_BIN is honored.
-        const terminal = vscode.window.createTerminal({ name: 'Claude login' });
-        terminal.sendText(`${resolveClaudeBin()} auth login`);
+        // command API to invoke its OAuth flow, so open a terminal that runs
+        // `claude auth login`. The user completes the browser flow; refreshed
+        // per-machine credentials are picked up by the next executor spawn.
+        // Launch claude as the terminal's own process (shellPath + shellArgs)
+        // rather than typing a command into a shell: the binary path is an exec
+        // argument, never parsed by a shell, so a CLAUDE_BIN with spaces (e.g.
+        // `C:\Program Files\...\claude.exe`) works regardless of the user's
+        // default shell — no per-shell quoting. This is how the executor already
+        // spawns claude (a direct exec, no shell). Reuse `resolveClaudeBin()` so
+        // a `.local.env` CLAUDE_BIN is honored.
+        const terminal = vscode.window.createTerminal({
+          name: 'Claude login',
+          shellPath: resolveClaudeBin(),
+          shellArgs: ['auth', 'login'],
+        });
         terminal.show();
       } else if (event.kind === 'auth-retry') {
         // Re-send the held failed task to the still-alive executor (runExecutor's
