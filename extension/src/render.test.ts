@@ -27,6 +27,7 @@ describe('renderMessage', () => {
   it('renders an attributed turn with Markdown and a Mermaid diagram', () => {
     const message: Message = {
       from: 'executor-1',
+      role: 'executor',
       type: 'result',
       payload: '# Done\n\n```mermaid\ngraph TD; A-->B\n```',
     };
@@ -37,15 +38,15 @@ describe('renderMessage', () => {
   });
 
   it('renders a non-string payload as a JSON code block', () => {
-    const html = renderMessage({ from: 'orchestrator', type: 'task', payload: { id: 42 } });
+    const html = renderMessage({ from: 'orchestrator', role: 'planner', type: 'task', payload: { id: 42 } });
     expect(html).toContain('orchestrator · task');
     expect(html).toContain('42');
   });
 
   it('colours the turn by its sender, keyed on `from`', () => {
-    const user = renderMessage({ from: 'vscode-view', type: 'text', payload: 'hi' });
+    const user = renderMessage({ from: 'vscode-view', role: 'planner', type: 'text', payload: 'hi' });
     expect(user).toContain(`hsl(${hueForSender('vscode-view')} `); // styled by the sender's hue
-    const executor = renderMessage({ from: 'demo-executor', type: 'result', payload: 'hi' });
+    const executor = renderMessage({ from: 'demo-executor', role: 'executor', type: 'result', payload: 'hi' });
     expect(user).not.toBe(executor); // different senders render distinctly
   });
 });

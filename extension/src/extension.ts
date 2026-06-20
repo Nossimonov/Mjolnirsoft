@@ -224,7 +224,7 @@ function openSessionPanel(
       answers?: Record<string, string | string[]>;
     }) => {
       if (event.kind === 'send' && event.text) {
-        const sent = { from: 'vscode-view', type: 'text', payload: event.text };
+        const sent = { from: participant.id, role: participant.role, type: 'text', payload: event.text };
         void panel.webview.postMessage({ kind: 'message', html: renderMessage(sent) });
         participant.send({ type: 'text', payload: event.text });
         // We just sent. With an executor attached, show "working" until a reply

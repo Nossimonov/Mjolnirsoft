@@ -1,8 +1,25 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import type { Message } from '../core/channel.ts';
 import { INTERACTION_DECISION, INTERACTION_REQUEST } from '../core/interaction.ts';
 import { composeAgentInstructions } from '../core/agent-instructions.ts';
 import type { Respond } from './executor-runtime.ts';
+
+/**
+ * The labeled line that prefixes every message the executor turns into a prompt,
+ * naming the sender's identity and role so the agent can tell the authoritative
+ * human apart from a peer/subordinate agent (#86, #71). The `planner` role is the
+ * architect/human and is marked authoritative; every other role reads as a
+ * non-authoritative agent. This is the seam delegation (#85) needs: once an
+ * executor shares its channel with delegates, a delegate's message can never be
+ * mistaken for the architect's instruction. Renaming `planner`→`orchestrator` is
+ * a separate concern and deliberately untouched here.
+ */
+export function senderAttribution(message: Pick<Message, 'from' | 'role'>): string {
+  const descriptor =
+    message.role === 'planner' ? 'architect — authoritative' : message.role === 'executor' ? 'agent' : 'unknown role';
+  return `[Message from ${descriptor} (id: ${message.from})]`;
+}
 
 /** Options shaping a one-shot `claude` run beyond the task prompt and cwd. */
 export interface ClaudeRunArgs {
@@ -174,7 +191,10 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     // the view — not task prompts. Ignoring them keeps the executor from feeding
     // its own mid-run permission request back into Claude as a new turn (#66).
     if (message.type === INTERACTION_REQUEST || message.type === INTERACTION_DECISION) return undefined;
-    const prompt = typeof message.payload === 'string' ? message.payload : JSON.stringify(message.payload);
+    const body = typeof message.payload === 'string' ? message.payload : JSON.stringify(message.payload);
+    // Prefix the sender's identity + role so the agent reads who it's hearing
+    // from — the authoritative architect vs. a peer/subordinate agent (#86).
+    const prompt = `${senderAttribution(message)}\n\n${body}`;
     const result = (
       await run(prompt, {
         cwd: workdir,
