@@ -39,6 +39,23 @@ export const EXECUTOR_OPERATIONS = `As you implement:
 - Don't commit; hand off. Leave your work in your branch's working tree with a final summary of what you changed and why — clear enough for the orchestrator to compose the commit and judge the result against the design.
 - Justify every change for the record — a brief rationale per meaningful change, so future sessions recover the reasoning without you present.`;
 
+/**
+ * The evaluator's one-line role insert: its position and standing rule in the
+ * chain (#93). An evaluator is the fresh-eyes critic — it reviews whatever state
+ * is put in front of it (an executor's local diff, an orchestrator's design, a
+ * contributor's PR) with no stake in it, and its job is a *finding*, never an
+ * edit. Phrased around "the changes or state under review" so the one role reads
+ * for every job it gets reused for, not just a worktree diff.
+ */
+export const EVALUATOR_INSERT = `You are an evaluator: you review the changes or state put in front of you with fresh eyes and no stake in it. Critique only — never modify what you review — and return a distilled finding, not a rewrite.`;
+
+/** How an evaluator works on the state under review — operational guidance under the model and role insert. */
+export const EVALUATOR_OPERATIONS = `As you review:
+- Judge what is, not what was intended — assess the changes or state as they actually stand, against the goal they serve. Read widely to ground your critique: the diff or artifact under review, the surrounding code, the brief or design it answers to.
+- Hold no stake — you did not author this and are not defending it. Surface what is wrong, risky, or missing as readily as what is solid; an honest "this is sound" is as useful as a problem found.
+- Critique, never modify — do not edit, fix, or rewrite the work. Your output is the finding; the spawner decides what to do with it.
+- Distill — return a concise finding, not a line-by-line rewrite: the problems worth acting on (what's wrong / risky / missing) and what is genuinely solid, ordered by what matters, so the reader can act without re-deriving your reasoning.`;
+
 /** The role-specific layers (2 and 3): a role's one-line insert and its operational guidance. */
 export interface AgentRoleLayers {
   /** Layer 2 — the role's one-line position-and-rule insert. */
@@ -47,17 +64,28 @@ export interface AgentRoleLayers {
   readonly operational: string;
 }
 
-/** The roles whose instructions {@link composeAgentInstructions} can compose. */
-export type AgentRole = 'executor';
+/**
+ * The roles whose instructions {@link composeAgentInstructions} can compose — the
+ * tool-spawned agent roles (a subset of the channel {@link Role}; `planner` is the
+ * human and carries no composed prompt). Kept in sync with `Role` by hand.
+ */
+export type AgentRole = 'executor' | 'evaluator';
 
 /**
- * The role registry: maps each role to its insert + operational layers. Only the
- * executor is registered today — the orchestrator/evaluator/investigator inserts
+ * The role registry: maps each role to its insert + operational layers. The
+ * executor and evaluator are registered; the evaluator joined when delegation
+ * made it a real tool-spawned agent (#93). The orchestrator/investigator inserts
  * register here when their agents exist (a dead entry now would be speculation).
  */
 const ROLE_REGISTRY: Record<AgentRole, AgentRoleLayers> = {
   executor: { insert: EXECUTOR_INSERT, operational: EXECUTOR_OPERATIONS },
+  evaluator: { insert: EVALUATOR_INSERT, operational: EVALUATOR_OPERATIONS },
 };
+
+/** Whether `role` is a tool-spawnable agent role (has composed instructions). */
+export function isAgentRole(role: string): role is AgentRole {
+  return role === 'executor' || role === 'evaluator';
+}
 
 /**
  * Compose an agent's appended system prompt for {@link role} from its layers:

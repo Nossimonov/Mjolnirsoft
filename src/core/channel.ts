@@ -6,8 +6,16 @@
  * (in-memory now, cross-process later) implement {@link Channel}.
  */
 
-/** The role a session plays in coordination. */
-export type Role = 'planner' | 'executor';
+/**
+ * The role a session plays in coordination. `planner` is the authoritative
+ * human (architect/orchestrator seat); `executor` and `evaluator` are the
+ * tool-spawned agent roles. `evaluator` joins via delegation (#93) — a spawner
+ * delegates a critique to an evaluator on its own sub-channel — so it is a
+ * channel role like the others, carried in the message so attribution can mark
+ * its report a (non-authoritative) agent report (#86). The agent roles that
+ * carry composed instructions are mirrored by `AgentRole` in `agent-instructions.ts`.
+ */
+export type Role = 'planner' | 'executor' | 'evaluator';
 
 /**
  * A message exchanged over the channel. Intentionally minimal: `type` is a

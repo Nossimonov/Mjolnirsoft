@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   composeAgentInstructions,
+  isAgentRole,
   SHARED_CORE,
   EXECUTOR_INSERT,
   EXECUTOR_OPERATIONS,
+  EVALUATOR_INSERT,
+  EVALUATOR_OPERATIONS,
 } from './agent-instructions.ts';
 
 describe('composeAgentInstructions (#57)', () => {
@@ -30,5 +33,30 @@ describe('composeAgentInstructions (#57)', () => {
     expect(composeAgentInstructions('executor')).toBe(
       `${SHARED_CORE}\n\n${EXECUTOR_INSERT}\n\n${EXECUTOR_OPERATIONS}`,
     );
+  });
+
+  it('composes the evaluator role from the same layers — fresh eyes, critique-only (#93)', () => {
+    const composed = composeAgentInstructions('evaluator');
+    // Same shared core (the agent chain + classification), then the evaluator's
+    // own insert and operational layers, in the same general → specific order.
+    expect(composed).toBe(`${SHARED_CORE}\n\n${EVALUATOR_INSERT}\n\n${EVALUATOR_OPERATIONS}`);
+    expect(composed.indexOf(SHARED_CORE)).toBe(0);
+    // The insert carries the standing rule: critique, never modify.
+    expect(EVALUATOR_INSERT).toContain('Critique only');
+    expect(EVALUATOR_INSERT).toContain('never modify');
+    // Phrased generally ("changes or state"), so the one role reads for an
+    // executor's diff, an orchestrator's design, and a contributor's PR alike.
+    expect(EVALUATOR_INSERT).toContain('changes or state');
+  });
+});
+
+describe('isAgentRole (#93)', () => {
+  it('accepts the tool-spawnable agent roles and rejects the human/unknown roles', () => {
+    expect(isAgentRole('executor')).toBe(true);
+    expect(isAgentRole('evaluator')).toBe(true);
+    // `planner` is the human seat — no composed prompt — and anything else is unknown.
+    expect(isAgentRole('planner')).toBe(false);
+    expect(isAgentRole('')).toBe(false);
+    expect(isAgentRole('investigator')).toBe(false);
   });
 });
