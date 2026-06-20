@@ -3,7 +3,7 @@ import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SessionStore } from '../../src/core/session-store.ts';
-import { WorktreeManager, type Worktree } from '../../src/core/worktree.ts';
+import { WorktreeManager, currentRemoteBase, type Worktree } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runExecutor } from '../../src/executor/executor-runtime.ts';
 import { createClaudeCodeResponder } from '../../src/executor/claude-code-responder.ts';
@@ -87,10 +87,13 @@ async function startExecutorSession(
   }
 
   // Give the executor an isolated git worktree on its own branch, so it edits
-  // the real repo without ever touching the developer's working tree.
+  // the real repo without ever touching the developer's working tree. Base it on
+  // the freshest origin/main (not local HEAD), so a new session starts from the
+  // latest merged code even if this checkout hasn't been pulled (#83).
   let worktree: Worktree;
   try {
-    worktree = new WorktreeManager({ repoDir: folder.uri.fsPath }).create(sessionId);
+    const repoDir = folder.uri.fsPath;
+    worktree = new WorktreeManager({ repoDir, base: currentRemoteBase(repoDir) }).create(sessionId);
   } catch (error) {
     void vscode.window.showErrorMessage(`Could not create a worktree for "${sessionId}": ${String(error)}`);
     return;
