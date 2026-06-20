@@ -173,14 +173,17 @@ function openSessionPanel(
 
   // Attach to the session: replay history, then stream live messages.
   const channel = store.open(sessionId, { replay: true });
+  // Pending interactions by request id, so a decision from the webview (which
+  // only knows the id + the user's picks) can be assembled against the original
+  // request — e.g. echoing a question's `questions` back alongside the answers.
+  const pendingRequests = new Map<string, InteractionRequest>();
   const participant = channel.join('vscode-view', 'planner', (message) => {
-    // A permission request means the worker is blocked waiting on us — render it
-    // as an allow/deny card and keep the "working" indicator on (it hasn't replied).
+    // An interaction request means the worker is blocked waiting on us — render
+    // its card and keep the "working" indicator on (it hasn't replied yet).
     if (message.type === INTERACTION_REQUEST) {
-      void panel.webview.postMessage({
-        kind: 'message',
-        html: renderInteractionRequest(message.payload as InteractionRequest),
-      });
+      const request = message.payload as InteractionRequest;
+      pendingRequests.set(request.requestId, request);
+      void panel.webview.postMessage({ kind: 'message', html: renderInteractionRequest(request) });
       return;
     }
     void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
@@ -191,18 +194,36 @@ function openSessionPanel(
   // Compose-and-send: one (possibly multi-line) message per send. The channel
   // doesn't echo a participant's own messages, so render the sent turn locally.
   panel.webview.onDidReceiveMessage(
-    (event: { kind?: string; text?: string; requestId?: string; behavior?: 'allow' | 'deny' }) => {
+    (event: {
+      kind?: string;
+      text?: string;
+      requestId?: string;
+      behavior?: 'allow' | 'deny';
+      answers?: Record<string, string | string[]>;
+    }) => {
       if (event.kind === 'send' && event.text) {
         const sent = { from: 'vscode-view', type: 'text', payload: event.text };
         void panel.webview.postMessage({ kind: 'message', html: renderMessage(sent) });
         participant.send({ type: 'text', payload: event.text });
         // We just sent — show "working" until a reply arrives.
         void panel.webview.postMessage({ kind: 'working', on: true });
-      } else if (event.kind === 'decision' && event.requestId && event.behavior) {
-        // Answer a permission request: the server fills the original input on a
-        // bare allow, so a verdict + requestId is all the worker needs. The
-        // worker resumes once it has our answer, so show "working" again.
-        participant.send({ type: INTERACTION_DECISION, payload: { requestId: event.requestId, behavior: event.behavior } });
+      } else if (event.kind === 'decision' && event.requestId) {
+        const request = pendingRequests.get(event.requestId);
+        pendingRequests.delete(event.requestId);
+        if (event.answers) {
+          // Clarifying question: echo the original `questions` back with the
+          // picks, the shape AskUserQuestion expects, as the allow's updatedInput.
+          const questions = (request?.input as { questions?: unknown[] } | undefined)?.questions ?? [];
+          participant.send({
+            type: INTERACTION_DECISION,
+            payload: { requestId: event.requestId, behavior: 'allow', updatedInput: { questions, answers: event.answers } },
+          });
+        } else if (event.behavior) {
+          // Permission: a verdict + requestId is enough; the server fills the
+          // original input on a bare allow.
+          participant.send({ type: INTERACTION_DECISION, payload: { requestId: event.requestId, behavior: event.behavior } });
+        }
+        // The worker resumes once it has our answer, so show "working" again.
         void panel.webview.postMessage({ kind: 'working', on: true });
       }
     },
@@ -255,6 +276,19 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   .decide[data-behavior="allow"] { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .decide:disabled { opacity: 0.5; cursor: default; }
   .decided { font-size: 0.85em; opacity: 0.8; align-self: center; }
+  .question { margin: 0.5rem 0; }
+  .question.unanswered .q-text { color: var(--vscode-inputValidation-errorForeground, #f48771); }
+  .q-text { margin-bottom: 0.35rem; }
+  .q-hint { font-size: 0.85em; opacity: 0.7; }
+  .options { display: flex; flex-direction: column; gap: 0.3rem; }
+  .opt { text-align: left; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px;
+         padding: 0.3rem 0.6rem; cursor: pointer; background: transparent; color: var(--vscode-foreground); }
+  .opt.selected { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: var(--vscode-button-background); }
+  .opt:disabled { opacity: 0.55; cursor: default; }
+  .opt-desc { opacity: 0.7; }
+  .submit-answers { border: none; padding: 0.25rem 0.9rem; cursor: pointer; border-radius: 3px;
+                    background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .submit-answers:disabled { opacity: 0.5; cursor: default; }
 </style>
 </head>
 <body>
