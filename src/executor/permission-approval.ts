@@ -9,6 +9,7 @@
  */
 import { matchesLearnedRule } from '../core/learned-permissions.ts';
 import { decisionToVerdict, type InteractionRequest, type PermissionVerdict } from '../core/interaction.ts';
+import { outOfWorktreeWriteDenial } from './worktree-confinement.ts';
 import type { PermissionBridge } from './permission-bridge.ts';
 
 export interface ApproveDeps {
@@ -18,6 +19,14 @@ export interface ApproveDeps {
    * fails safe (toward asking) rather than silently auto-approving.
    */
   readonly projectDir?: string;
+  /**
+   * The executor's worktree path — the confinement boundary (#101). A write whose
+   * target resolves outside it is auto-denied *before* any auto-allow/escalation,
+   * so the human is never asked and no learned rule can unlock it. Undefined
+   * disables the guardrail (requests escalate as before), so a misconfigured
+   * server still fails toward asking rather than silently denying.
+   */
+  readonly worktreePath?: string;
   /** Escalate a non-remembered request to the human and await their decision. */
   readonly bridge: Pick<PermissionBridge, 'request'>;
   /**
@@ -41,6 +50,14 @@ export async function approveToolUse(
   input: unknown,
   toolUseId?: string,
 ): Promise<PermissionVerdict> {
+  // Hard worktree guardrail first (#101): an out-of-worktree write is denied here,
+  // before auto-allow or escalation, so the human is never prompted and a learned
+  // "Always" rule (#70) can never unlock it.
+  const denial = outOfWorktreeWriteDenial(toolName, input, deps.worktreePath);
+  if (denial) {
+    deps.postAudit(`auto-denied (outside worktree): ${toolName}`);
+    return { behavior: 'deny', message: denial };
+  }
   const match = deps.projectDir
     ? (deps.matchRule ?? matchesLearnedRule)(deps.projectDir, toolName, input)
     : undefined;

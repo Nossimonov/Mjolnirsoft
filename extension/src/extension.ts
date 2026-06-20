@@ -115,6 +115,7 @@ async function startExecutorSession(
     permParticipantId,
     delegateParticipantId,
     folder.uri.fsPath,
+    worktree.path,
   );
 
   // Spawn the executor in-process: it joins the session and answers each message
@@ -486,6 +487,7 @@ function writeExecutorMcpConfig(
   permParticipantId: string,
   delegateParticipantId: string,
   projectDir: string,
+  worktreePath: string,
 ): string {
   const dist = (name: string) => vscode.Uri.joinPath(context.extensionUri, 'dist', name).fsPath;
   const config = {
@@ -498,6 +500,7 @@ function writeExecutorMcpConfig(
           MJOLNIR_SESSION_LOG: sessionLogPath,
           MJOLNIR_PERM_ID: permParticipantId,
           MJOLNIR_PROJECT_DIR: projectDir,
+          MJOLNIR_WORKTREE_DIR: worktreePath,
         },
       },
       delegate: {
