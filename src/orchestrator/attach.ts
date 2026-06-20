@@ -1,25 +1,25 @@
-import type { WorkerHandle } from './worker-supervisor.ts';
+import type { ExecutorHandle } from './executor-supervisor.ts';
 
 export interface AttachInvitation {
-  readonly workerId: string;
+  readonly executorId: string;
   readonly sessionId: string;
-  /** Command the user runs to open a `--replay` window onto the worker's session. */
+  /** Command the user runs to open a `--replay` window onto the executor's session. */
   readonly command: string;
 }
 
 /**
- * Produce what a user needs to engage with a worker the orchestrator spawned:
+ * Produce what a user needs to engage with an executor the orchestrator spawned:
  * the session id and the attach command. The user joins as a planner
  * (co-prompter) with replay, addressing the session by id — no file path. The
  * richer auto-opened surface is the VS Code view (tracked separately).
  */
 export function attachInvitation(
-  worker: Pick<WorkerHandle, 'id' | 'sessionId'>,
+  executor: Pick<ExecutorHandle, 'id' | 'sessionId'>,
   userId = 'user',
 ): AttachInvitation {
   return {
-    workerId: worker.id,
-    sessionId: worker.sessionId,
-    command: `npm run session -- planner ${userId} --session ${worker.sessionId} --replay`,
+    executorId: executor.id,
+    sessionId: executor.sessionId,
+    command: `npm run session -- planner ${userId} --session ${executor.sessionId} --replay`,
   };
 }

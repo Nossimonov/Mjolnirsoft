@@ -47,7 +47,7 @@ export function renderMessage(message: Message): string {
       ? message.payload
       : `\`\`\`json\n${JSON.stringify(message.payload, null, 2)}\n\`\`\``;
   // Colour each turn by its sender, so a multi-participant conversation (user,
-  // orchestrator, workers) is readable at a glance — keyed on `from`, scaling
+  // orchestrator, executors) is readable at a glance — keyed on `from`, scaling
   // to any number of participants.
   const hue = hueForSender(message.from);
   const style = `border-inline-start:3px solid hsl(${hue} 70% 55%);background:hsl(${hue} 70% 55% / 0.08)`;
@@ -121,14 +121,14 @@ function renderQuestionCard(request: InteractionRequest): string {
   );
 }
 
-/** A permission request: what the worker wants to do, with allow/deny controls. */
+/** A permission request: what the executor wants to do, with allow/deny controls. */
 function renderPermissionCard(request: InteractionRequest): string {
   const hue = hueForSender('permission request');
   const style = `border-inline-start:3px solid hsl(${hue} 70% 55%);background:hsl(${hue} 70% 55% / 0.08)`;
   return (
     `<div class="turn" style="${style}">` +
     `<div class="from">permission request · ${escapeHtml(request.toolName)}</div>` +
-    `<div>The worker wants to use <strong>${escapeHtml(request.toolName)}</strong> — it is not pre-allowed. Allow it?</div>` +
+    `<div>The executor wants to use <strong>${escapeHtml(request.toolName)}</strong> — it is not pre-allowed. Allow it?</div>` +
     `<pre class="interaction-input">${escapeHtml(previewInput(request.input))}</pre>` +
     `<div class="decision" data-request-id="${escapeHtml(request.requestId)}">` +
     `<button class="decide" data-behavior="allow">Allow</button>` +

@@ -41,12 +41,12 @@ describe('WorktreeManager', () => {
     const mgr = new WorktreeManager({ repoDir: repo });
     const wt = mgr.create('task');
 
-    // A worker edits + commits inside the worktree.
+    // An executor edits + commits inside the worktree.
     writeFileSync(join(wt.path, 'added.txt'), 'work\n');
     execFileSync('git', ['add', '-A'], { cwd: wt.path });
     execFileSync(
       'git',
-      ['-c', 'user.email=m@l', '-c', 'user.name=Mjolnir', 'commit', '-m', 'worker work'],
+      ['-c', 'user.email=m@l', '-c', 'user.name=Mjolnir', 'commit', '-m', 'executor work'],
       { cwd: wt.path },
     );
     const branchHead = git(repo, 'rev-parse', wt.branch).trim();
@@ -69,9 +69,9 @@ describe('WorktreeManager', () => {
     expect(wt.commit('noop')).toBe(false); // fresh worktree — nothing to capture
 
     writeFileSync(join(wt.path, 'feature.txt'), 'work\n');
-    expect(wt.commit('worker session cap')).toBe(true);
+    expect(wt.commit('executor session cap')).toBe(true);
     expect(git(repo, 'show', `${wt.branch}:feature.txt`)).toContain('work');
-    expect(git(repo, 'log', '-1', '--format=%s', wt.branch).trim()).toBe('worker session cap');
+    expect(git(repo, 'log', '-1', '--format=%s', wt.branch).trim()).toBe('executor session cap');
 
     wt.remove();
     expect(git(repo, 'rev-parse', '--verify', wt.branch).trim()).toMatch(/^[0-9a-f]{40}$/); // branch survives

@@ -7,11 +7,11 @@ export interface CliArgs {
   readonly sessionId?: string;
   /** Replay the session's history on attach (requires a session). */
   readonly replay?: boolean;
-  /** Run as an automated worker that auto-responds to messages. */
+  /** Run as an automated executor that auto-responds to messages. */
   readonly auto?: boolean;
 }
 
-export const USAGE = 'usage: <planner|worker> [participant-id] [--session <id>] [--replay] [--auto]';
+export const USAGE = 'usage: <planner|executor> [participant-id] [--session <id>] [--replay] [--auto]';
 
 /** Thrown when CLI arguments are missing or invalid. */
 export class CliUsageError extends Error {}
@@ -21,7 +21,7 @@ export class CliUsageError extends Error {}
  * role; the optional second is the participant id (defaulting to `<role>-1`).
  * `--session <id>` (or `-s`) joins a shared, file-backed session by id (omit for
  * an in-memory single-process channel); `--replay` requires a session, and
- * `--auto` runs an automated worker. Throws {@link CliUsageError} on
+ * `--auto` runs an automated executor. Throws {@link CliUsageError} on
  * missing/invalid input.
  */
 export function parseArgs(argv: readonly string[]): CliArgs {
@@ -47,8 +47,8 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   }
 
   const [role, id] = positional;
-  if (role !== 'planner' && role !== 'worker') {
-    throw new CliUsageError(`role must be "planner" or "worker", got ${role ?? '(none)'}`);
+  if (role !== 'planner' && role !== 'executor') {
+    throw new CliUsageError(`role must be "planner" or "executor", got ${role ?? '(none)'}`);
   }
   if (replay && sessionId === undefined) {
     throw new CliUsageError('--replay requires --session');

@@ -9,8 +9,8 @@ import { loadProjectConfig } from '../core/project-config.ts';
 import { parseArgs, CliUsageError, USAGE } from './parse-args.ts';
 import { loadLocalEnv } from './load-local-env.ts';
 import { hostSession } from './session-host.ts';
-import { runWorker } from '../worker/worker-runtime.ts';
-import { createClaudeCodeResponder } from '../worker/claude-code-responder.ts';
+import { runExecutor } from '../executor/executor-runtime.ts';
+import { createClaudeCodeResponder } from '../executor/claude-code-responder.ts';
 
 /** Thin entry point: wire process argv/stdin/stdout to a hosted session. */
 async function main(argv: readonly string[]): Promise<void> {
@@ -33,14 +33,14 @@ async function main(argv: readonly string[]): Promise<void> {
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 
   if (args.auto) {
-    // Automated worker: a Claude Code agent backs the channel. Each task runs
-    // `claude -p` headless in a per-worker workspace, using the logged-in
+    // Automated executor: a Claude Code agent backs the channel. Each task runs
+    // `claude -p` headless in a per-executor workspace, using the logged-in
     // Claude Code session. It owns no terminal conversation, so stay alive on
     // the open stdin until stopped.
-    const workdir = mkdtempSync(join(tmpdir(), `mjolnir-worker-${args.id}-`));
-    runWorker(channel, args.id, createClaudeCodeResponder({ workdir }));
+    const workdir = mkdtempSync(join(tmpdir(), `mjolnir-executor-${args.id}-`));
+    runExecutor(channel, args.id, createClaudeCodeResponder({ workdir }));
     for await (const _line of rl) {
-      // an automated worker ignores terminal input
+      // an automated executor ignores terminal input
     }
     return;
   }

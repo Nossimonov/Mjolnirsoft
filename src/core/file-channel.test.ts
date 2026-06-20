@@ -35,7 +35,7 @@ describe('FileChannel', () => {
     const b = channel();
     const inbox: Message[] = [];
     const planner = a.join('planner-1', 'planner', () => {});
-    b.join('worker-1', 'worker', (m) => inbox.push(m));
+    b.join('executor-1', 'executor', (m) => inbox.push(m));
 
     planner.send({ type: 'text', payload: 'do it' });
     b.poll();
@@ -68,7 +68,7 @@ describe('FileChannel', () => {
     writeFileSync(logPath, `${JSON.stringify({ from: 'old', type: 'text', payload: 'history' })}\n`);
     const c = channel();
     const inbox: Message[] = [];
-    c.join('worker-1', 'worker', (m) => inbox.push(m));
+    c.join('executor-1', 'executor', (m) => inbox.push(m));
     c.poll();
     expect(inbox).toEqual([]);
   });
@@ -78,7 +78,7 @@ describe('FileChannel', () => {
     writeFileSync(
       logPath,
       `${JSON.stringify({ from: 'orchestrator', type: 'text', payload: 'do #88' })}\n` +
-        `${JSON.stringify({ from: 'worker-1', type: 'text', payload: 'on it' })}\n`,
+        `${JSON.stringify({ from: 'executor-1', type: 'text', payload: 'on it' })}\n`,
     );
 
     const attached = new FileChannel(logPath, { ...MANUAL, replay: true });
@@ -89,7 +89,7 @@ describe('FileChannel', () => {
 
     expect(inbox).toEqual([
       { from: 'orchestrator', type: 'text', payload: 'do #88' },
-      { from: 'worker-1', type: 'text', payload: 'on it' },
+      { from: 'executor-1', type: 'text', payload: 'on it' },
     ]);
 
     // A live message appended after attaching is also delivered.
@@ -102,6 +102,6 @@ describe('FileChannel', () => {
   it('rejects joining with a duplicate participant id', () => {
     const c = channel();
     c.join('dup', 'planner', () => {});
-    expect(() => c.join('dup', 'worker', () => {})).toThrow(/already joined/);
+    expect(() => c.join('dup', 'executor', () => {})).toThrow(/already joined/);
   });
 });

@@ -20,7 +20,7 @@ let tick: ReturnType<typeof setInterval> | null = null;
 
 function renderWorking(): void {
   if (!working || workingSince === null) return;
-  working.textContent = `● worker is working… ${formatElapsed(Date.now() - workingSince)}`;
+  working.textContent = `● executor is working… ${formatElapsed(Date.now() - workingSince)}`;
 }
 
 function startWorking(): void {
@@ -43,8 +43,8 @@ function stopWorking(): void {
 
 // The extension host posts one rendered message (HTML) at a time — replayed
 // history first, then live (and a local echo of what we send) — plus "working"
-// toggles while a reply is pending and a "notice" when a send has no worker to
-// answer it. The host owns both decisions (it knows whether a worker is
+// toggles while a reply is pending and a "notice" when a send has no executor to
+// answer it. The host owns both decisions (it knows whether an executor is
 // attached), so the webview just renders what it's told. Append messages and
 // render any new Mermaid diagrams.
 window.addEventListener('message', (event: MessageEvent) => {
@@ -71,7 +71,7 @@ function sendMessage(): void {
   vscode.postMessage({ kind: 'send', text });
   input.value = '';
   // The host decides whether this send gets a "working" indicator or a "no
-  // worker attached" notice, since only it reliably knows the attachment state.
+  // executor attached" notice, since only it reliably knows the attachment state.
 }
 
 send?.addEventListener('click', sendMessage);

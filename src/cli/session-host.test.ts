@@ -25,15 +25,15 @@ describe('hostSession', () => {
 
   it('sends each input line as a message to other participants (AC3)', async () => {
     const channel = new InMemoryChannel();
-    const workerInbox: Message[] = [];
-    channel.join('worker-1', 'worker', (m) => workerInbox.push(m));
+    const executorInbox: Message[] = [];
+    channel.join('executor-1', 'executor', (m) => executorInbox.push(m));
 
     await hostSession(channel, { id: 'planner-1', role: 'planner' }, {
       input: lines('build it', 'ship it'),
       output: () => {},
     });
 
-    expect(workerInbox).toEqual([
+    expect(executorInbox).toEqual([
       { from: 'planner-1', type: 'text', payload: 'build it' },
       { from: 'planner-1', type: 'text', payload: 'ship it' },
     ]);
@@ -42,12 +42,12 @@ describe('hostSession', () => {
   it('writes messages received from the channel to the output (AC3)', async () => {
     const channel = new InMemoryChannel();
     const output: string[] = [];
-    const worker = channel.join('worker-1', 'worker', () => {});
+    const executor = channel.join('executor-1', 'executor', () => {});
 
-    // The worker sends while the session is still active (the input generator
+    // The executor sends while the session is still active (the input generator
     // runs inside hostSession's loop, before it closes the participant).
     async function* sendWhileActive(): AsyncIterable<string> {
-      worker.send({ type: 'text', payload: 'on it' });
+      executor.send({ type: 'text', payload: 'on it' });
       // yield nothing: input ends, session closes
     }
 
@@ -56,6 +56,6 @@ describe('hostSession', () => {
       output: (l) => output.push(l),
     });
 
-    expect(output).toContain('worker-1 [text] on it');
+    expect(output).toContain('executor-1 [text] on it');
   });
 });

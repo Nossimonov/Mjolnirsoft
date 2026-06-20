@@ -3,18 +3,18 @@ import {
   createClaudeCodeResponder,
   resolveClaudeBin,
   buildClaudeArgs,
-  DEFAULT_WORKER_ROLE,
+  DEFAULT_EXECUTOR_ROLE,
   SHARED_CORE,
   EXECUTOR_INSERT,
-  WORKER_PERMISSIONS,
+  EXECUTOR_PERMISSIONS,
 } from './claude-code-responder.ts';
 
 const task = { from: 'orchestrator', type: 'text', payload: 'write a haiku to haiku.md' } as const;
 
-describe('DEFAULT_WORKER_ROLE (executor instructions)', () => {
+describe('DEFAULT_EXECUTOR_ROLE (executor instructions)', () => {
   it('composes the shared model, the executor insert, and operational guidance (#71)', () => {
-    expect(DEFAULT_WORKER_ROLE).toContain(SHARED_CORE);
-    expect(DEFAULT_WORKER_ROLE).toContain(EXECUTOR_INSERT);
+    expect(DEFAULT_EXECUTOR_ROLE).toContain(SHARED_CORE);
+    expect(DEFAULT_EXECUTOR_ROLE).toContain(EXECUTOR_INSERT);
   });
 
   it('carries the design-integrity classification and escalate-when-unsure bias (#71)', () => {
@@ -24,26 +24,26 @@ describe('DEFAULT_WORKER_ROLE (executor instructions)', () => {
   });
 
   it('preserves the executor operational guidance', () => {
-    expect(DEFAULT_WORKER_ROLE).toContain('Read widely, write narrowly');
-    expect(DEFAULT_WORKER_ROLE).toContain("Don't commit; hand off");
+    expect(DEFAULT_EXECUTOR_ROLE).toContain('Read widely, write narrowly');
+    expect(DEFAULT_EXECUTOR_ROLE).toContain("Don't commit; hand off");
   });
 });
 
 describe('createClaudeCodeResponder', () => {
-  it('runs Claude Code with the task and the default worker-role prompt, replying with its result', async () => {
+  it('runs Claude Code with the task and the default executor-role prompt, replying with its result', async () => {
     const run = vi.fn().mockResolvedValue('Created haiku.md with a haiku.');
-    const respond = createClaudeCodeResponder({ workdir: '/tmp/worker-1', run });
+    const respond = createClaudeCodeResponder({ workdir: '/tmp/executor-1', run });
 
     const reply = await respond(task);
 
     expect(reply).toEqual({ type: 'result', payload: 'Created haiku.md with a haiku.' });
     expect(run).toHaveBeenCalledWith(
       'write a haiku to haiku.md',
-      expect.objectContaining({ cwd: '/tmp/worker-1', appendSystemPrompt: DEFAULT_WORKER_ROLE, resume: false }),
+      expect.objectContaining({ cwd: '/tmp/executor-1', appendSystemPrompt: DEFAULT_EXECUTOR_ROLE, resume: false }),
     );
   });
 
-  it('lets the caller override the appended worker-role prompt', async () => {
+  it('lets the caller override the appended executor-role prompt', async () => {
     const run = vi.fn().mockResolvedValue('done');
     const respond = createClaudeCodeResponder({ workdir: '/w', appendSystemPrompt: 'on branch X', run });
     await respond(task);
@@ -63,7 +63,7 @@ describe('createClaudeCodeResponder', () => {
   });
 
   it('returns undefined when Claude Code produces no result', async () => {
-    const respond = createClaudeCodeResponder({ workdir: '/tmp/worker-1', run: async () => '   ' });
+    const respond = createClaudeCodeResponder({ workdir: '/tmp/executor-1', run: async () => '   ' });
     expect(await respond(task)).toBeUndefined();
   });
 
@@ -96,12 +96,12 @@ describe('createClaudeCodeResponder', () => {
 describe('buildClaudeArgs', () => {
   it('omits --append-system-prompt when no role prompt is given', () => {
     const args = buildClaudeArgs('do it');
-    expect(args).toEqual(['-p', 'do it', '--output-format', 'json', '--settings', WORKER_PERMISSIONS]);
+    expect(args).toEqual(['-p', 'do it', '--output-format', 'json', '--settings', EXECUTOR_PERMISSIONS]);
     expect(args).not.toContain('--append-system-prompt');
   });
 
-  it('applies the worker permission policy — commands allowed, foot-guns denied', () => {
-    const policy = JSON.parse(WORKER_PERMISSIONS) as {
+  it('applies the executor permission policy — commands allowed, foot-guns denied', () => {
+    const policy = JSON.parse(EXECUTOR_PERMISSIONS) as {
       permissions: { allow: string[]; deny: string[] };
     };
     expect(policy.permissions.allow).toEqual(expect.arrayContaining(['Bash', 'Edit(./**)', 'Read']));
@@ -111,13 +111,13 @@ describe('buildClaudeArgs', () => {
   it('always spawns with the exact base policy — learned "Always" rules are not merged here (#70)', () => {
     // #70's remembering is consumed in the permission MCP server's approve, not
     // in --settings (a learned allow rule doesn't reach out-of-cwd writes), so the
-    // spawn policy is unconditionally the base WORKER_PERMISSIONS.
-    expect(buildClaudeArgs('go')[buildClaudeArgs('go').indexOf('--settings') + 1]).toBe(WORKER_PERMISSIONS);
+    // spawn policy is unconditionally the base EXECUTOR_PERMISSIONS.
+    expect(buildClaudeArgs('go')[buildClaudeArgs('go').indexOf('--settings') + 1]).toBe(EXECUTOR_PERMISSIONS);
   });
 
   it('appends --append-system-prompt with the role text when given', () => {
-    const args = buildClaudeArgs('do it', { appendSystemPrompt: 'be a worker' });
-    expect(args.slice(-2)).toEqual(['--append-system-prompt', 'be a worker']);
+    const args = buildClaudeArgs('do it', { appendSystemPrompt: 'be an executor' });
+    expect(args.slice(-2)).toEqual(['--append-system-prompt', 'be an executor']);
   });
 
   it('pins a new session with --session-id, and resumes an existing one with --resume', () => {
