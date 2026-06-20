@@ -4,10 +4,30 @@ import {
   resolveClaudeBin,
   buildClaudeArgs,
   DEFAULT_WORKER_ROLE,
+  SHARED_CORE,
+  EXECUTOR_INSERT,
   WORKER_PERMISSIONS,
 } from './claude-code-responder.ts';
 
 const task = { from: 'orchestrator', type: 'text', payload: 'write a haiku to haiku.md' } as const;
+
+describe('DEFAULT_WORKER_ROLE (executor instructions)', () => {
+  it('composes the shared model, the executor insert, and operational guidance (#71)', () => {
+    expect(DEFAULT_WORKER_ROLE).toContain(SHARED_CORE);
+    expect(DEFAULT_WORKER_ROLE).toContain(EXECUTOR_INSERT);
+  });
+
+  it('carries the design-integrity classification and escalate-when-unsure bias (#71)', () => {
+    expect(SHARED_CORE).toContain('route it up; never invent it');
+    expect(SHARED_CORE).toContain('no agent self-approves');
+    expect(SHARED_CORE).toContain('treat it as the more-escalated kind');
+  });
+
+  it('preserves the executor operational guidance', () => {
+    expect(DEFAULT_WORKER_ROLE).toContain('Read widely, write narrowly');
+    expect(DEFAULT_WORKER_ROLE).toContain("Don't commit; hand off");
+  });
+});
 
 describe('createClaudeCodeResponder', () => {
   it('runs Claude Code with the task and the default worker-role prompt, replying with its result', async () => {
