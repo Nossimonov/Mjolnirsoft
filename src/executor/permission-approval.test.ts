@@ -52,6 +52,51 @@ describe('approveToolUse', () => {
     expect(verdict).toEqual({ behavior: 'deny', message: 'no' });
   });
 
+  it('auto-denies an out-of-worktree write before any auto-allow or escalation (#101)', async () => {
+    const request = vi.fn(); // the human must never be asked
+    const postAudit = vi.fn();
+    // Even a matching learned rule must not unlock it — the guardrail runs first.
+    const matchRule = vi.fn().mockReturnValue('Write(C:/elsewhere/**)');
+
+    const verdict = await approveToolUse(
+      {
+        projectDir: '/proj',
+        worktreePath: 'C:\\repo\\.mjolnir\\worktrees\\exec-1',
+        bridge: { request },
+        postAudit,
+        matchRule,
+      },
+      'Write',
+      { file_path: 'C:\\repo\\extension\\src\\render.ts', content: 'x' },
+    );
+
+    expect(verdict.behavior).toBe('deny');
+    expect(request).not.toHaveBeenCalled();
+    expect(matchRule).not.toHaveBeenCalled(); // guardrail short-circuits before the rule lookup
+    expect(postAudit).toHaveBeenCalledWith('auto-denied (outside worktree): Write');
+  });
+
+  it('leaves an in-worktree write to the normal auto-allow/escalate flow', async () => {
+    const request = vi.fn().mockResolvedValue(allowDecision('r4'));
+    const matchRule = vi.fn().mockReturnValue(undefined);
+
+    await approveToolUse(
+      {
+        projectDir: '/proj',
+        worktreePath: 'C:\\repo\\.mjolnir\\worktrees\\exec-1',
+        bridge: { request },
+        postAudit: vi.fn(),
+        matchRule,
+      },
+      'Write',
+      { file_path: 'C:\\repo\\.mjolnir\\worktrees\\exec-1\\src\\a.ts', content: 'x' },
+    );
+
+    // Not denied: the rule is consulted and, on no match, the human is asked.
+    expect(matchRule).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledOnce();
+  });
+
   it('escalates every request when no project dir is configured (auto-allow disabled)', async () => {
     const request = vi.fn().mockResolvedValue(allowDecision('r3'));
     const matchRule = vi.fn();

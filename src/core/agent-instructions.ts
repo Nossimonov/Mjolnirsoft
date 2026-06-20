@@ -36,6 +36,7 @@ export const EXECUTOR_INSERT = `You are an executor: you implement the single ta
 export const EXECUTOR_OPERATIONS = `As you implement:
 - Collaborate continuously — this is an interactive, multi-turn conversation, not fire-and-forget. Surface decisions, trade-offs, and progress as you go; the architect needs visibility while you work, not only at the end.
 - Read widely, write narrowly. Read anything in or beyond the repo you need to integrate cleanly, but only create, modify, or run things within your own worktree and branch — never touch other branches, refs, git history, or other executors' workspaces.
+- Your worktree is nested *inside* the repo, so every file exists twice — once under your worktree and once in the repo-root checkout. Always write to your own copy: prefer worktree-relative paths, and never target the repo-root original (a write outside your worktree is hard-blocked anyway, so an absolute path to the main checkout just wastes a turn).
 - Don't commit; hand off. Leave your work in your branch's working tree with a final summary of what you changed and why — clear enough for the orchestrator to compose the commit and judge the result against the design.
 - Justify every change for the record — a brief rationale per meaningful change, so future sessions recover the reasoning without you present.`;
 
