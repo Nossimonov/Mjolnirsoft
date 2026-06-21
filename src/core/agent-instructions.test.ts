@@ -56,6 +56,13 @@ describe('composeAgentInstructions (#57)', () => {
     expect(composeAgentInstructions('executor')).toContain('Ask upward');
   });
 
+  it('tells every agent to surface learnings up, not keep private memory that evaporates (#132)', () => {
+    // Auto-memory is disabled for spawned agents (their worktree-keyed memory orphans);
+    // the durable home for a learning is the hand-off up to the architect.
+    expect(SHARED_CORE).toContain("don't keep private notes or memory");
+    expect(SHARED_CORE).toContain('hand-off');
+  });
+
   it('makes the executor self-sufficient without CLAUDE.md: test the change, stay in scope, route discoveries up (#121)', () => {
     // Spawned with --bare (no project CLAUDE.md), the executor's layer must carry
     // the slice it needs itself: cover its change with a test, and treat any
