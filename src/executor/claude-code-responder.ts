@@ -282,7 +282,13 @@ export const EXECUTOR_PERMISSION_POLICY = {
       'mcp__delegate__send',
       'mcp__delegate__shutdown',
     ],
-    deny: ['Bash(rm -rf *)', 'Bash(git push *)', 'Bash(git reset --hard *)', 'Bash(sudo *)'],
+    // `Agent` (claude's native sub-agent / sub-task tool) is denied so a spawned
+    // agent can't spin up its own ad-hoc sub-agents (#131): they're a heavyweight,
+    // opaque token sink whose output balloons the spawner's context, and they're
+    // redundant with our own delegation (`mcp__delegate__*`, which this doesn't
+    // touch). A bare deny strips the tool from the agent's context entirely, so it
+    // falls back to direct reads or — better — asks upward for context it lacks.
+    deny: ['Agent', 'Bash(rm -rf *)', 'Bash(git push *)', 'Bash(git reset --hard *)', 'Bash(sudo *)'],
   },
   // Skip every CLAUDE.md/CLAUDE.local.md (user/project/local) so a spawned agent
   // loads only its composed role instructions, not the project's architect-grade
