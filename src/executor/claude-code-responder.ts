@@ -196,12 +196,25 @@ export function createStreamReader(handlers: StreamReaderHandlers): {
 export type RunClaudeCode = (prompt: string, options: { cwd: string } & ClaudeRunArgs) => Promise<string>;
 
 /**
- * Permission policy for the executor's headless `claude`: no prompts for what a
- * normal dev task needs (reads, cwd-scoped edits, shell commands), with a few
- * clearly-dangerous commands denied. This is *soft* confinement — on native
- * Windows there's no OS sandbox, so the worktree cwd, the executor-role
- * instructions, and the developer's branch review are the real boundary (Bash
- * can still escape this policy). A WSL sandbox would be the hard boundary. See #62.
+ * The `--settings` payload for the executor's headless `claude`. Two parts:
+ *
+ * 1. `permissions` — no prompts for what a normal dev task needs (reads, cwd-scoped
+ *    edits, shell commands), with a few clearly-dangerous commands denied. This is
+ *    *soft* confinement — on native Windows there's no OS sandbox, so the worktree
+ *    cwd, the executor-role instructions, and the developer's branch review are the
+ *    real boundary (Bash can still escape this policy). A WSL sandbox would be the
+ *    hard boundary. See #62.
+ * 2. `claudeMdExcludes` — glob patterns (matched against absolute paths) of
+ *    `CLAUDE.md`/`CLAUDE.local.md` files to skip when loading memory (#121). A
+ *    spawned agent should get only its composed role instructions, not the
+ *    project's CLAUDE.md — which `claude -p` otherwise walks the directory tree to
+ *    load (so a worktree inherits the repo-root file) and whose architect-grade
+ *    protocol an agent would then enact (the issue-discipline ceremony). We exclude
+ *    *all* CLAUDE.md (user/project/local) so the role layer is the agent's whole
+ *    operating manual. This rides `--settings`, so unlike `--bare` it doesn't touch
+ *    OAuth/keychain auth; managed-policy memory can't be excluded this way (not used
+ *    here). Belt-and-braces with the role layer's own "bookkeeping is the
+ *    architect's" boundary, which still holds for any memory this can't reach.
  */
 export const EXECUTOR_PERMISSION_POLICY = {
   permissions: {
@@ -223,6 +236,10 @@ export const EXECUTOR_PERMISSION_POLICY = {
     ],
     deny: ['Bash(rm -rf *)', 'Bash(git push *)', 'Bash(git reset --hard *)', 'Bash(sudo *)'],
   },
+  // Skip every CLAUDE.md/CLAUDE.local.md (user/project/local) so a spawned agent
+  // loads only its composed role instructions, not the project's architect-grade
+  // protocol (#121). Globs match absolute paths; forward slashes work cross-platform.
+  claudeMdExcludes: ['**/CLAUDE.md', '**/CLAUDE.local.md'],
 };
 
 /**
@@ -243,6 +260,12 @@ export function buildClaudeArgs(prompt: string, options: ClaudeRunArgs = {}): st
   // deltas the live view streams (#109). The terminal `result` line carries the
   // same final text the old single-object `json` format put on stdout, so the
   // durable channel/log is unchanged — only the intermediate events are new.
+  //
+  // NOTE (#121): we deliberately do NOT pass `--bare` to drop the project CLAUDE.md.
+  // It would, but it *also* skips OAuth/keychain reads, breaking the subscription
+  // login (auth errors no re-login can fix). Instead CLAUDE.md is excluded via the
+  // `claudeMdExcludes` key in `--settings` (see {@link EXECUTOR_PERMISSION_POLICY}),
+  // which rides settings and so leaves auth untouched.
   const args = [
     '-p',
     prompt,

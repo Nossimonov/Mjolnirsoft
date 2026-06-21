@@ -458,12 +458,25 @@ describe('buildClaudeArgs', () => {
     expect(args).not.toContain('--append-system-prompt');
   });
 
+  it('does NOT pass --bare — it would suppress CLAUDE.md but also break subscription OAuth (#121)', () => {
+    // --bare skips OAuth/keychain reads, so it breaks the subscription login.
+    // CLAUDE.md exclusion must come from a mechanism that leaves auth intact.
+    expect(buildClaudeArgs('go', { mcpConfigPath: '/cfg.json' })).not.toContain('--bare');
+  });
+
   it('applies the executor permission policy — commands allowed, foot-guns denied', () => {
     const policy = JSON.parse(EXECUTOR_PERMISSIONS) as {
       permissions: { allow: string[]; deny: string[] };
     };
     expect(policy.permissions.allow).toEqual(expect.arrayContaining(['Bash', 'Edit(./**)', 'Read']));
     expect(policy.permissions.deny).toEqual(expect.arrayContaining(['Bash(rm -rf *)', 'Bash(git push *)']));
+  });
+
+  it('excludes every CLAUDE.md via --settings so a spawned agent loads only its role layer (#121)', () => {
+    // claudeMdExcludes rides --settings (not --bare), so it drops the project's
+    // architect-grade CLAUDE.md without touching OAuth auth.
+    const policy = JSON.parse(EXECUTOR_PERMISSIONS) as { claudeMdExcludes: string[] };
+    expect(policy.claudeMdExcludes).toEqual(expect.arrayContaining(['**/CLAUDE.md', '**/CLAUDE.local.md']));
   });
 
   it('always spawns with the exact base policy — learned "Always" rules are not merged here (#70)', () => {
