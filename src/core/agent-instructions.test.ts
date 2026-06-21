@@ -48,6 +48,14 @@ describe('composeAgentInstructions (#57)', () => {
     expect(composeAgentInstructions('executor')).toContain('Project bookkeeping');
   });
 
+  it('tells every agent to ask upward for missing context rather than self-survey (#131)', () => {
+    // Pairs with denying the native sub-agent tool: an agent can't spin up an ad-hoc
+    // survey, and the context it lacks is usually already known above it — so ask up.
+    expect(SHARED_CORE).toContain('ad-hoc sub-agents');
+    expect(SHARED_CORE).toContain('Ask upward');
+    expect(composeAgentInstructions('executor')).toContain('Ask upward');
+  });
+
   it('makes the executor self-sufficient without CLAUDE.md: test the change, stay in scope, route discoveries up (#121)', () => {
     // Spawned with --bare (no project CLAUDE.md), the executor's layer must carry
     // the slice it needs itself: cover its change with a test, and treat any
