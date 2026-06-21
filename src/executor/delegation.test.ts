@@ -9,6 +9,16 @@ import { createDelegationManager, type DelegationDeps } from './delegation.ts';
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /**
+ * A realistic delegate: it reports with a `result` — the conversational type a real
+ * agent emits and the only kind that bridges up (#116). The bare `acknowledge`
+ * default replies `ack`, which is transport-only and deliberately does *not* bridge,
+ * so tests that exercise the bridge use this instead.
+ */
+const resultDelegate: DelegationDeps['createDelegate'] = (role, id, sub) => ({
+  close: runExecutor(sub, id, async (m) => ({ type: 'result', payload: `received: ${m.payload}` }), role).close,
+});
+
+/**
  * Wire a spawner on an in-memory channel with an orchestrator watching it, and an
  * in-memory sub-channel per delegate that logs its full traffic — the way a real
  * deployment has the spawner on its session channel and each delegate on its own
@@ -61,13 +71,13 @@ describe('createDelegationManager', () => {
   });
 
   it('bridges the delegate\'s reply up onto the spawner\'s channel, attributed as an agent (AC3, reuses #86)', async () => {
-    const { manager, orchestratorInbox } = wire();
+    const { manager, orchestratorInbox } = wire(resultDelegate);
 
     manager.spawn('executor', { type: 'text', payload: 'do X' });
     await flush();
 
     expect(orchestratorInbox).toEqual([
-      { from: 'spawner-executor-1', role: 'executor', type: 'ack', payload: 'received: do X' },
+      { from: 'spawner-executor-1', role: 'executor', type: 'result', payload: 'received: do X' },
     ]);
     // The bridged report carries the delegate's id+role, so #86 attribution marks
     // it a (non-authoritative) agent — never indistinguishable from the architect.
@@ -88,7 +98,7 @@ describe('createDelegationManager', () => {
   });
 
   it('shutdown ends the delegate and releases its bridge (AC2)', async () => {
-    const { manager, orchestratorInbox, subChannels } = wire();
+    const { manager, orchestratorInbox, subChannels } = wire(resultDelegate);
 
     const id = manager.spawn('executor', { type: 'text', payload: 'task' });
     await flush();
@@ -114,7 +124,7 @@ describe('createDelegationManager', () => {
   });
 
   it('gives each delegate its own sub-channel and a distinct attributed report', async () => {
-    const { manager, orchestratorInbox } = wire();
+    const { manager, orchestratorInbox } = wire(resultDelegate);
 
     const id1 = manager.spawn('executor', { type: 'text', payload: 'first' });
     const id2 = manager.spawn('executor', { type: 'text', payload: 'second' });
@@ -122,8 +132,8 @@ describe('createDelegationManager', () => {
 
     expect([id1, id2]).toEqual(['spawner-executor-1', 'spawner-executor-2']);
     expect(orchestratorInbox).toEqual([
-      { from: 'spawner-executor-1', role: 'executor', type: 'ack', payload: 'received: first' },
-      { from: 'spawner-executor-2', role: 'executor', type: 'ack', payload: 'received: second' },
+      { from: 'spawner-executor-1', role: 'executor', type: 'result', payload: 'received: first' },
+      { from: 'spawner-executor-2', role: 'executor', type: 'result', payload: 'received: second' },
     ]);
   });
 
