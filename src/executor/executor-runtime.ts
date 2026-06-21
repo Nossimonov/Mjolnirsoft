@@ -1,7 +1,14 @@
 import type { Channel, Message, Participant, Role } from '../core/channel.ts';
 
-/** Computes an executor's reply to an incoming message, or undefined for no reply. */
-export type Respond = (message: Message) => Promise<Omit<Message, 'from' | 'role'> | undefined>;
+/** One message an executor sends in reply (its `from`/`role` are stamped by the channel). */
+export type Reply = Omit<Message, 'from' | 'role'>;
+
+/**
+ * Computes an executor's reply to an incoming message: a single message, an
+ * ordered list of messages (sent in order — e.g. a reasoning digest then the
+ * result, #110), or undefined for no reply.
+ */
+export type Respond = (message: Message) => Promise<Reply | readonly Reply[] | undefined>;
 
 /**
  * A trivial {@link Respond} that echoes the message back as an `ack`. It is the
@@ -44,7 +51,11 @@ export function runExecutor(
     tail = tail.then(async () => {
       try {
         const reply = await respond(message);
-        if (reply) executor.send(reply);
+        // A turn may reply with several messages in order (e.g. a reasoning digest
+        // then the result, #110); normalise the single/array/undefined shapes and
+        // send each, so the durable log records them in the order produced.
+        const replies = reply === undefined ? [] : Array.isArray(reply) ? (reply as readonly Reply[]) : [reply as Reply];
+        for (const r of replies) executor.send(r);
       } catch (error: unknown) {
         const failure = `executor ${id} failed to respond: ${String(error)}`;
         // Surface the failure in the session, not just the host log: an `error`

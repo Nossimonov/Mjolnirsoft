@@ -17,7 +17,8 @@ import {
   type InteractionRequest,
 } from '../../src/core/interaction.ts';
 import { DELEGATION_REQUEST, DELEGATION_RESPONSE } from '../../src/core/delegation-protocol.ts';
-import { renderMessage, renderInteractionRequest } from './render.ts';
+import { REASONING_DIGEST } from '../../src/executor/reasoning-digest.ts';
+import { renderMessage, renderInteractionRequest, renderReasoningDigestLive } from './render.ts';
 
 // The MCP server is named `perm` in the generated config, so its `approve` tool
 // is addressed as `mcp__perm__approve` to `--permission-prompt-tool`.
@@ -119,11 +120,11 @@ async function startExecutorSession(
     worktree.path,
   );
 
-  // The live, ephemeral path for the executor's reasoning (#109): the responder
-  // pushes intermediate thinking/text/tool events here as it streams, and the
-  // panel (opened below) subscribes to forward them token-level to the webview.
-  // It is deliberately *off* the channel — these events never hit the JSONL log
-  // or replay; only the final `result` persists on the channel, exactly as before.
+  // The live, ephemeral path for the executor's reasoning (#108): the responder
+  // pushes block-level digest snapshots here as it streams, and the panel (opened
+  // below) subscribes to forward them to the webview as the reasoning box builds up.
+  // It is deliberately *off* the channel — these snapshots never hit the JSONL log
+  // or replay; only the final `result` and the durable digest persist on the channel.
   const reasoning = createReasoningStream();
 
   // Spawn the executor in-process: it joins the session and answers each message
@@ -137,7 +138,7 @@ async function startExecutorSession(
       workdir: worktree.path,
       permissionPromptTool: PERMISSION_PROMPT_TOOL,
       mcpConfigPath,
-      onEvent: reasoning.emit,
+      onReasoningChange: reasoning.emit,
     }),
   );
 
@@ -241,12 +242,17 @@ function openSessionPanel(
   );
   panel.webview.html = renderHtml(panel.webview, context.extensionUri);
 
-  // Forward the executor's live reasoning (#109) to the webview ephemerally: each
-  // thinking/text/tool event becomes a `reasoning` post the webview renders into
-  // its in-progress block. This bypasses the channel entirely, so nothing here is
-  // logged or replayed. No-op for a viewer-only panel (no executor, no stream).
-  const unsubscribeReasoning = options.reasoning?.subscribe((event) => {
-    void panel.webview.postMessage({ kind: 'reasoning', event });
+  // Forward the executor's live reasoning (#108) to the webview ephemerally: each
+  // block-level snapshot is rendered with the *same* renderer the durable digest
+  // uses and posted as HTML that replaces the in-progress reasoning box, so it
+  // builds up block-by-block in place and settles into the identical collapsed box
+  // (no token smear, no view swap). This bypasses the channel entirely, so nothing
+  // here is logged or replayed. No-op for a viewer-only panel (no executor, no stream).
+  const unsubscribeReasoning = options.reasoning?.subscribe((digest) => {
+    void panel.webview.postMessage({
+      kind: 'reasoning',
+      html: renderReasoningDigestLive(executorId ?? '', digest),
+    });
   });
 
   // Attach to the session: replay history, then stream live messages.
@@ -278,6 +284,23 @@ function openSessionPanel(
       void panel.webview.postMessage({ kind: 'message', html: renderInteractionRequest(request) });
       return;
     }
+    // The durable reasoning digest (#110) lands just before the turn's result, and
+    // carries the same entries the live snapshots already built up. It must NOT
+    // settle the turn: the `result`, which follows it, does.
+    if (message.type === REASONING_DIGEST) {
+      if (message.from === executorId) {
+        // Live: the box is already on screen from the snapshots. Render it once more
+        // collapsed (final counts) to replace the open in-progress box, then stop
+        // tracking it — the same box settles in place; nothing vanishes or swaps.
+        void panel.webview.postMessage({ kind: 'reasoning', html: renderMessage(message) });
+        void panel.webview.postMessage({ kind: 'reasoning-settle' });
+      } else {
+        // Replay/viewer: no live box existed (the stream is per live session), so
+        // render the digest as its own collapsed box in the conversation.
+        void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
+      }
+      return;
+    }
     void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
     // Only the executor's own reply settles a sent turn. A bridged delegate
     // report (#93) — e.g. an evaluator's finding — renders above, but the executor
@@ -285,11 +308,8 @@ function openSessionPanel(
     // flip the indicator off (#100). Anything that isn't the executor's reply
     // renders and stops here.
     if (message.from !== executorId) return;
-    // The turn's durable result has now rendered above, so its ephemeral live
-    // stream is superseded — clear the in-progress reasoning block (#109) so it
-    // never double-shows alongside the final turn. The next turn (if any) starts
-    // a fresh stream.
-    void panel.webview.postMessage({ kind: 'reasoning-clear' });
+    // The reasoning box already settled when the digest message arrived (just above
+    // the result); the result is the clean answer bubble. No reasoning cleanup here.
     // A reply settles the in-flight turn. With serialization (#100) the executor
     // runs queued turns one at a time, so if more were sent while this one ran the
     // next now starts: keep "working" on and drop the queued count by one. Only
@@ -441,24 +461,26 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   .auth-actions button:disabled { opacity: 0.5; cursor: default; }
   .from { font-size: 0.8em; opacity: 0.7; margin-bottom: 0.25rem; }
   .mermaid { background: #fff; padding: 0.5rem; border-radius: 4px; }
-  /* The in-progress "working" block (#109): the #76 elapsed-timer header, with the
-     live answer text streaming below it; cleared when the turn's durable result lands. */
+  /* The in-progress "working" block (#76): the elapsed-timer header. The live
+     reasoning now renders in its own block-level box (below), not here. */
   #working { padding: 0.4rem 1rem; font-size: 0.85em; }
   #working[hidden] { display: none; }
   #working-header { opacity: 0.75; }
-  /* Per-turn reasoning trail (#109): everything the executor emits live — thinking,
-     response text, tool uses — streams into a collapsible <details> in the
-     conversation, open while it works, then auto-collapsed when the result lands, so
-     it's preserved for review while the clean result renders below. */
-  .reasoning-trail { margin: 0.35rem 0; border-inline-start: 2px solid var(--vscode-panel-border);
-                     padding-inline-start: 0.5rem; font-size: 0.9em; }
-  .reasoning-trail > summary { cursor: pointer; opacity: 0.75; font-style: italic; user-select: none; }
-  .trail-body { margin-top: 0.25rem; white-space: pre-wrap; word-break: break-word; }
-  .trail-thinking { opacity: 0.6; font-style: italic; }
-  /* Each tool use as a compact inline chip (e.g. ⚙ Bash) as the agent calls it. */
-  .tool-chip { display: inline-block; background: var(--vscode-badge-background, #4d4d4d);
-               color: var(--vscode-badge-foreground, #fff); border-radius: 3px; padding: 0 0.4rem;
-               margin: 0.1rem 0.2rem; font-size: 0.92em; font-style: normal; }
+  /* The reasoning box (#108): one block-level view shared by the live stream and the
+     persisted digest (#110). It builds up block-by-block as the turn runs (open),
+     then settles collapsed in place — same markup, so no view swap. Thinking dimmed,
+     interim narration normal-weight; each tool-use is its own nested twisty showing
+     input + a trimmed result. The final answer is not here — it renders in its own
+     result bubble. */
+  .reasoning-digest .from { font-style: italic; }
+  .reasoning-digest-trail > summary { cursor: pointer; opacity: 0.75; font-style: italic; user-select: none; }
+  .reasoning-digest-trail .digest-body { margin-top: 0.35rem; }
+  .digest-thinking { white-space: pre-wrap; word-break: break-word; opacity: 0.6; font-style: italic;
+                     margin: 0.25rem 0; }
+  .digest-text { white-space: pre-wrap; word-break: break-word; margin: 0.25rem 0; }
+  .digest-tool { margin: 0.25rem 0; }
+  .digest-tool > summary { cursor: pointer; user-select: none; }
+  .digest-label { font-size: 0.8em; opacity: 0.7; margin-top: 0.25rem; }
   #queued { padding: 0.25rem 1rem; font-size: 0.85em; opacity: 0.75; }
   #queued[hidden] { display: none; }
   #notice { padding: 0.25rem 1rem; font-size: 0.85em; color: var(--vscode-inputValidation-warningForeground, #cca700); }
