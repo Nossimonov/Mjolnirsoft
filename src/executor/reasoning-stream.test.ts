@@ -1,24 +1,24 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createReasoningStream } from './reasoning-stream.ts';
-import type { ViewEvent } from './claude-code-responder.ts';
+import type { ReasoningDigest } from './reasoning-digest.ts';
 
-const thinking: ViewEvent = { kind: 'thinking', text: 'hmm' };
-const text: ViewEvent = { kind: 'text', text: 'done' };
+const thinking: ReasoningDigest = { entries: [{ kind: 'thinking', text: 'hmm' }] };
+const text: ReasoningDigest = { entries: [{ kind: 'thinking', text: 'hmm' }, { kind: 'text', text: 'done' }] };
 
 describe('createReasoningStream (#109 ephemeral reasoning bridge)', () => {
-  it('delivers emitted events to a subscriber in order', () => {
+  it('delivers emitted snapshots to a subscriber in order', () => {
     const stream = createReasoningStream();
-    const seen: ViewEvent[] = [];
+    const seen: ReasoningDigest[] = [];
     stream.subscribe((e) => seen.push(e));
     stream.emit(thinking);
     stream.emit(text);
     expect(seen).toEqual([thinking, text]);
   });
 
-  it('drops events emitted before anyone subscribes (live typing has no value once past)', () => {
+  it('drops snapshots emitted before anyone subscribes (the next snapshot carries the full trail)', () => {
     const stream = createReasoningStream();
     stream.emit(thinking); // no subscriber yet
-    const seen: ViewEvent[] = [];
+    const seen: ReasoningDigest[] = [];
     stream.subscribe((e) => seen.push(e));
     stream.emit(text);
     expect(seen).toEqual([text]);

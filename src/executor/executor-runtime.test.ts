@@ -121,6 +121,26 @@ describe('runExecutor', () => {
     ]);
   });
 
+  it('sends every message of a multi-message reply to the channel, in order (#110 digest + result)', async () => {
+    // A turn may reply with a reasoning digest followed by the result; both must
+    // land on the durable channel, the digest first, distinct from the result.
+    const channel = new InMemoryChannel();
+    const inbox: Message[] = [];
+    const orchestrator = channel.join('orchestrator', 'planner', (m) => inbox.push(m));
+    runExecutor(channel, 'executor-1', async () => [
+      { type: 'reasoning-digest', payload: { entries: [{ kind: 'thinking', text: 'why' }] } },
+      { type: 'result', payload: 'the answer' },
+    ]);
+
+    orchestrator.send({ type: 'text', payload: 'X' });
+    await flush();
+
+    expect(inbox).toEqual([
+      { from: 'executor-1', role: 'executor', type: 'reasoning-digest', payload: { entries: [{ kind: 'thinking', text: 'why' }] } },
+      { from: 'executor-1', role: 'executor', type: 'result', payload: 'the answer' },
+    ]);
+  });
+
   it('sends no reply when the behavior resolves undefined', async () => {
     const channel = new InMemoryChannel();
     const inbox: Message[] = [];
