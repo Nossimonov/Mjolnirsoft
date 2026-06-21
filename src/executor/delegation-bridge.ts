@@ -20,6 +20,8 @@ type Send = (message: Omit<Message, 'from' | 'role'>) => void;
 export interface DelegationBridge {
   /** Ask the host to spawn a delegate of `role` with `task`; resolves with its id (or an error). */
   spawn(role: string, task: string): Promise<DelegationResponse>;
+  /** Send a follow-up `message` to the live delegate `delegateId`; resolves when delivered (or an error if it's gone). */
+  message(delegateId: string, message: string): Promise<DelegationResponse>;
   /** Ask the host to shut down the delegate `delegateId`; resolves when acknowledged. */
   shutdown(delegateId: string): Promise<DelegationResponse>;
   /** Feed a received channel message; resolves a pending request if it's its response. */
@@ -37,7 +39,7 @@ export function createDelegationBridge(send: Send, options: DelegationBridgeOpti
   const pending = new Map<string, (response: DelegationResponse) => void>();
 
   const request = (
-    payload: { action: 'spawn' | 'shutdown'; role?: string; task?: string; delegateId?: string },
+    payload: { action: 'spawn' | 'shutdown' | 'message'; role?: string; task?: string; delegateId?: string },
   ): Promise<DelegationResponse> => {
     const requestId = generateId();
     return new Promise<DelegationResponse>((resolve) => {
@@ -49,6 +51,9 @@ export function createDelegationBridge(send: Send, options: DelegationBridgeOpti
   return {
     spawn(role, task) {
       return request({ action: 'spawn', role, task });
+    },
+    message(delegateId, message) {
+      return request({ action: 'message', delegateId, task: message });
     },
     shutdown(delegateId) {
       return request({ action: 'shutdown', delegateId });

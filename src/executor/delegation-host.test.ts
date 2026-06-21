@@ -144,6 +144,44 @@ describe('createDelegationHost (#93)', () => {
     expect(senderAttribution(reports[0])).toBe(`[Message from agent (id: ${id})]`);
   });
 
+  it('routes a follow-up to a live delegate end-to-end; it replies again (#111)', async () => {
+    const { bridge, reports, subLogs } = wire();
+
+    const { delegateId: id } = await bridge.spawn('evaluator', 'review the diff');
+    await flush();
+
+    // The spawner answers the live delegate's operational question via the send tool;
+    // the host routes it to the delegate's sub-channel and it critiques again.
+    const ack = await bridge.message(id!, 'run the suite with PATH=/c/Program Files/nodejs');
+    expect(ack.delegateId).toBe(id); // delivered to a live delegate
+    await flush();
+
+    // The follow-up landed on the delegate's own sub-channel...
+    expect(subLogs.get(id!)).toContainEqual({
+      from: 'w1-executor',
+      role: 'executor',
+      type: 'text',
+      payload: 'run the suite with PATH=/c/Program Files/nodejs',
+    });
+    // ...and both the delegate's replies bridged up, in order.
+    expect(reports).toEqual([
+      { from: id, role: 'evaluator', type: 'result', payload: 'critique by evaluator: review the diff' },
+      {
+        from: id,
+        role: 'evaluator',
+        type: 'result',
+        payload: 'critique by evaluator: run the suite with PATH=/c/Program Files/nodejs',
+      },
+    ]);
+  });
+
+  it('reports a follow-up to an unknown delegate as undeliverable (#111)', async () => {
+    const { bridge } = wire();
+    const response = await bridge.message('w1-executor-evaluator-9', 'anyone there?');
+    expect(response.error).toBe('no live delegate: w1-executor-evaluator-9');
+    expect(response.delegateId).toBeUndefined();
+  });
+
   it('keeps the delegate\'s full exchange on its sub-channel; only the finding crosses up (AC4)', async () => {
     const { bridge, reports, subLogs } = wire();
 

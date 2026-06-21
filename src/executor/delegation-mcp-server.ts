@@ -61,6 +61,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'send',
+      description:
+        'Send a follow-up message to a live delegate you spawned, by its id — it continues its ' +
+        'task and replies again as a new message on this session. Use it to answer a delegate\'s ' +
+        'operational question (how to run a command, a path, an env var it needs). Do NOT use it to ' +
+        'steer an evaluator\'s judgment or tell it what to conclude — give enablement, not opinions.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          delegateId: { type: 'string', description: 'The id of the live delegate to message.' },
+          message: { type: 'string', description: 'The follow-up to send (operational enablement, not steering).' },
+        },
+        required: ['delegateId', 'message'],
+        additionalProperties: false,
+      },
+    },
+    {
       name: 'shutdown',
       description: 'End a delegate previously opened with spawn, by its id. Idempotent for an unknown id.',
       inputSchema: {
@@ -76,12 +93,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  const args = (req.params.arguments ?? {}) as { role?: string; task?: string; delegateId?: string };
+  const args = (req.params.arguments ?? {}) as { role?: string; task?: string; delegateId?: string; message?: string };
   if (req.params.name === 'spawn') {
     const response = await bridge.spawn(args.role ?? '', args.task ?? '');
     const text = response.error
       ? `delegation failed: ${response.error}`
       : `delegate spawned: ${response.delegateId} — its finding will arrive as a new message on this session.`;
+    return { content: [{ type: 'text', text }] };
+  }
+  if (req.params.name === 'send') {
+    const response = await bridge.message(args.delegateId ?? '', args.message ?? '');
+    const text = response.error
+      ? `could not deliver: ${response.error}`
+      : `message delivered to ${response.delegateId} — its reply will arrive as a new message on this session.`;
     return { content: [{ type: 'text', text }] };
   }
   if (req.params.name === 'shutdown') {

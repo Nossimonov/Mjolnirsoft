@@ -279,6 +279,7 @@ export const EXECUTOR_PERMISSION_POLICY = {
       'Write(./**)',
       'Bash',
       'mcp__delegate__spawn',
+      'mcp__delegate__send',
       'mcp__delegate__shutdown',
     ],
     deny: ['Bash(rm -rf *)', 'Bash(git push *)', 'Bash(git reset --hard *)', 'Bash(sudo *)'],

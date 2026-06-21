@@ -117,6 +117,13 @@ export function createDelegationHost(deps: DelegationHostDeps): DelegationHost {
       }
       spawned.add(id);
       respond({ delegateId: id });
+    } else if (request.action === 'message') {
+      // A follow-up to a live delegate (#111): route it to the delegate's sub-channel.
+      // Report back whether a live delegate received it, so the spawner learns when its
+      // delegate is already gone rather than silently waiting for a reply that won't come.
+      const id = request.delegateId ?? '';
+      const delivered = id ? manager.send(id, { type: 'text', payload: request.task ?? '' }) : false;
+      respond(delivered ? { delegateId: id } : { error: `no live delegate: ${id || '(none)'}` });
     } else if (request.action === 'shutdown') {
       const id = request.delegateId;
       if (id) {
