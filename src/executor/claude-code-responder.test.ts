@@ -5,6 +5,8 @@ import {
   buildClaudeArgs,
   senderAttribution,
   interpretClaudeResult,
+  extractUsage,
+  addUsage,
   parseStreamEvent,
   createStreamReader,
   DEFAULT_EXECUTOR_ROLE,
@@ -50,6 +52,41 @@ describe('interpretClaudeResult', () => {
 
   it('reports unparseable output on an otherwise-clean exit', () => {
     expect(() => interpretClaudeResult('not json', '', 0)).toThrow(/could not parse/);
+  });
+});
+
+describe('extractUsage / addUsage (#116)', () => {
+  const resultLine = (usage: unknown) =>
+    JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', usage });
+
+  it('reads token usage from the result line', () => {
+    const u = extractUsage(
+      resultLine({ input_tokens: 3, output_tokens: 3827, cache_read_input_tokens: 18286, cache_creation_input_tokens: 7837 }),
+    );
+    expect(u).toEqual({ inputTokens: 3, outputTokens: 3827, cacheReadTokens: 18286, cacheCreationTokens: 7837 });
+  });
+
+  it('treats missing token fields as 0', () => {
+    expect(extractUsage(resultLine({ output_tokens: 10 }))).toEqual({
+      inputTokens: 0,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    });
+  });
+
+  it('returns undefined with no usage or unparseable input (an unmeasured turn isn\'t counted)', () => {
+    expect(extractUsage(JSON.stringify({ type: 'result', result: 'ok' }))).toBeUndefined();
+    expect(extractUsage('not json')).toBeUndefined();
+  });
+
+  it('sums tallies field-wise (per-session accumulation + spawner roll-up)', () => {
+    expect(
+      addUsage(
+        { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheCreationTokens: 4 },
+        { inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheCreationTokens: 40 },
+      ),
+    ).toEqual({ inputTokens: 11, outputTokens: 22, cacheReadTokens: 33, cacheCreationTokens: 44 });
   });
 });
 
@@ -355,45 +392,10 @@ describe('createClaudeCodeResponder', () => {
     expect(await respond(task)).toBeUndefined();
   });
 
-  it('ignores permission interaction messages rather than treating them as prompts (#66)', async () => {
-    const run = vi.fn().mockResolvedValue('x');
-    const respond = createClaudeCodeResponder({ workdir: '/w', run });
-    const req = {
-      from: 'p',
-      role: 'planner',
-      type: 'interaction-request',
-      payload: { requestId: 'r', toolName: 'Write', input: {} },
-    } as const;
-    const dec = {
-      from: 'p',
-      role: 'planner',
-      type: 'interaction-decision',
-      payload: { requestId: 'r', behavior: 'allow' },
-    } as const;
-    expect(await respond(req)).toBeUndefined();
-    expect(await respond(dec)).toBeUndefined();
-    expect(run).not.toHaveBeenCalled();
-  });
-
-  it('ignores delegation control messages rather than treating them as prompts (#93)', async () => {
-    const run = vi.fn().mockResolvedValue('x');
-    const respond = createClaudeCodeResponder({ workdir: '/w', run });
-    const req = {
-      from: 'd',
-      role: 'executor',
-      type: 'delegation-request',
-      payload: { requestId: 'r', action: 'spawn', role: 'evaluator', task: 'review' },
-    } as const;
-    const res = {
-      from: 'host',
-      role: 'planner',
-      type: 'delegation-response',
-      payload: { requestId: 'r', delegateId: 'x-evaluator-1' },
-    } as const;
-    expect(await respond(req)).toBeUndefined();
-    expect(await respond(res)).toBeUndefined();
-    expect(run).not.toHaveBeenCalled();
-  });
+  // Filtering infrastructure (interaction/delegation/usage) out of an agent's turns
+  // is no longer the responder's job — the agent runtime's allowlist does it upstream
+  // (`deliversToAgent`, see executor-runtime.test.ts). The responder now assumes it
+  // only ever receives conversation, so it has no side-channel denylist to test (#116).
 
   it('passes the permission-prompt tool and MCP config through to the run (#66)', async () => {
     const run = vi.fn().mockResolvedValue('ok');

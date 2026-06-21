@@ -141,6 +141,39 @@ describe('runExecutor', () => {
     ]);
   });
 
+  it('routes only conversation to the agent; infrastructure never becomes a turn (#116)', async () => {
+    // The channel is shared: it also carries infrastructure (usage tallies,
+    // permission/delegation control, reasoning digests) for transport and the log.
+    // None of it may reach the agent — feeding an agent its own plumbing as a turn is
+    // what produced the usage-message feedback loop. The allowlist is default-deny, so
+    // a new infra type stays out without anyone updating a denylist.
+    const channel = new InMemoryChannel();
+    const seen: string[] = [];
+    const other = channel.join('other', 'planner', () => {});
+    runExecutor(channel, 'executor-1', async (m) => {
+      seen.push(m.type);
+      return undefined;
+    });
+
+    // Infrastructure — must be ignored (no turn):
+    other.send({ type: 'usage', payload: { outputTokens: 99 } });
+    other.send({ type: 'interaction-request', payload: { requestId: 'r' } });
+    other.send({ type: 'interaction-decision', payload: { requestId: 'r' } });
+    other.send({ type: 'delegation-request', payload: { requestId: 'r' } });
+    other.send({ type: 'delegation-response', payload: { requestId: 'r' } });
+    other.send({ type: 'reasoning-digest', payload: { entries: [] } });
+    other.send({ type: 'ack', payload: 'noise' });
+    await flush();
+    expect(seen).toEqual([]);
+
+    // Conversation — a prompt, a peer's report, a peer's failure: each a turn.
+    other.send({ type: 'text', payload: 'the task' });
+    other.send({ type: 'result', payload: 'a report' });
+    other.send({ type: 'error', payload: 'a failure to react to' });
+    await flush();
+    expect(seen).toEqual(['text', 'result', 'error']);
+  });
+
   it('sends no reply when the behavior resolves undefined', async () => {
     const channel = new InMemoryChannel();
     const inbox: Message[] = [];

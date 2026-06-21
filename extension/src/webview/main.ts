@@ -13,6 +13,7 @@ const working = document.getElementById('working');
 const workingHeader = document.getElementById('working-header');
 const queued = document.getElementById('queued');
 const notice = document.getElementById('notice');
+const usage = document.getElementById('usage');
 
 // Client-side elapsed timer for the "working" indicator. The host only tells us
 // when a turn starts and ends; we tick the seconds locally so a long run
@@ -122,6 +123,9 @@ window.addEventListener('message', (event: MessageEvent) => {
     setReasoning(data.html);
   } else if (data.kind === 'reasoning-settle') {
     settleReasoning();
+  } else if (data.kind === 'usage' && usage) {
+    // The running token tally (#116) in the session header; empty until first usage.
+    usage.textContent = data.text ? ` · ${data.text}` : '';
   } else if (data.kind === 'queued') {
     setQueued(data.count ?? 0);
   } else if (data.kind === 'notice' && notice) {

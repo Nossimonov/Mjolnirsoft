@@ -2,8 +2,6 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import type { Message } from '../core/channel.ts';
-import { INTERACTION_DECISION, INTERACTION_REQUEST } from '../core/interaction.ts';
-import { DELEGATION_REQUEST, DELEGATION_RESPONSE } from '../core/delegation-protocol.ts';
 import { composeAgentInstructions } from '../core/agent-instructions.ts';
 import { createReasoningDigestAssembler, REASONING_DIGEST, type ReasoningDigest } from './reasoning-digest.ts';
 import type { Respond } from './executor-runtime.ts';
@@ -51,6 +49,41 @@ export type ViewEvent =
   | { readonly kind: 'text'; readonly text: string }
   | { readonly kind: 'tool-use'; readonly name: string };
 
+/**
+ * One turn's token usage, read from the `claude` result line (#116). Tokens only:
+ * a subscription run reports no `total_cost_usd` (there's no per-token billing), and
+ * tokens are what the session limit is actually measured against anyway. Cache reads
+ * are ~10x cheaper than fresh input, so the breakdown is kept (a raw sum over-states
+ * the limit weight) rather than collapsed to one number.
+ */
+export interface Usage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheCreationTokens: number;
+}
+
+/** Sum two {@link Usage} tallies — the basis for per-session accumulation and spawner roll-up (#116). */
+export function addUsage(a: Usage, b: Usage): Usage {
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
+    cacheCreationTokens: a.cacheCreationTokens + b.cacheCreationTokens,
+  };
+}
+
+/** A zero tally to seed an accumulator. */
+export const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+
+/**
+ * Channel message type carrying one turn's {@link Usage} (#116). Like the delegation
+ * and interaction control messages, it rides the channel for persistence/transport
+ * but is *plumbing*, not a task prompt — the responder short-circuits it so an agent
+ * never feeds its own per-turn usage back to itself as a new turn (which would loop).
+ */
+export const USAGE_MESSAGE = 'usage';
+
 /** Options shaping a one-shot `claude` run beyond the task prompt and cwd. */
 export interface ClaudeRunArgs {
   /**
@@ -88,6 +121,13 @@ export interface ClaudeRunArgs {
    * {@link onReasoningChange}) to skip digest assembly entirely (no per-line overhead).
    */
   readonly onDigest?: (digest: ReasoningDigest) => void;
+  /**
+   * Usage seam (#116): called once when the run completes with the turn's token
+   * {@link Usage}, read from the `result` line. The host accumulates it per session
+   * and rolls sub-agent usage into the spawner — all in code, so no agent turn is
+   * spent counting. Omit to ignore usage.
+   */
+  readonly onUsage?: (usage: Usage) => void;
 }
 
 /**
@@ -341,6 +381,31 @@ export function interpretClaudeResult(stdout: string, stderr: string, code: numb
 }
 
 /**
+ * Pull the turn's token {@link Usage} from a `claude` result line (#116). The
+ * terminal `{"type":"result",…}` line carries a `usage` object with
+ * `{input,output,cache_read_input,cache_creation_input}_tokens`. Returns undefined
+ * when the line is missing/unparseable or carries no usage (so an unmeasured turn
+ * is simply not counted). Pure — unit-tested against captured result lines.
+ */
+export function extractUsage(resultRaw: string): Usage | undefined {
+  let parsed: { usage?: Record<string, unknown> } | undefined;
+  try {
+    parsed = JSON.parse(resultRaw) as { usage?: Record<string, unknown> };
+  } catch {
+    return undefined;
+  }
+  const u = parsed?.usage;
+  if (!u || typeof u !== 'object') return undefined;
+  const n = (k: string): number => (typeof u[k] === 'number' ? (u[k] as number) : 0);
+  return {
+    inputTokens: n('input_tokens'),
+    outputTokens: n('output_tokens'),
+    cacheReadTokens: n('cache_read_input_tokens'),
+    cacheCreationTokens: n('cache_creation_input_tokens'),
+  };
+}
+
+/**
  * Default launcher: spawn `claude -p` headless. A non-`--bare` run uses the
  * logged-in Claude Code session (the user's subscription). With `--output-format
  * stream-json` the run streams as NDJSON: stdout is read line-by-line. The raw
@@ -357,7 +422,7 @@ export const runClaudeCodeCli: RunClaudeCode = (
   options,
 ) =>
   new Promise((resolve, reject) => {
-    const { cwd, onReasoningChange, onDigest } = options;
+    const { cwd, onReasoningChange, onDigest, onUsage } = options;
     // Pass the whole options object through: `buildClaudeArgs` reads only the
     // flag-relevant fields and ignores `cwd`/the callbacks, so a CLI flag can't be
     // silently dropped by hand-listing fields here (that dropped `--model`, #119).
@@ -412,6 +477,10 @@ export const runClaudeCodeCli: RunClaudeCode = (
       }
       reader.flush(); // parse a final line with no trailing newline (the `result` line often is one)
       if (digest && onDigest) onDigest(digest.build()); // hand the assembled trail back for persistence (#110)
+      if (onUsage) {
+        const usage = extractUsage(resultRaw || stdout); // read the turn's token usage from the result line (#116)
+        if (usage) onUsage(usage);
+      }
       try {
         resolve(interpretClaudeResult(resultRaw || stdout, stderr, code));
       } catch (error) {
@@ -464,6 +533,8 @@ export interface ClaudeCodeResponderOptions {
    * works and streams them to the view ephemerally. Omit for no streaming.
    */
   readonly onReasoningChange?: (digest: ReasoningDigest) => void;
+  /** Usage seam (#116): forwarded to each run as its `onUsage`, so the host accumulates per-turn token usage. */
+  readonly onUsage?: (usage: Usage) => void;
 }
 
 /**
@@ -486,6 +557,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     model,
     run = runClaudeCodeCli,
     onReasoningChange,
+    onUsage,
   } = options;
   // The pinned Claude session: the first turn creates it (`--session-id`), later
   // turns resume it (`--resume`). `sessionId` is mutable because a turn that fails
@@ -497,19 +569,11 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
   let sessionId = claudeSessionId;
   let started = false;
   return async (message) => {
-    // Permission requests/decisions (#66) and delegation control messages (#93)
-    // are side-channels between an MCP server and the host — not task prompts.
-    // Ignoring them keeps the executor from feeding its own mid-run request back
-    // into Claude as a new turn. (A delegate's *report* is an ordinary message,
-    // not one of these, so it still reaches the executor as a turn.)
-    if (
-      message.type === INTERACTION_REQUEST ||
-      message.type === INTERACTION_DECISION ||
-      message.type === DELEGATION_REQUEST ||
-      message.type === DELEGATION_RESPONSE
-    ) {
-      return undefined;
-    }
+    // Only conversation reaches here: infrastructure (permission/delegation control,
+    // per-turn usage, reasoning digests) is filtered upstream by the agent runtime's
+    // allowlist (`deliversToAgent` in executor-runtime), so the responder no longer
+    // keeps its own denylist of side-channel types — a new infra type can't reach an
+    // agent by default, rather than relying on this list being kept current (#116).
     const body = typeof message.payload === 'string' ? message.payload : JSON.stringify(message.payload);
     // Prefix the sender's identity + role so the agent reads who it's hearing
     // from — the authoritative architect vs. a peer/subordinate agent (#86).
@@ -529,6 +593,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
           mcpConfigPath,
           model,
           onReasoningChange,
+          onUsage,
           onDigest: (d) => {
             digest = d;
           },
