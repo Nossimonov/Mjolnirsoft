@@ -8,14 +8,17 @@
 
 /**
  * The role a session plays in coordination. `planner` is the authoritative
- * human (architect/orchestrator seat); `executor` and `evaluator` are the
- * tool-spawned agent roles. `evaluator` joins via delegation (#93) — a spawner
- * delegates a critique to an evaluator on its own sub-channel — so it is a
- * channel role like the others, carried in the message so attribution can mark
- * its report a (non-authoritative) agent report (#86). The agent roles that
- * carry composed instructions are mirrored by `AgentRole` in `agent-instructions.ts`.
+ * human (architect seat); `orchestrator`, `executor`, and `evaluator` are the
+ * tool-spawned agent roles. `orchestrator` plans and delegates a task to an
+ * executor and relays its hand-off (#114); `evaluator` joins via delegation
+ * (#93) — a spawner delegates a critique to an evaluator on its own sub-channel.
+ * Each is a channel role carried in the message so attribution can mark a
+ * report: the architect (`planner`) is authoritative, an `orchestrator` reads as
+ * the (non-authoritative) delegating supervisor, and every other agent role as a
+ * plain (non-authoritative) agent (#86). The agent roles that carry composed
+ * instructions are mirrored by `AgentRole` in `agent-instructions.ts`.
  */
-export type Role = 'planner' | 'executor' | 'evaluator';
+export type Role = 'planner' | 'orchestrator' | 'executor' | 'evaluator';
 
 /**
  * A message exchanged over the channel. Intentionally minimal: `type` is a

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { InMemoryChannel } from '../core/in-memory-channel.ts';
 import type { Message, Role } from '../core/channel.ts';
 import { senderAttribution } from './claude-code-responder.ts';
+import { runExecutor } from './executor-runtime.ts';
 import { createDelegationManager, type DelegationDeps } from './delegation.ts';
 
 /** Let queued microtasks/timers run so the stub delegate's async reply delivers. */
@@ -13,7 +14,7 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
  * deployment has the spawner on its session channel and each delegate on its own
  * session log, but synchronous and transport-free.
  */
-function wire(createResponder?: DelegationDeps['createResponder']) {
+function wire(createDelegate?: DelegationDeps['createDelegate']) {
   const spawnerChannel = new InMemoryChannel();
   const orchestratorInbox: Message[] = [];
   spawnerChannel.join('orchestrator', 'planner', (m) => orchestratorInbox.push(m));
@@ -36,7 +37,7 @@ function wire(createResponder?: DelegationDeps['createResponder']) {
     spawnerRole: 'executor',
     spawnerChannel,
     openSubChannel,
-    createResponder,
+    createDelegate,
   });
 
   return { manager, orchestratorInbox, subChannels, subLogs };
@@ -126,13 +127,19 @@ describe('createDelegationManager', () => {
     ]);
   });
 
-  it('swaps the stub delegate for any Respond behind the same seam (AC5)', async () => {
-    // Proves the rung-3 swap point: a real claude-backed responder drops in here
-    // the way createClaudeCodeResponder dropped in behind runExecutor's Respond.
+  it('wires any delegate behind the createDelegate seam, bridging from its report seat (AC5)', async () => {
+    // Proves the swap point: a factory wires the delegate on its sub-channel — here
+    // a plain responder via runExecutor — and the manager bridges its report up.
     const seen: Array<{ role: Role; id: string }> = [];
-    const { manager, orchestratorInbox } = wire((role, id) => {
+    const { manager, orchestratorInbox } = wire((role, id, sub) => {
       seen.push({ role, id });
-      return async (message) => ({ type: 'result', payload: `handled: ${message.payload}` });
+      const responder = runExecutor(
+        sub,
+        id,
+        async (message) => ({ type: 'result', payload: `handled: ${message.payload}` }),
+        role,
+      );
+      return { close: responder.close };
     });
 
     manager.spawn('executor', { type: 'text', payload: 'go' });
@@ -141,6 +148,38 @@ describe('createDelegationManager', () => {
     expect(seen).toEqual([{ role: 'executor', id: 'spawner-executor-1' }]);
     expect(orchestratorInbox).toEqual([
       { from: 'spawner-executor-1', role: 'executor', type: 'result', payload: 'handled: go' },
+    ]);
+  });
+
+  it('bridges from a distinct report seat when the delegate names one (#114 full-executor shape)', async () => {
+    // A full executor delegate runs its agent under `${id}-executor` (alongside its
+    // own MCP seats) and names that seat via reportFrom — so the manager bridges the
+    // agent's reply, attributed under the clean delegate id, even though the agent
+    // joined the sub-channel under a suffixed seat (not `id` itself).
+    const { manager, orchestratorInbox, subLogs } = wire((role, id, sub) => {
+      const agentSeat = `${id}-executor`;
+      const agent = runExecutor(
+        sub,
+        agentSeat,
+        async (message) => ({ type: 'result', payload: `did: ${message.payload}` }),
+        role,
+      );
+      return { reportFrom: agentSeat, close: agent.close };
+    });
+
+    const id = manager.spawn('executor', { type: 'text', payload: 'task' });
+    await flush();
+
+    // The agent replied under its suffixed seat on the sub-channel...
+    expect(subLogs.get(id)).toContainEqual({
+      from: `${id}-executor`,
+      role: 'executor',
+      type: 'result',
+      payload: 'did: task',
+    });
+    // ...and the manager bridged it up under the clean delegate id (not the seat).
+    expect(orchestratorInbox).toEqual([
+      { from: id, role: 'executor', type: 'result', payload: 'did: task' },
     ]);
   });
 });

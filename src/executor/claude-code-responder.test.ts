@@ -431,6 +431,15 @@ describe('senderAttribution', () => {
     expect(attribution).toBe('[Message from agent (id: w1-executor-evaluator-1)]');
     expect(attribution).not.toContain('authoritative');
   });
+
+  it('distinguishes an orchestrator as the (non-authoritative) delegating supervisor (#114)', () => {
+    // An orchestrator addressing its executor delegate is the task-giver, so it
+    // reads distinctly from a peer/subordinate agent — but it is *not* authoritative
+    // (only the architect is), so an executor still routes decisions past it.
+    const attribution = senderAttribution({ from: 'orch-executor', role: 'orchestrator' });
+    expect(attribution).toBe('[Message from orchestrator — delegating (id: orch-executor)]');
+    expect(attribution).not.toContain('authoritative');
+  });
 });
 
 describe('buildClaudeArgs', () => {

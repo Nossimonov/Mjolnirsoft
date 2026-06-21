@@ -18,6 +18,10 @@
       {
         "command": "mjolnirsoft.startExecutorSession",
         "title": "Mjolnirsoft: Start Executor Session"
+      },
+      {
+        "command": "mjolnirsoft.startOrchestratorSession",
+        "title": "Mjolnirsoft: Start Orchestrator Session"
       }
     ]
   },
