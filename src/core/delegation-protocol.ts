@@ -23,13 +23,13 @@ export const DELEGATION_RESPONSE = 'delegation-response';
 export interface DelegationRequest {
   /** Correlates this request with its {@link DelegationResponse}. */
   readonly requestId: string;
-  /** `spawn` opens a new delegate; `shutdown` ends an existing one. */
-  readonly action: 'spawn' | 'shutdown';
+  /** `spawn` opens a new delegate; `message` sends a follow-up to a live one; `shutdown` ends one. */
+  readonly action: 'spawn' | 'shutdown' | 'message';
   /** On `spawn`: the delegate's role (e.g. `evaluator`). */
   readonly role?: string;
-  /** On `spawn`: the opening task text sent to the delegate on its sub-channel. */
+  /** On `spawn`, the opening task; on `message`, the follow-up text — sent to the delegate on its sub-channel. */
   readonly task?: string;
-  /** On `shutdown`: the id of the delegate to end. */
+  /** On `shutdown` or `message`: the id of the delegate to address. */
   readonly delegateId?: string;
 }
 

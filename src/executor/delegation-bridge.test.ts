@@ -55,6 +55,33 @@ describe('delegation bridge (#93)', () => {
     expect(response.delegateId).toBeUndefined();
   });
 
+  it('sends a follow-up message to a live delegate, carrying its id + text (#111)', async () => {
+    const { bridge, seen } = wire((request) => ({
+      type: DELEGATION_RESPONSE,
+      payload: { requestId: request.requestId, delegateId: request.delegateId },
+    }));
+
+    const response = await bridge.message('w1-executor-evaluator-1', 'run the suite with PATH=...');
+
+    expect(seen[0]).toMatchObject({
+      action: 'message',
+      delegateId: 'w1-executor-evaluator-1',
+      task: 'run the suite with PATH=...',
+    });
+    expect(response.delegateId).toBe('w1-executor-evaluator-1');
+  });
+
+  it('carries a send-to-gone-delegate error back through (#111)', async () => {
+    const { bridge } = wire((request) => ({
+      type: DELEGATION_RESPONSE,
+      payload: { requestId: request.requestId, error: 'no live delegate: w1-executor-evaluator-9' },
+    }));
+
+    const response = await bridge.message('w1-executor-evaluator-9', 'hello?');
+
+    expect(response.error).toBe('no live delegate: w1-executor-evaluator-9');
+  });
+
   it('resolves a shutdown, routing the matching response back by requestId', async () => {
     const { bridge, seen } = wire((request) => ({
       type: DELEGATION_RESPONSE,
