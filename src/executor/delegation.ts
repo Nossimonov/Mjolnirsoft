@@ -1,6 +1,5 @@
 import type { Channel, Message, Role } from '../core/channel.ts';
-import { acknowledge, runExecutor } from './executor-runtime.ts';
-import { REASONING_DIGEST } from './reasoning-digest.ts';
+import { acknowledge, runExecutor, deliversToAgent } from './executor-runtime.ts';
 
 /**
  * Agent-to-agent delegation (#88, rung 2 of #85): the transport-free primitive
@@ -124,13 +123,15 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
       // task and listens for the delegate's reply, which it bridges up verbatim
       // through the reporter.
       const driver = sub.join(spawnerId, spawnerRole, (message) => {
-        // The delegate's reasoning digest (#110) stays on its own sub-channel log
-        // for later post-mortem; only its distilled *report* (the result/error)
-        // crosses up to the spawner, so the spawner isn't fed the delegate's full
-        // reasoning as a turn to react to. The `reportFrom` guard also keeps a full
-        // executor delegate's own MCP-seat traffic (permission cards, delegation
-        // control) on the sub-channel — only the agent's reply crosses up (#114).
-        if (message.from === reportFrom && message.type !== REASONING_DIGEST) {
+        // Only the delegate's distilled *report* (its result/error) crosses up to the
+        // spawner, as a turn the spawner reacts to. Two filters, both allowlists by
+        // design (#116): `reportFrom` keeps a full executor delegate's own MCP-seat
+        // traffic (permission cards, delegation control, per-turn usage) on the
+        // sub-channel; `deliversToAgent` admits only conversational types, so the
+        // delegate's reasoning digest (#110) and any other infrastructure it emits
+        // stay on its own sub-channel log for post-mortem rather than becoming a
+        // spawner turn. New infra types are excluded automatically, not by a denylist.
+        if (message.from === reportFrom && deliversToAgent(message)) {
           reporter.send({ type: message.type, payload: message.payload });
         }
       });

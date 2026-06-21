@@ -22,6 +22,36 @@ export const acknowledge: Respond = async (message) => ({
 });
 
 /**
+ * The channel message types that are *conversation* — the only ones an agent takes a
+ * turn on. A prompt directed at it (`text`: the architect's task, a delegation
+ * opening task) or a peer's outcome it awaits (`result`: a reply / bridged report;
+ * `error`: a failed turn it may need to react to).
+ *
+ * This is an **allowlist by deliberate design** (#116). The channel is shared: it
+ * carries conversation *and* infrastructure — per-turn usage tallies (#116),
+ * permission / delegation control (#66/#93), reasoning digests (#110) — because the
+ * channel is also the durable log and the panel's render feed. Infrastructure must
+ * never reach an agent, or it feeds its own plumbing back to itself as a new turn and
+ * burns tokens in a loop. Default-deny makes that *structurally impossible*: a newly
+ * added infra type is excluded automatically (no denylist to remember to update);
+ * only a genuinely new *conversational* type is added here, as a conscious decision.
+ * (If an agent-to-spawner question is ever added, e.g. a sub-agent asking its
+ * spawner, its type is added here on purpose — until then questions are human-facing
+ * `interaction-request`s the panel renders, never agent turns.)
+ */
+export const AGENT_PROMPT_TYPES: ReadonlySet<string> = new Set(['text', 'result', 'error']);
+
+/**
+ * Whether a message is conversation an agent should take a turn on, as opposed to
+ * infrastructure that merely rides the channel for transport / logging. The single
+ * gate for agent routing (used by {@link runExecutor}) and for what a delegate's
+ * report bridges up to its spawner. See {@link AGENT_PROMPT_TYPES}.
+ */
+export function deliversToAgent(message: Message): boolean {
+  return AGENT_PROMPT_TYPES.has(message.type);
+}
+
+/**
  * Run an automated responder: join `channel` under `id` in `role` and reply to
  * each message received from another participant using `respond` (which may be
  * async — e.g. a Claude agentic loop). Returns the participant (call `close()`
@@ -43,11 +73,16 @@ export function runExecutor(
   // a message arriving then would otherwise start a second, overlapping run. We
   // chain each turn on a tail promise so the turn for message N+1 begins only
   // after N's turn settles. The tail must always resolve (the catch swallows the
-  // failure) so one failed turn can't wedge the queue (#100). Interaction-decision
-  // and delegation messages short-circuit to `undefined` in the responder, so they
-  // pass through the chain fast and never hold the queue on a claude run.
+  // failure) so one failed turn can't wedge the queue (#100).
   let tail = Promise.resolve();
   executor = channel.join(id, role, (message) => {
+    // Default-deny routing (#116): only conversation becomes a turn. Infrastructure
+    // (usage tallies, permission/delegation control, reasoning digests) shares this
+    // channel for transport and the durable log, but must never reach the agent — or
+    // it feeds its own plumbing back to itself as a turn and burns tokens in a loop.
+    // The allowlist makes that structurally impossible; new infra types stay out by
+    // default. So gated, infra never even enters the turn queue. See AGENT_PROMPT_TYPES.
+    if (!deliversToAgent(message)) return;
     tail = tail.then(async () => {
       try {
         const reply = await respond(message);

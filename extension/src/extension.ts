@@ -2,13 +2,14 @@ import * as vscode from 'vscode';
 import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { Channel } from '../../src/core/channel.ts';
+import type { Channel, Participant } from '../../src/core/channel.ts';
 import { SessionStore } from '../../src/core/session-store.ts';
 import { WorktreeManager, currentRemoteBase } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runExecutor } from '../../src/executor/executor-runtime.ts';
-import { createClaudeCodeResponder, resolveClaudeBin } from '../../src/executor/claude-code-responder.ts';
+import { createClaudeCodeResponder, resolveClaudeBin, addUsage, ZERO_USAGE, USAGE_MESSAGE, type Usage } from '../../src/executor/claude-code-responder.ts';
 import { createReasoningStream, type ReasoningStream } from '../../src/executor/reasoning-stream.ts';
+import { createUsageMeter, type UsageMeter } from '../../src/executor/usage-meter.ts';
 import { createDelegationHost } from '../../src/executor/delegation-host.ts';
 import type { DelegateWiring } from '../../src/executor/delegation.ts';
 import { composeAgentInstructions, type AgentRole } from '../../src/core/agent-instructions.ts';
@@ -30,6 +31,27 @@ const PERMISSION_PROMPT_TOOL = 'mcp__perm__approve';
 // session names forbids spaces/'+', so this can never collide with a real id.
 const START_NEW_SESSION = '+ Start a new executor session…';
 
+// USAGE_MESSAGE (#116) is the channel message type carrying one turn's usage. It's
+// posted per turn as the turn completes (not on close), so a long-lived session's
+// usage lands in the durable log continuously and survives teardown (#126), and each
+// turn's "think" is recoverable for post-mortem. The payload is that turn's delta,
+// not a running total; a live panel shows the running tally from its meter, a replayed
+// panel sums these. Defined in the responder (which short-circuits it so an agent
+// never feeds its own usage back to itself) and imported here.
+
+/** Compact a token count: 1234 → "1.2K", 1_234_567 → "1.2M". */
+function formatTokens(n: number): string {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1).replace(/\.0$/, '')}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1).replace(/\.0$/, '')}K`;
+  return String(n);
+}
+
+/** The header token tally (#116): grand total + output (the generation/limit-heavy slice). */
+function formatUsage(u: Usage): string {
+  const total = u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheCreationTokens;
+  return `${formatTokens(total)} tok · ${formatTokens(u.outputTokens)} out`;
+}
+
 /**
  * What a live, in-host session exposes for *attach-on-demand* (#114). A session
  * the extension started (an orchestrator or executor command) — and every executor
@@ -49,6 +71,8 @@ interface LiveSession {
   readonly role: AgentRole;
   /** The model this session's agent runs on (#119), for the attached panel's header. */
   readonly model?: string;
+  /** This session's token meter (#116) — running total incl. rolled-up sub-agents — for the header tally. */
+  readonly meter: UsageMeter;
 }
 type LiveSessions = Map<string, LiveSession>;
 
@@ -88,6 +112,7 @@ export function activate(context: vscode.ExtensionContext): void {
       reasoning: live?.reasoning,
       agentLabel: live?.role,
       model: live?.model,
+      meter: live?.meter,
     });
   });
 
@@ -116,6 +141,8 @@ interface ProvisionedSession {
   readonly branch: string;
   /** The model the agent runs on (#119); undefined inherits the user's default. */
   readonly model?: string;
+  /** This session's token meter (#116): its own usage plus every sub-agent it spawned. */
+  readonly meter: UsageMeter;
   /** Tear down the agent + delegation host + MCP config, capture and drop the worktree. Returns whether anything was committed. Does NOT close the channel (the caller owns it). */
   close(): boolean;
 }
@@ -146,10 +173,13 @@ function provisionSession(args: {
   role: AgentRole;
   channel: Channel;
   liveSessions: LiveSessions;
+  /** Roll this session's token usage up into the spawner's meter (#116); omit for a top-level session. */
+  onUsage?: (turn: Usage) => void;
 }): ProvisionedSession {
   const { context, folder, store, sessionId, role, channel, liveSessions } = args;
   const repoDir = folder.uri.fsPath;
   const model = modelForRole(role); // the per-role model this agent runs on (#119)
+  const meter = createUsageMeter(args.onUsage); // accumulate token usage; bubble to the spawner (#116)
 
   // An isolated git worktree on its own branch, so the session edits the real repo
   // without touching the developer's working tree. Base it on the freshest
@@ -162,6 +192,7 @@ function provisionSession(args: {
   // Once the worktree exists, a later failure must not leave it (or a written MCP
   // config) orphaned — track what's been allocated and unwind on a partial failure.
   let mcpConfigPath: string | undefined;
+  let usageSeat: Participant | undefined;
   try {
     // MCP-backed capabilities: one per-session config wiring Claude to both bundled
     // servers — the permission server for escalation (#66/#70) and the delegation
@@ -182,6 +213,20 @@ function provisionSession(args: {
     // subscribes to forward them. Off the channel — never logged or replayed.
     const reasoning = createReasoningStream();
 
+    // Durable per-turn usage (#116): a passive seat that posts this session's own
+    // usage to the channel one turn at a time, as each turn completes. Persisting
+    // per-turn (rather than a single total on close) keeps a long-lived session's
+    // accounting in the log continuously, survives teardown (#126), and preserves
+    // each turn's cost individually for "which operation thought hardest" analysis.
+    // `meter.add` still accumulates the running total (and bubbles to the spawner);
+    // this just also writes the delta down. Delegates log their own turns on their
+    // own channels, so we record only this session's own responder turns here.
+    usageSeat = channel.join(`${sessionId}-usage`, role, () => {});
+    const recordTurnUsage = (turn: Usage): void => {
+      meter.add(turn);
+      usageSeat?.send({ type: USAGE_MESSAGE, payload: turn });
+    };
+
     // Run the agent in-process: it joins the session in its role and answers each
     // message by running a headless Claude Code agent with the worktree as workspace.
     const agentId = `${sessionId}-executor`;
@@ -195,6 +240,7 @@ function provisionSession(args: {
         mcpConfigPath,
         model,
         onReasoningChange: reasoning.emit,
+        onUsage: recordTurnUsage, // accumulate the running total *and* log this turn (#116)
       }),
       role,
     );
@@ -213,7 +259,7 @@ function provisionSession(args: {
       hostId: `${sessionId}-delegation-host`,
       openSubChannel: (id) => store.open(id),
       provisionExecutorDelegate: (id, sub): DelegateWiring => {
-        const child = provisionSession({ context, folder, store, sessionId: id, role: 'executor', channel: sub, liveSessions });
+        const child = provisionSession({ context, folder, store, sessionId: id, role: 'executor', channel: sub, liveSessions, onUsage: meter.add });
         // Surface the delegate so the architect can find it: it's a real, attachable
         // session with no auto-panel (#114), so tell them it exists, on which branch,
         // and that it's opened on demand from the session view.
@@ -228,20 +274,26 @@ function provisionSession(args: {
           workdir: worktree.path,
           appendSystemPrompt: composeAgentInstructions(delegateRole),
           model: modelForRole(delegateRole),
+          onUsage: meter.add, // a shared-worktree critique delegate's usage rolls into this session (#116)
           // claudeSessionId defaults to a fresh UUID — a delegate's *channel* id is
           // not a valid `--session-id`, and a critique delegate is short-lived anyway.
         }),
     });
 
-    liveSessions.set(sessionId, { agentId, reasoning, role, model });
+    liveSessions.set(sessionId, { agentId, reasoning, role, model, meter });
 
     return {
       agentId,
       reasoning,
       branch: worktree.branch,
       model,
+      meter,
       close(): boolean {
         liveSessions.delete(sessionId);
+        // Usage is already in the log per turn (#116) — nothing to flush on close; just
+        // release the seat. This also means a teardown that skips close (a reload, #126)
+        // loses at most the in-flight turn, not the whole session's accounting.
+        usageSeat?.close();
         delegationHost.close();
         agent.close();
         rmSync(configPath, { force: true });
@@ -254,7 +306,8 @@ function provisionSession(args: {
     };
   } catch (error) {
     // Unwind the partial allocation so a failed provision leaves nothing behind:
-    // delete any written MCP config and remove the just-created worktree.
+    // release the usage seat, delete any written MCP config, remove the worktree.
+    usageSeat?.close();
     if (mcpConfigPath) rmSync(mcpConfigPath, { force: true });
     worktree.remove();
     throw error;
@@ -310,6 +363,7 @@ async function startSession(
     reasoning: provisioned.reasoning,
     agentLabel: role,
     model: provisioned.model,
+    meter: provisioned.meter,
     onDispose: () => {
       const captured = provisioned.close();
       channel.close();
@@ -392,6 +446,8 @@ function openSessionPanel(
     agentLabel?: string;
     /** The model this session's agent runs on, shown in the header (#119); undefined → "default". */
     model?: string;
+    /** This session's token meter (#116); its running total (incl. sub-agents) shows in the header. */
+    meter?: UsageMeter;
   } = {},
 ): void {
   const executorAttached = options.executorAttached ?? false;
@@ -434,6 +490,14 @@ function openSessionPanel(
     });
   });
 
+  // Live token tally (#116): the session's meter pushes its running total (this
+  // session + rolled-up sub-agents) into the header as it climbs. No-op for a
+  // viewer-only panel (no meter); a replayed ended session instead picks up its
+  // final tally from the persisted `usage` message handled below.
+  const unsubscribeUsage = options.meter?.subscribe((total) => {
+    void panel.webview.postMessage({ kind: 'usage', text: formatUsage(total) });
+  });
+
   // Attach to the session: replay history, then stream live messages.
   const channel = store.open(sessionId, { replay: true });
   // Pending interactions by request id, so a decision from the webview (which
@@ -449,12 +513,28 @@ function openSessionPanel(
   // extras are queued behind the in-flight turn — the count drives a "queued" cue
   // so a message typed mid-turn doesn't look ignored.
   let outstanding = 0;
+  // Running sum of replayed per-turn usage (#116), for a replayed/ended session that
+  // has no live meter to drive the header. A live session ignores these (its meter,
+  // which already counts the same turns plus sub-agents, owns the header).
+  let replayedUsage = ZERO_USAGE;
   const participant = channel.join('vscode-view', 'planner', (message) => {
     // Delegation control messages (#93) are plumbing between the executor's MCP
     // server and the in-host delegation manager — not conversation. Skip them so
     // they don't render as noisy turns or toggle the working indicator; the
     // delegate's *report* arrives as an ordinary message and renders normally.
     if (message.type === DELEGATION_REQUEST || message.type === DELEGATION_RESPONSE) return;
+    // A persisted per-turn token tally (#116). For a live session the meter already
+    // drives the header (and counts these turns plus rolled-up sub-agents), so skip
+    // them to avoid clobbering it with a single turn's delta. For a replayed/ended
+    // session there's no meter, so sum the deltas to reconstruct the running total.
+    // Never rendered as a conversation turn either way.
+    if (message.type === USAGE_MESSAGE) {
+      if (!options.meter) {
+        replayedUsage = addUsage(replayedUsage, message.payload as Usage);
+        void panel.webview.postMessage({ kind: 'usage', text: formatUsage(replayedUsage) });
+      }
+      return;
+    }
     // An interaction request means the executor is blocked waiting on us — render
     // its card and keep the "working" indicator on (it hasn't replied yet).
     if (message.type === INTERACTION_REQUEST) {
@@ -599,6 +679,7 @@ function openSessionPanel(
 
   panel.onDidDispose(() => {
     unsubscribeReasoning?.();
+    unsubscribeUsage?.();
     participant.close();
     channel.close();
     options.onDispose?.();
@@ -637,6 +718,7 @@ function renderHtml(
                     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #session-header .sh-name { font-weight: 600; }
   #session-header .sh-model { opacity: 0.85; }
+  #session-header .sh-usage { opacity: 0.85; }
   #content { flex: 1; overflow-y: auto; padding: 0 1rem; }
   .turn { padding: 0.4rem 0.6rem; margin: 0.45rem 0; border-radius: 4px; }
   /* An executor-failure turn (#89): a theme warning colour so it reads as a problem. */
@@ -708,7 +790,7 @@ function renderHtml(
 </style>
 </head>
 <body>
-<div id="session-header"><span class="sh-name">${sessionId}</span> · ${agentLabel} · <span class="sh-model">model: ${model ?? 'default'}</span></div>
+<div id="session-header"><span class="sh-name">${sessionId}</span> · ${agentLabel} · <span class="sh-model">model: ${model ?? 'default'}</span><span class="sh-usage" id="usage"></span></div>
 <div id="content"></div>
 <div id="working" hidden>
   <div id="working-header">● ${agentLabel} is working…</div>
