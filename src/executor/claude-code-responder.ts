@@ -103,6 +103,8 @@ export interface ClaudeRunArgs {
   readonly permissionPromptTool?: string;
   /** Path to the MCP config defining the server that backs {@link permissionPromptTool}. */
   readonly mcpConfigPath?: string;
+  /** The serialized `--settings` policy (default {@link EXECUTOR_PERMISSIONS}); the orchestrator passes a push-capable variant (#137). */
+  readonly settings?: string;
   /**
    * Live seam (#109/#110): called with a block-level {@link ReasoningDigest}
    * **snapshot** each time the trail gains a visible entry as the agent works (a
@@ -315,6 +317,32 @@ export const EXECUTOR_PERMISSION_POLICY = {
  */
 export const EXECUTOR_PERMISSIONS = JSON.stringify(EXECUTOR_PERMISSION_POLICY);
 
+/**
+ * The serialized `--settings` policy for an agent of `role`. Executors and evaluators
+ * get the base {@link EXECUTOR_PERMISSIONS}; the **orchestrator** additionally may
+ * `git push` and run `gh` so it can integrate a delegate's work by pushing the branch
+ * and opening a PR (#137) — it still can't force-push or hard-reset (the architect
+ * reviews and merges; that merge is the ratification, #71). Everything else (the
+ * `Agent` deny #131, auto-memory off #132, CLAUDE.md excludes #121) is inherited.
+ */
+export function permissionPolicyFor(role: string): string {
+  if (role !== 'orchestrator') return EXECUTOR_PERMISSIONS;
+  const base = EXECUTOR_PERMISSION_POLICY;
+  return JSON.stringify({
+    ...base,
+    permissions: {
+      ...base.permissions,
+      // Lift the blanket git-push deny (so a normal push is allowed) but keep
+      // force-push off-limits — the orchestrator proposes via a PR, never rewrites history.
+      deny: [
+        ...base.permissions.deny.filter((rule) => rule !== 'Bash(git push *)'),
+        'Bash(git push --force *)',
+        'Bash(git push -f *)',
+      ],
+    },
+  });
+}
+
 /** Build the `claude` argv for a one-shot run from the task prompt and run options. */
 export function buildClaudeArgs(prompt: string, options: ClaudeRunArgs = {}): string[] {
   // `--output-format stream-json` (which requires `--verbose`) emits the run as
@@ -336,7 +364,7 @@ export function buildClaudeArgs(prompt: string, options: ClaudeRunArgs = {}): st
     '--verbose',
     '--include-partial-messages',
     '--settings',
-    EXECUTOR_PERMISSIONS,
+    options.settings ?? EXECUTOR_PERMISSIONS,
   ];
   if (options.model) args.push('--model', options.model);
   if (options.appendSystemPrompt) args.push('--append-system-prompt', options.appendSystemPrompt);
@@ -535,6 +563,8 @@ export interface ClaudeCodeResponderOptions {
    */
   readonly permissionPromptTool?: string;
   readonly mcpConfigPath?: string;
+  /** The serialized `--settings` policy (default {@link EXECUTOR_PERMISSIONS}); pass {@link permissionPolicyFor}(role) so the orchestrator may push + PR (#137). */
+  readonly settings?: string;
   /**
    * The model this responder's runs use (`--model`); omit to inherit the user's
    * default. Set per role so executors/evaluators can run a cheaper tier (#119).
@@ -596,6 +626,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     claudeSessionId = randomUUID(),
     permissionPromptTool,
     mcpConfigPath,
+    settings,
     model,
     run = runClaudeCodeCli,
     onReasoningChange,
@@ -636,6 +667,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
         resume: useResume,
         permissionPromptTool,
         mcpConfigPath,
+        settings,
         model,
         onReasoningChange,
         onUsage,

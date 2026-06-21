@@ -8,6 +8,7 @@ import {
   extractUsage,
   addUsage,
   claudeSessionIdFor,
+  permissionPolicyFor,
   parseStreamEvent,
   createStreamReader,
   DEFAULT_EXECUTOR_ROLE,
@@ -539,6 +540,18 @@ describe('buildClaudeArgs', () => {
   it('disables built-in auto-memory so a spawned agent does not write notes that orphan with its worktree (#132)', () => {
     const policy = JSON.parse(EXECUTOR_PERMISSIONS) as { autoMemoryEnabled: boolean };
     expect(policy.autoMemoryEnabled).toBe(false);
+  });
+
+  it('lets the orchestrator git push (to open PRs) but not force-push; executors keep the no-push base (#137)', () => {
+    const deny = (role: string) => (JSON.parse(permissionPolicyFor(role)) as { permissions: { deny: string[] } }).permissions.deny;
+    // Executor/evaluator: the base policy — blanket git push denied (they hand off, never push).
+    expect(permissionPolicyFor('executor')).toBe(EXECUTOR_PERMISSIONS);
+    expect(deny('executor')).toContain('Bash(git push *)');
+    // Orchestrator: normal push allowed (the blanket deny lifted), force-push still denied.
+    expect(deny('orchestrator')).not.toContain('Bash(git push *)');
+    expect(deny('orchestrator')).toEqual(expect.arrayContaining(['Bash(git push --force *)', 'Bash(git push -f *)']));
+    // It keeps the rest of the base floor (Agent #131, foot-guns).
+    expect(deny('orchestrator')).toEqual(expect.arrayContaining(['Agent', 'Bash(rm -rf *)', 'Bash(git reset --hard *)']));
   });
 
   it('always spawns with the exact base policy — learned "Always" rules are not merged here (#70)', () => {
