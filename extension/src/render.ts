@@ -72,8 +72,14 @@ export function hueForSender(from: string): number {
   return hash;
 }
 
-/** Render one channel message as an attributed transcript turn (Markdown + Mermaid). */
-export function renderMessage(message: Message): string {
+/**
+ * Render one channel message as an attributed transcript turn (Markdown + Mermaid).
+ * `model` (when known) is the model the sending agent ran on (#119) — shown in the
+ * turn header so a mixed-model view (e.g. an orchestrator's own Opus turns next to a
+ * bridged Sonnet executor report) tells you, per response, what produced it.
+ */
+export function renderMessage(message: Message, model?: string): string {
+  const modelTag = model ? ` · ${escapeHtml(model)}` : '';
   // The durable reasoning digest (#110) is the persistent counterpart to #109's
   // live trail — rendered as its own collapsed, expandable element, available on
   // replay and to a later log-reader, distinct from the clean result below it.
@@ -90,7 +96,7 @@ export function renderMessage(message: Message): string {
   // re-login card instead; otherwise fall back to the plain #89 error turn.
   if (message.type === 'error') {
     if (isAuthError(body)) return renderAuthErrorCard(message, body);
-    return `<div class="turn error"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}</div>${renderMarkdown(body)}</div>`;
+    return `<div class="turn error"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}${modelTag}</div>${renderMarkdown(body)}</div>`;
   }
   // Composed turns preserve their newlines (#95); agent turns (executor/evaluator)
   // keep soft-break Markdown semantics. Error turns above are always agent
@@ -109,7 +115,7 @@ export function renderMessage(message: Message): string {
   // scaling to any number of participants.
   const hue = hueForSender(message.from);
   const style = `border-inline-start:3px solid hsl(${hue} 70% 55%);background:hsl(${hue} 70% 55% / 0.08)`;
-  return `<div class="turn" style="${style}"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}</div>${renderBody(body)}</div>`;
+  return `<div class="turn" style="${style}"><div class="from">${escapeHtml(message.from)} · ${escapeHtml(message.type)}${modelTag}</div>${renderBody(body)}</div>`;
 }
 
 /**

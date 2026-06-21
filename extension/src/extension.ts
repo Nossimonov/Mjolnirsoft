@@ -47,6 +47,8 @@ interface LiveSession {
   readonly reasoning: ReasoningStream;
   /** The session's role, for an apt "working" label in an attached panel. */
   readonly role: AgentRole;
+  /** The model this session's agent runs on (#119), for the attached panel's header. */
+  readonly model?: string;
 }
 type LiveSessions = Map<string, LiveSession>;
 
@@ -80,11 +82,12 @@ export function activate(context: vscode.ExtensionContext): void {
     // Attach to the live session if one is running (its reasoning + agent seat +
     // role label), otherwise open a viewer-only replay (#114).
     const live = liveSessions.get(pick);
-    openSessionPanel(context, store, pick, folder.uri.fsPath, {
+    openSessionPanel(context, store, pick, folder.uri.fsPath, liveSessions, {
       executorAttached: live !== undefined,
       executorId: live?.agentId,
       reasoning: live?.reasoning,
       agentLabel: live?.role,
+      model: live?.model,
     });
   });
 
@@ -111,6 +114,8 @@ interface ProvisionedSession {
   readonly reasoning: ReasoningStream;
   /** The branch holding the session's work, for the developer to review. */
   readonly branch: string;
+  /** The model the agent runs on (#119); undefined inherits the user's default. */
+  readonly model?: string;
   /** Tear down the agent + delegation host + MCP config, capture and drop the worktree. Returns whether anything was committed. Does NOT close the channel (the caller owns it). */
   close(): boolean;
 }
@@ -144,6 +149,7 @@ function provisionSession(args: {
 }): ProvisionedSession {
   const { context, folder, store, sessionId, role, channel, liveSessions } = args;
   const repoDir = folder.uri.fsPath;
+  const model = modelForRole(role); // the per-role model this agent runs on (#119)
 
   // An isolated git worktree on its own branch, so the session edits the real repo
   // without touching the developer's working tree. Base it on the freshest
@@ -187,6 +193,7 @@ function provisionSession(args: {
         appendSystemPrompt: composeAgentInstructions(role),
         permissionPromptTool: PERMISSION_PROMPT_TOOL,
         mcpConfigPath,
+        model,
         onReasoningChange: reasoning.emit,
       }),
       role,
@@ -220,17 +227,19 @@ function provisionSession(args: {
         createClaudeCodeResponder({
           workdir: worktree.path,
           appendSystemPrompt: composeAgentInstructions(delegateRole),
+          model: modelForRole(delegateRole),
           // claudeSessionId defaults to a fresh UUID — a delegate's *channel* id is
           // not a valid `--session-id`, and a critique delegate is short-lived anyway.
         }),
     });
 
-    liveSessions.set(sessionId, { agentId, reasoning, role });
+    liveSessions.set(sessionId, { agentId, reasoning, role, model });
 
     return {
       agentId,
       reasoning,
       branch: worktree.branch,
+      model,
       close(): boolean {
         liveSessions.delete(sessionId);
         delegationHost.close();
@@ -295,11 +304,12 @@ async function startSession(
     return;
   }
 
-  openSessionPanel(context, store, sessionId, folder.uri.fsPath, {
+  openSessionPanel(context, store, sessionId, folder.uri.fsPath, liveSessions, {
     executorAttached: true,
     executorId: provisioned.agentId,
     reasoning: provisioned.reasoning,
     agentLabel: role,
+    model: provisioned.model,
     onDispose: () => {
       const captured = provisioned.close();
       channel.close();
@@ -324,6 +334,24 @@ function article(role: AgentRole): string {
 /** Capitalize a role for a user-facing message ("Orchestrator", "Executor"). */
 function capitalize(role: AgentRole): string {
   return role.charAt(0).toUpperCase() + role.slice(1);
+}
+
+/**
+ * The model to run an agent of `role` on (#119), passed to `--model`. Defaults live
+ * in code — cheaper tier (`sonnet`) for the mechanical roles, *empty* for the
+ * orchestrator so it inherits the user's own Claude Code default (it's the design
+ * agent). A user can still override per role in `settings.json`
+ * (`mjolnirsoft.model.<role>` = an alias/id, or empty to inherit). This is read as a
+ * plain setting rather than a contributed configuration: a `package.json` manifest
+ * change isn't picked up by the dev-host's window-reload/restart (only dist changes
+ * are), so contributing a settings-UI entry would silently fail to load — deferred
+ * to a proper versioned release. An empty value means "no `--model`" (inherit).
+ */
+function modelForRole(role: AgentRole): string | undefined {
+  const DEFAULTS: Record<AgentRole, string> = { executor: 'sonnet', evaluator: 'sonnet', orchestrator: '' };
+  const configured = vscode.workspace.getConfiguration('mjolnirsoft.model').get<string>(role);
+  const value = (configured ?? DEFAULTS[role]).trim();
+  return value || undefined;
 }
 
 export function deactivate(): void {}
@@ -354,6 +382,7 @@ function openSessionPanel(
   store: SessionStore,
   sessionId: string,
   projectDir: string,
+  liveSessions: LiveSessions,
   options: {
     onDispose?: () => void;
     executorAttached?: boolean;
@@ -361,6 +390,8 @@ function openSessionPanel(
     reasoning?: ReasoningStream;
     /** What to call the working agent in the indicator (e.g. "orchestrator"); default "executor". */
     agentLabel?: string;
+    /** The model this session's agent runs on, shown in the header (#119); undefined → "default". */
+    model?: string;
   } = {},
 ): void {
   const executorAttached = options.executorAttached ?? false;
@@ -369,6 +400,12 @@ function openSessionPanel(
   // messages advance the queue/indicator — a bridged delegate report (#93) is
   // someone else's id, so it renders but never counts as a turn completion (#100).
   const executorId = options.executorId;
+  // The model a sender ran on (#119), for the per-response turn header: this
+  // session's own agent uses the session model; a bridged delegate report is looked
+  // up by its id in the live registry. So a mixed-model view (the orchestrator's own
+  // Opus turns next to a bridged Sonnet executor report) is legible per response.
+  const modelFor = (from: string): string | undefined =>
+    from === executorId ? options.model : liveSessions.get(from)?.model;
   const panel = vscode.window.createWebviewPanel(
     'mjolnirsoftSessionView',
     `Session: ${sessionId}`,
@@ -382,7 +419,7 @@ function openSessionPanel(
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')],
     },
   );
-  panel.webview.html = renderHtml(panel.webview, context.extensionUri, agentLabel);
+  panel.webview.html = renderHtml(panel.webview, context.extensionUri, sessionId, agentLabel, options.model);
 
   // Forward the executor's live reasoning (#108) to the webview ephemerally: each
   // block-level snapshot is rendered with the *same* renderer the durable digest
@@ -434,16 +471,16 @@ function openSessionPanel(
         // Live: the box is already on screen from the snapshots. Render it once more
         // collapsed (final counts) to replace the open in-progress box, then stop
         // tracking it — the same box settles in place; nothing vanishes or swaps.
-        void panel.webview.postMessage({ kind: 'reasoning', html: renderMessage(message) });
+        void panel.webview.postMessage({ kind: 'reasoning', html: renderMessage(message, modelFor(message.from)) });
         void panel.webview.postMessage({ kind: 'reasoning-settle' });
       } else {
         // Replay/viewer: no live box existed (the stream is per live session), so
         // render the digest as its own collapsed box in the conversation.
-        void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
+        void panel.webview.postMessage({ kind: 'message', html: renderMessage(message, modelFor(message.from)) });
       }
       return;
     }
-    void panel.webview.postMessage({ kind: 'message', html: renderMessage(message) });
+    void panel.webview.postMessage({ kind: 'message', html: renderMessage(message, modelFor(message.from)) });
     // Only the executor's own reply settles a sent turn. A bridged delegate
     // report (#93) — e.g. an evaluator's finding — renders above, but the executor
     // is still mid-turn (about to react to it), so it must not advance the queue or
@@ -568,7 +605,13 @@ function openSessionPanel(
   });
 }
 
-function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri, agentLabel: string): string {
+function renderHtml(
+  webview: vscode.Webview,
+  extensionUri: vscode.Uri,
+  sessionId: string,
+  agentLabel: string,
+  model: string | undefined,
+): string {
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'));
   const nonce = makeNonce();
   const csp = [
@@ -588,6 +631,12 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri, agentLabe
 <style>
   html, body { height: 100%; margin: 0; }
   body { font-family: var(--vscode-font-family); display: flex; flex-direction: column; }
+  /* Persistent session header (#119): the session name and the model this agent
+     runs on, at the top where users look — not a transient toast. */
+  #session-header { padding: 0.4rem 1rem; font-size: 0.85em; border-bottom: 1px solid var(--vscode-panel-border);
+                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #session-header .sh-name { font-weight: 600; }
+  #session-header .sh-model { opacity: 0.85; }
   #content { flex: 1; overflow-y: auto; padding: 0 1rem; }
   .turn { padding: 0.4rem 0.6rem; margin: 0.45rem 0; border-radius: 4px; }
   /* An executor-failure turn (#89): a theme warning colour so it reads as a problem. */
@@ -659,6 +708,7 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri, agentLabe
 </style>
 </head>
 <body>
+<div id="session-header"><span class="sh-name">${sessionId}</span> · ${agentLabel} · <span class="sh-model">model: ${model ?? 'default'}</span></div>
 <div id="content"></div>
 <div id="working" hidden>
   <div id="working-header">● ${agentLabel} is working…</div>

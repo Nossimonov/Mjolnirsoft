@@ -53,6 +53,13 @@ export type ViewEvent =
 
 /** Options shaping a one-shot `claude` run beyond the task prompt and cwd. */
 export interface ClaudeRunArgs {
+  /**
+   * The model to run, passed to `--model` (e.g. `sonnet`, `opus`, `haiku`, or a
+   * full id). Omit to inherit the user's default Claude Code model (#119). Set
+   * per role so the mechanical roles (executor/evaluator) can run a cheaper tier
+   * than the orchestrator, which stays on the user's default (the design agent).
+   */
+  readonly model?: string;
   /** Executor-role instructions appended to Claude's system prompt. */
   readonly appendSystemPrompt?: string;
   /** The Claude session UUID to pin, so an executor's turns continue one conversation. */
@@ -276,6 +283,7 @@ export function buildClaudeArgs(prompt: string, options: ClaudeRunArgs = {}): st
     '--settings',
     EXECUTOR_PERMISSIONS,
   ];
+  if (options.model) args.push('--model', options.model);
   if (options.appendSystemPrompt) args.push('--append-system-prompt', options.appendSystemPrompt);
   if (options.sessionId) args.push(options.resume ? '--resume' : '--session-id', options.sessionId);
   if (options.permissionPromptTool) args.push('--permission-prompt-tool', options.permissionPromptTool);
@@ -346,16 +354,14 @@ export function interpretClaudeResult(stdout: string, stderr: string, code: numb
  */
 export const runClaudeCodeCli: RunClaudeCode = (
   prompt,
-  { cwd, appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath, onReasoningChange, onDigest },
+  options,
 ) =>
   new Promise((resolve, reject) => {
-    const args = buildClaudeArgs(prompt, {
-      appendSystemPrompt,
-      sessionId,
-      resume,
-      permissionPromptTool,
-      mcpConfigPath,
-    });
+    const { cwd, onReasoningChange, onDigest } = options;
+    // Pass the whole options object through: `buildClaudeArgs` reads only the
+    // flag-relevant fields and ignores `cwd`/the callbacks, so a CLI flag can't be
+    // silently dropped by hand-listing fields here (that dropped `--model`, #119).
+    const args = buildClaudeArgs(prompt, options);
     const child = spawn(resolveClaudeBin(), args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -445,6 +451,11 @@ export interface ClaudeCodeResponderOptions {
    */
   readonly permissionPromptTool?: string;
   readonly mcpConfigPath?: string;
+  /**
+   * The model this responder's runs use (`--model`); omit to inherit the user's
+   * default. Set per role so executors/evaluators can run a cheaper tier (#119).
+   */
+  readonly model?: string;
   /** Override how Claude Code is run (tests inject a fake; default spawns the CLI). */
   readonly run?: RunClaudeCode;
   /**
@@ -472,6 +483,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     claudeSessionId = randomUUID(),
     permissionPromptTool,
     mcpConfigPath,
+    model,
     run = runClaudeCodeCli,
     onReasoningChange,
   } = options;
@@ -515,6 +527,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
           resume: started,
           permissionPromptTool,
           mcpConfigPath,
+          model,
           onReasoningChange,
           onDigest: (d) => {
             digest = d;

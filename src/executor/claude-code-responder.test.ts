@@ -464,6 +464,12 @@ describe('buildClaudeArgs', () => {
     expect(buildClaudeArgs('go', { mcpConfigPath: '/cfg.json' })).not.toContain('--bare');
   });
 
+  it('passes --model per role when set, and inherits the default when omitted (#119)', () => {
+    const args = buildClaudeArgs('go', { model: 'sonnet' });
+    expect(args[args.indexOf('--model') + 1]).toBe('sonnet');
+    expect(buildClaudeArgs('go')).not.toContain('--model'); // omitted → user's default model
+  });
+
   it('applies the executor permission policy — commands allowed, foot-guns denied', () => {
     const policy = JSON.parse(EXECUTOR_PERMISSIONS) as {
       permissions: { allow: string[]; deny: string[] };
