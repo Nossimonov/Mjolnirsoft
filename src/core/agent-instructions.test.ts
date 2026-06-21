@@ -37,6 +37,28 @@ describe('composeAgentInstructions (#57)', () => {
     );
   });
 
+  it('puts the project-bookkeeping boundary in the shared core, so every role is kept off it (#121)', () => {
+    // The orchestrator filed a spurious issue by enacting the project's tracking
+    // protocol; this boundary (shared by all roles) keeps any subordinate agent off
+    // change-tracking/release ceremony — that's the architect's, surfaced upward.
+    expect(SHARED_CORE).toContain('Project bookkeeping');
+    expect(SHARED_CORE).toContain('belongs to the architect, not a subordinate agent');
+    expect(SHARED_CORE).toContain('the architect tracks it');
+    expect(composeAgentInstructions('orchestrator')).toContain('Project bookkeeping');
+    expect(composeAgentInstructions('executor')).toContain('Project bookkeeping');
+  });
+
+  it('makes the executor self-sufficient without CLAUDE.md: test the change, stay in scope, route discoveries up (#121)', () => {
+    // Spawned with --bare (no project CLAUDE.md), the executor's layer must carry
+    // the slice it needs itself: cover its change with a test, and treat any
+    // out-of-scope discovery as something to surface up — never self-file issues or
+    // run project tracking (the ceremony that #121 removes).
+    expect(EXECUTOR_OPERATIONS).toContain('Cover your change with a test');
+    expect(EXECUTOR_OPERATIONS).toContain('Stay in the delegated scope');
+    expect(EXECUTOR_OPERATIONS).toContain('do not file issues');
+    expect(EXECUTOR_OPERATIONS).toContain('Tracking happens above you');
+  });
+
   it('composes the orchestrator role from the same layers — plan, delegate, relay (#114)', () => {
     const composed = composeAgentInstructions('orchestrator');
     // Same shared core, then the orchestrator's own insert and operational layers,
