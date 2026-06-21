@@ -236,6 +236,18 @@ describe('hueForSender', () => {
   });
 });
 
+describe('renderMessage — per-response model (#119)', () => {
+  const msg: Message = { from: 'sess-executor', role: 'executor', type: 'result', payload: 'done' };
+  it('shows the model in the turn header when given (so a mixed-model view is legible per response)', () => {
+    expect(renderMessage(msg, 'sonnet')).toContain('result · sonnet');
+  });
+  it('omits the model tag when the model is unknown', () => {
+    const html = renderMessage(msg);
+    expect(html).toContain('result');
+    expect(html).not.toContain(' · sonnet');
+  });
+});
+
 describe('renderMessage — reasoning digest (#110)', () => {
   const digestMessage = (entries: unknown[]): Message => ({
     from: 'demo-executor',
