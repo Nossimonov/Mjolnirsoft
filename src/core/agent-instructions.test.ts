@@ -74,22 +74,23 @@ describe('composeAgentInstructions (#57)', () => {
     expect(EXECUTOR_OPERATIONS).toContain('Tracking happens above you');
   });
 
-  it('composes the orchestrator role from the same layers — plan, delegate, relay (#114)', () => {
+  it('composes the orchestrator role from the same layers — plan, delegate, review, integrate (#114/#137)', () => {
     const composed = composeAgentInstructions('orchestrator');
     // Same shared core, then the orchestrator's own insert and operational layers,
     // in the same general → specific order joined by blank lines.
     expect(composed).toBe(`${SHARED_CORE}\n\n${ORCHESTRATOR_INSERT}\n\n${ORCHESTRATOR_OPERATIONS}`);
     expect(composed.indexOf(SHARED_CORE)).toBe(0);
-    // The insert carries the standing rules: delegate one task at a time, relay a
-    // distilled hand-off, route decisions up rather than settling them.
+    // The insert carries the standing rules: delegate one task at a time, integrate
+    // the result via a PR, route decisions up rather than settling them.
     expect(ORCHESTRATOR_INSERT).toContain('delegate one task at a time');
-    expect(ORCHESTRATOR_INSERT).toContain('relay a distilled hand-off');
+    expect(ORCHESTRATOR_INSERT).toContain('pull request');
     expect(ORCHESTRATOR_INSERT).toContain('Route every design and permission decision up to the architect');
     // Operational guidance is a distinct layer from the insert.
     expect(ORCHESTRATOR_OPERATIONS).not.toContain(ORCHESTRATOR_INSERT);
-    // Rung-1 scope: it coordinates and relays — it does NOT review or commit the
-    // delegate's work (later rungs); the architect reviews the branch and commits.
-    expect(ORCHESTRATOR_OPERATIONS).toContain('the architect reviews the resulting branch and commits it');
+    // #137: the orchestrator reviews the delegate's branch and integrates it by pushing
+    // + opening a PR (the architect's merge is the ratification), or refines via #111.
+    expect(ORCHESTRATOR_OPERATIONS).toContain('open a pull request');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('the architect reviews and merges');
   });
 
   it('composes the evaluator role from the same layers — fresh eyes, critique-only (#93)', () => {

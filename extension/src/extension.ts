@@ -7,7 +7,7 @@ import { SessionStore } from '../../src/core/session-store.ts';
 import { WorktreeManager, currentRemoteBase } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runExecutor } from '../../src/executor/executor-runtime.ts';
-import { createClaudeCodeResponder, resolveClaudeBin, addUsage, ZERO_USAGE, USAGE_MESSAGE, claudeSessionIdFor, type Usage } from '../../src/executor/claude-code-responder.ts';
+import { createClaudeCodeResponder, resolveClaudeBin, addUsage, ZERO_USAGE, USAGE_MESSAGE, claudeSessionIdFor, permissionPolicyFor, type Usage } from '../../src/executor/claude-code-responder.ts';
 import { createReasoningStream, type ReasoningStream } from '../../src/executor/reasoning-stream.ts';
 import { createUsageMeter, type UsageMeter } from '../../src/executor/usage-meter.ts';
 import { createDelegationHost } from '../../src/executor/delegation-host.ts';
@@ -334,6 +334,7 @@ function provisionSession(args: {
         resume: resuming, // first turn --resume the interrupted conversation rather than create (#126)
         permissionPromptTool: PERMISSION_PROMPT_TOOL,
         mcpConfigPath,
+        settings: permissionPolicyFor(role), // the orchestrator may push + open PRs (#137); executors can't
         model,
         onReasoningChange: reasoning.emit,
         onUsage: recordTurnUsage, // accumulate the running total *and* log this turn (#116)
@@ -369,6 +370,7 @@ function provisionSession(args: {
         createClaudeCodeResponder({
           workdir: workspace.path,
           appendSystemPrompt: composeAgentInstructions(delegateRole),
+          settings: permissionPolicyFor(delegateRole), // a critique delegate gets its role's policy (#137)
           model: modelForRole(delegateRole),
           onUsage: meter.add, // a shared-worktree critique delegate's usage rolls into this session (#116)
           // claudeSessionId defaults to a fresh UUID — a delegate's *channel* id is
