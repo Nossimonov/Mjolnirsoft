@@ -31,6 +31,11 @@ const PERMISSION_PROMPT_TOOL = 'mcp__perm__approve';
 // session names forbids spaces/'+', so this can never collide with a real id.
 const START_NEW_SESSION = '+ Start a new executor session…';
 
+// The single orchestrator's fixed session id (#123). There is only ever one
+// orchestrator per workspace, so it's opened directly under this id — no name prompt —
+// and re-opening attaches to it (if live) or resumes its one conversation.
+const ORCHESTRATOR_ID = 'orchestrator';
+
 // USAGE_MESSAGE (#116) is the channel message type carrying one turn's usage. It's
 // posted per turn as the turn completes (not on close), so a long-lived session's
 // usage lands in the durable log continuously and survives teardown (#126), and each
@@ -146,6 +151,12 @@ export function activate(context: vscode.ExtensionContext): void {
       await startSession(context, folder, store, 'executor', liveSessions);
       return;
     }
+    // The orchestrator is the singleton front door (#123): attach if live, else resume
+    // its one conversation — it has no worktree, so the worktree-resume path below doesn't apply.
+    if (pick === ORCHESTRATOR_ID) {
+      openOrchestrator(context, folder, store, liveSessions);
+      return;
+    }
 
     // Attach to the live session if one is running (its reasoning + agent seat +
     // role label, #114).
@@ -180,10 +191,10 @@ export function activate(context: vscode.ExtensionContext): void {
     await startSession(context, folder, storeFor(folder), 'executor', liveSessions);
   });
 
-  const startOrchestrator = vscode.commands.registerCommand('mjolnirsoft.startOrchestratorSession', async () => {
+  const startOrchestrator = vscode.commands.registerCommand('mjolnirsoft.startOrchestratorSession', () => {
     const folder = requireFolder();
     if (!folder) return;
-    await startSession(context, folder, storeFor(folder), 'orchestrator', liveSessions);
+    openOrchestrator(context, folder, storeFor(folder), liveSessions);
   });
 
   context.subscriptions.push(openView, startExecutor, startOrchestrator);
@@ -195,13 +206,13 @@ interface ProvisionedSession {
   readonly agentId: string;
   /** The session's live reasoning stream (forward it to a panel that attaches). */
   readonly reasoning: ReasoningStream;
-  /** The branch holding the session's work, for the developer to review. */
-  readonly branch: string;
+  /** The branch holding the session's work, for the developer to review; undefined for the worktree-less orchestrator (#123). */
+  readonly branch?: string;
   /** The model the agent runs on (#119); undefined inherits the user's default. */
   readonly model?: string;
   /** This session's token meter (#116): its own usage plus every sub-agent it spawned. */
   readonly meter: UsageMeter;
-  /** Tear down the agent + delegation host + MCP config, capture and drop the worktree. Returns whether anything was committed. Does NOT close the channel (the caller owns it). */
+  /** Tear down the agent + delegation host + MCP config, capture and drop the workspace. Returns whether anything was committed. Does NOT close the channel (the caller owns it). */
   close(): boolean;
 }
 
@@ -240,20 +251,34 @@ function provisionSession(args: {
   const meter = createUsageMeter(args.onUsage); // accumulate token usage; bubble to the spawner (#116)
   const claudeSessionId = claudeSessionIdFor(sessionId); // stable, so a reload can --resume (#126)
 
-  // An isolated git worktree on its own branch, so the session edits the real repo
-  // without touching the developer's working tree. If a worktree already exists for
-  // this id, the session was interrupted by a reload (a clean close removes it), so
-  // **reattach** to it and resume its claude conversation rather than creating —
-  // recovering the in-flight work the host teardown left behind (#126). Otherwise
-  // create fresh, based on the freshest origin/main (not local HEAD) so it starts
-  // from the latest merged code (#83). A create failure (e.g. the branch already
-  // exists) throws before anything else is allocated, so it propagates cleanly to the
-  // caller (the command surfaces it; the delegation host answers the spawn with an error).
-  const worktrees = new WorktreeManager({ repoDir });
-  const resuming = worktrees.exists(sessionId);
-  const worktree = resuming
-    ? worktrees.open(sessionId)
-    : new WorktreeManager({ repoDir, base: currentRemoteBase(repoDir) }).create(sessionId);
+  // Where the agent works. An executor (and any worktree role) gets an isolated git
+  // worktree so it edits the repo without touching the developer's working tree; the
+  // **orchestrator** coordinates out of the *main repo* with no worktree (#123) — it
+  // plans/delegates/relays and (by the architect's decision) writes the repo like the
+  // architect's own session, so a separate branch is only friction. `workspace`
+  // abstracts the two: a real worktree, or the bare repo with no-op capture/teardown.
+  const isOrchestrator = role === 'orchestrator';
+  let workspace: { path: string; branch?: string; commit(message: string): boolean; remove(): void };
+  let resuming: boolean;
+  if (isOrchestrator) {
+    // The singleton orchestrator always continues its one conversation: resume its
+    // pinned claude session (the #126 not-found fallback covers the very first launch).
+    // No worktree to create, capture, or remove; it works out of the main repo.
+    resuming = true;
+    workspace = { path: repoDir, commit: () => false, remove: () => {} };
+  } else {
+    // If a worktree already exists for this id, the session was interrupted by a reload
+    // (a clean close removes it), so **reattach** + resume its conversation rather than
+    // creating (#126). Otherwise create fresh from the freshest origin/main (not local
+    // HEAD), so it starts from the latest merged code (#83). A create failure (e.g. the
+    // branch already exists) throws before anything else is allocated, so it propagates
+    // cleanly to the caller (the command surfaces it; the host answers the spawn with an error).
+    const worktrees = new WorktreeManager({ repoDir });
+    resuming = worktrees.exists(sessionId);
+    workspace = resuming
+      ? worktrees.open(sessionId)
+      : new WorktreeManager({ repoDir, base: currentRemoteBase(repoDir) }).create(sessionId);
+  }
   // Seed the meter with this session's own usage so far, so a resumed header continues
   // its tally instead of resetting — the durable per-turn log holds it (#116/#126).
   if (resuming) meter.add(inspectSession(store.logPath(sessionId), sessionId).usage);
@@ -274,7 +299,7 @@ function provisionSession(args: {
       permParticipantId,
       delegateParticipantId,
       repoDir,
-      worktree.path,
+      workspace.path,
     );
 
     // The live, ephemeral path for the agent's reasoning (#108): the responder pushes
@@ -303,7 +328,7 @@ function provisionSession(args: {
       channel,
       agentId,
       createClaudeCodeResponder({
-        workdir: worktree.path,
+        workdir: workspace.path,
         appendSystemPrompt: composeAgentInstructions(role),
         claudeSessionId, // stable id (#126): a brand-new session creates it; a resume resumes it
         resume: resuming, // first turn --resume the interrupted conversation rather than create (#126)
@@ -342,7 +367,7 @@ function provisionSession(args: {
       },
       createResponder: (delegateRole) =>
         createClaudeCodeResponder({
-          workdir: worktree.path,
+          workdir: workspace.path,
           appendSystemPrompt: composeAgentInstructions(delegateRole),
           model: modelForRole(delegateRole),
           onUsage: meter.add, // a shared-worktree critique delegate's usage rolls into this session (#116)
@@ -356,7 +381,7 @@ function provisionSession(args: {
     return {
       agentId,
       reasoning,
-      branch: worktree.branch,
+      branch: workspace.branch,
       model,
       meter,
       close(): boolean {
@@ -370,26 +395,54 @@ function provisionSession(args: {
         rmSync(configPath, { force: true });
         // System capture: commit whatever the session changed onto its branch, then
         // drop the worktree (the branch survives for review).
-        const captured = worktree.commit(`Mjolnir ${role} session ${sessionId}`);
-        worktree.remove();
+        const captured = workspace.commit(`Mjolnir ${role} session ${sessionId}`);
+        workspace.remove();
         return captured;
       },
     };
   } catch (error) {
     // Unwind the partial allocation so a failed provision leaves nothing behind:
-    // release the usage seat, delete any written MCP config, remove the worktree.
+    // release the usage seat, delete any written MCP config, remove the workspace.
     usageSeat?.close();
     if (mcpConfigPath) rmSync(mcpConfigPath, { force: true });
-    worktree.remove();
+    workspace.remove();
     throw error;
   }
 }
 
 /**
+ * Open *the* orchestrator (#123): the singleton coordinator, addressed by a fixed id
+ * with no name prompt. Attach to it if it's already live in this host; otherwise launch
+ * it — resuming its one conversation when it has run before. It works out of the main
+ * repo with no worktree, so there's no "ended vs interrupted" distinction: re-opening
+ * always continues it (the `resumed` flag here only picks the wording).
+ */
+function openOrchestrator(
+  context: vscode.ExtensionContext,
+  folder: vscode.WorkspaceFolder,
+  store: SessionStore,
+  liveSessions: LiveSessions,
+): void {
+  const live = liveSessions.get(ORCHESTRATOR_ID);
+  if (live) {
+    openSessionPanel(context, store, ORCHESTRATOR_ID, folder.uri.fsPath, liveSessions, {
+      executorAttached: true,
+      executorId: live.agentId,
+      reasoning: live.reasoning,
+      agentLabel: live.role,
+      model: live.model,
+      meter: live.meter,
+    });
+    return;
+  }
+  launchSession(context, folder, store, ORCHESTRATOR_ID, 'orchestrator', liveSessions, store.list().includes(ORCHESTRATOR_ID));
+}
+
+/**
  * Prompt for a name, provision an agent session of `role` in its own git worktree,
- * and open its panel. Shared by the `Start Executor Session` and
- * `Start Orchestrator Session` commands (and the front door's start-a-new path),
- * so the start-a-session logic lives in exactly one place (#114).
+ * and open its panel. Shared by the `Start Executor Session` command and the front
+ * door's start-a-new path, so the start-a-session logic lives in one place (#114).
+ * (The orchestrator is launched directly by {@link openOrchestrator}, not named here.)
  */
 async function startSession(
   context: vscode.ExtensionContext,
@@ -417,7 +470,7 @@ async function startSession(
 
 /**
  * Provision an in-host agent session on its channel and open its panel (#114),
- * wiring the panel's dispose to capture-and-drop the worktree. Shared by the start
+ * wiring the panel's dispose to capture-and-drop the workspace. Shared by the start
  * commands and the front door's **resume** path (#126): `provisionSession` reattaches
  * to an existing worktree (resuming the interrupted conversation) when one is present,
  * or creates a fresh one — so this same wiring serves both "start" and "resume".
@@ -459,17 +512,21 @@ function launchSession(
     onDispose: () => {
       const captured = provisioned.close();
       channel.close();
+      // The orchestrator has no branch (it works out of the main repo, #123), so only
+      // a worktree session mentions one.
+      const onBranch = provisioned.branch ? ` (branch ${provisioned.branch})` : '';
       void vscode.window.showInformationMessage(
         captured
-          ? `${capitalize(role)} session "${sessionId}" ended — review its work on branch ${provisioned.branch}.`
-          : `${capitalize(role)} session "${sessionId}" ended — it made no changes (branch ${provisioned.branch}).`,
+          ? `${capitalize(role)} session "${sessionId}" ended — review its work${onBranch}.`
+          : `${capitalize(role)} session "${sessionId}" ended${captured || !provisioned.branch ? '' : ' — it made no changes'}${onBranch}.`,
       );
     },
   });
+  const onBranch = provisioned.branch ? ` on branch ${provisioned.branch}` : '';
   void vscode.window.showInformationMessage(
     resumed
-      ? `${capitalize(role)} session "${sessionId}" resumed on branch ${provisioned.branch} — pick up where it left off.`
-      : `${capitalize(role)} session "${sessionId}" started on branch ${provisioned.branch} — ` +
+      ? `${capitalize(role)} session "${sessionId}" resumed${onBranch} — pick up where it left off.`
+      : `${capitalize(role)} session "${sessionId}" started${onBranch} — ` +
           `type ${role === 'orchestrator' ? 'a goal' : 'a task'} in the panel.`,
   );
 }
@@ -558,7 +615,9 @@ function openSessionPanel(
     from === executorId ? options.model : liveSessions.get(from)?.model;
   const panel = vscode.window.createWebviewPanel(
     'mjolnirsoftSessionView',
-    `Session: ${sessionId}`,
+    // The singleton orchestrator reads as itself, not "Session: orchestrator" (#123);
+    // executor sessions keep the id-tagged title.
+    sessionId === ORCHESTRATOR_ID ? 'Mjolnirsoft Orchestrator' : `Session: ${sessionId}`,
     vscode.ViewColumn.One,
     {
       enableScripts: true,
