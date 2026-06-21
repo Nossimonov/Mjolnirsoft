@@ -92,6 +92,41 @@ describe('WorktreeManager', () => {
     const mgr = new WorktreeManager({ repoDir: initRepo() });
     expect(() => mgr.prune()).not.toThrow();
   });
+
+  it('reports whether a worktree already exists — the resume signal (#126)', () => {
+    const mgr = new WorktreeManager({ repoDir: initRepo() });
+    expect(mgr.exists('s1')).toBe(false);
+    const wt = mgr.create('s1');
+    expect(mgr.exists('s1')).toBe(true);
+    wt.remove();
+    expect(mgr.exists('s1')).toBe(false); // a clean close removes it → no longer resumable
+  });
+
+  it('reattaches to an existing worktree with its uncommitted work intact, then captures it (#126)', () => {
+    const repo = initRepo();
+    const mgr = new WorktreeManager({ repoDir: repo });
+    const created = mgr.create('resumable');
+    // An interrupted session left uncommitted work in the worktree (no commit ran —
+    // the reload skipped cleanup).
+    writeFileSync(join(created.path, 'in-flight.txt'), 'partial\n');
+
+    // Resume: reattach without re-creating; the in-flight work is still there.
+    const reopened = mgr.open('resumable');
+    expect(reopened.path).toBe(created.path);
+    expect(reopened.branch).toBe('mjolnir/work/resumable');
+    expect(existsSync(join(reopened.path, 'in-flight.txt'))).toBe(true);
+
+    // The reattached handle captures + drops the worktree like any other (clean close).
+    expect(reopened.commit('captured on resume')).toBe(true);
+    expect(git(repo, 'show', `${reopened.branch}:in-flight.txt`)).toContain('partial');
+    reopened.remove();
+    expect(existsSync(reopened.path)).toBe(false);
+  });
+
+  it('open validates the id like create', () => {
+    const mgr = new WorktreeManager({ repoDir: initRepo() });
+    expect(() => mgr.open('../evil')).toThrow(/invalid worktree id/);
+  });
 });
 
 describe('currentRemoteBase (#83)', () => {

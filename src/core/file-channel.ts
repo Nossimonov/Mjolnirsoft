@@ -42,6 +42,15 @@ export class FileChannel implements Channel {
   private readonly logPath: string;
   private readonly pollIntervalMs: number;
   private offset: number;
+  /**
+   * Byte length of the log that already existed when this instance attached — the
+   * boundary between *replayed history* (before it) and *live* messages (after it).
+   * Replayed history is delivered to a participant **including its own** past
+   * messages, so a window re-attaching to a session sees its own prior turns, not
+   * just others' (a participant doesn't author its own *live* messages back to
+   * itself). Zero when not replaying, so only-live behaviour is unchanged.
+   */
+  private readonly replayBoundary: number;
   private timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(logPath: string, options: FileChannelOptions = {}) {
@@ -49,8 +58,10 @@ export class FileChannel implements Channel {
     this.pollIntervalMs = options.pollIntervalMs ?? 100;
     mkdirSync(dirname(logPath), { recursive: true });
     if (!existsSync(logPath)) writeFileSync(logPath, '');
+    const length = readFileSync(logPath).length;
     // Replay starts from the beginning; otherwise tail from the current end.
-    this.offset = options.replay ? 0 : readFileSync(logPath).length;
+    this.offset = options.replay ? 0 : length;
+    this.replayBoundary = options.replay ? length : 0;
   }
 
   join(id: string, role: Role, onMessage: MessageHandler): Participant {
@@ -77,12 +88,20 @@ export class FileChannel implements Channel {
   poll(): void {
     const bytes = readFileSync(this.logPath);
     if (bytes.length <= this.offset) return;
+    const chunkStart = this.offset;
     const fresh = bytes.subarray(this.offset);
     const lastNewline = fresh.lastIndexOf(NEWLINE);
     if (lastNewline === -1) return; // no complete line yet
     this.offset += lastNewline + 1;
 
+    // Track each line's byte position to tell replayed history (before the boundary)
+    // from live messages (after it): history is delivered to *all* participants —
+    // including the one that authored it, so a re-attaching window sees its own past
+    // turns — while a live message is never delivered back to its own author (#126).
+    let cursor = chunkStart;
     for (const line of fresh.subarray(0, lastNewline + 1).toString('utf8').split('\n')) {
+      const isReplay = cursor < this.replayBoundary;
+      cursor += Buffer.byteLength(line, 'utf8') + 1; // + the newline this line consumed
       if (line.trim() === '') continue;
       let message: Message;
       try {
@@ -91,7 +110,7 @@ export class FileChannel implements Channel {
         continue;
       }
       for (const local of this.locals.values()) {
-        if (local.id !== message.from) local.onMessage(message);
+        if (isReplay || local.id !== message.from) local.onMessage(message);
       }
     }
   }

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import type { Message } from '../core/channel.ts';
 import { composeAgentInstructions } from '../core/agent-instructions.ts';
@@ -535,6 +535,15 @@ export interface ClaudeCodeResponderOptions {
   readonly onReasoningChange?: (digest: ReasoningDigest) => void;
   /** Usage seam (#116): forwarded to each run as its `onUsage`, so the host accumulates per-turn token usage. */
   readonly onUsage?: (usage: Usage) => void;
+  /**
+   * Start already resumed (#126): the pinned {@link claudeSessionId} names a
+   * conversation that *already exists* (the session was interrupted by a reload and
+   * is being re-attached), so the very first turn must `--resume` it rather than
+   * `--session-id`-create it. Defaults to `false` (a brand-new session). Pair with a
+   * **stable** `claudeSessionId` (see {@link claudeSessionIdFor}) so the re-derived
+   * id matches the conversation left behind.
+   */
+  readonly resume?: boolean;
 }
 
 /**
@@ -547,6 +556,24 @@ export interface ClaudeCodeResponderOptions {
  * agent loop do the work — runs on the user's Claude Code subscription, no API
  * key required.
  */
+/**
+ * A **stable** `claude --session-id` (a UUID) derived from a Mjolnir session id, so a
+ * session the extension host had to tear down (a window reload) can resume the *same*
+ * `claude` conversation when re-attached — without persisting the id anywhere, since
+ * re-deriving it from the session name is enough (#126). Formats a SHA-1 of the name
+ * as a v5-shaped UUID (deterministic; `claude` only needs a well-formed UUID).
+ */
+export function claudeSessionIdFor(sessionId: string): string {
+  const h = createHash('sha1').update(`mjolnir:${sessionId}`).digest('hex');
+  const variant = ((parseInt(h[16], 16) & 0x3) | 0x8).toString(16); // RFC-4122 variant nibble
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+/** Whether a failed `claude` run means the session asked to `--resume` doesn't exist (#126). */
+function isNoConversation(error: unknown): boolean {
+  return /no conversation found/i.test(String(error));
+}
+
 export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): Respond {
   const {
     workdir,
@@ -558,6 +585,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     run = runClaudeCodeCli,
     onReasoningChange,
     onUsage,
+    resume = false,
   } = options;
   // The pinned Claude session: the first turn creates it (`--session-id`), later
   // turns resume it (`--resume`). `sessionId` is mutable because a turn that fails
@@ -567,7 +595,10 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
   // cleanly. Once a session is established, the id is kept so a later-turn failure
   // can resume without losing the conversation (#90).
   let sessionId = claudeSessionId;
-  let started = false;
+  // `started` gates `--session-id` (create, first turn) vs `--resume` (later turns).
+  // A re-attached session (#126) starts already-`started`, so its first turn resumes
+  // the conversation the reload left behind rather than colliding on create.
+  let started = resume;
   return async (message) => {
     // Only conversation reaches here: infrastructure (permission/delegation control,
     // per-turn usage, reasoning digests) is filtered upstream by the agent runtime's
@@ -582,29 +613,39 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     // The turn's assembled reasoning trail (#110), captured from the run's stream;
     // posted to the channel alongside the result so it survives reload/replay.
     let digest: ReasoningDigest | undefined;
+    const runTurn = (useResume: boolean) =>
+      run(prompt, {
+        cwd: workdir,
+        appendSystemPrompt,
+        sessionId,
+        resume: useResume,
+        permissionPromptTool,
+        mcpConfigPath,
+        model,
+        onReasoningChange,
+        onUsage,
+        onDigest: (d) => {
+          digest = d;
+        },
+      });
     try {
-      result = (
-        await run(prompt, {
-          cwd: workdir,
-          appendSystemPrompt,
-          sessionId,
-          resume: started,
-          permissionPromptTool,
-          mcpConfigPath,
-          model,
-          onReasoningChange,
-          onUsage,
-          onDigest: (d) => {
-            digest = d;
-          },
-        })
-      ).trim();
+      result = (await runTurn(started)).trim();
     } catch (error) {
-      // A turn failed before the session was established: the id may already be
-      // claimed by `claude`, so rotate it so the retry creates fresh instead of
-      // colliding. An established session (started) keeps its id and resumes.
-      if (!started) sessionId = randomUUID();
-      throw error;
+      if (started && isNoConversation(error)) {
+        // Re-attaching a session whose conversation doesn't exist — an old session
+        // from before stable ids, or one interrupted before its first turn ever ran —
+        // so there's nothing to `--resume`. Create it fresh on this same worktree and
+        // retry the turn so it isn't lost: context from before the reload is gone, but
+        // the session continues instead of dead-ending on every turn (#126).
+        started = false;
+        result = (await runTurn(false)).trim();
+      } else {
+        // Failed before establishing a session: the id may already be claimed by
+        // `claude`, so rotate it so the retry creates fresh instead of colliding
+        // ("Session ID … already in use"). An established session keeps its id (#90).
+        if (!started) sessionId = randomUUID();
+        throw error;
+      }
     }
     started = true;
     // A resultless turn replies with nothing, exactly as before — the digest rides
