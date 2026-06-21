@@ -1,4 +1,4 @@
-import type { Channel, Message, Role } from '../core/channel.ts';
+import type { Channel, Message, Participant, Role } from '../core/channel.ts';
 import { acknowledge, runExecutor, deliversToAgent } from './executor-runtime.ts';
 
 /**
@@ -31,6 +31,14 @@ export interface DelegationManager {
    * reply arrives later, bridged up onto the spawner's channel.
    */
   spawn(role: Role, openingTask: Omit<Message, 'from' | 'role'>): string;
+  /**
+   * Send a follow-up `message` to the live delegate `id` — it continues on its
+   * pinned session and its next reply bridges up as usual (#111). Returns whether a
+   * live delegate received it (`false` for an unknown/ended id, so the caller can
+   * tell the spawner its delegate is gone). The spawner→delegate direction the
+   * one-shot spawn/shutdown pair lacked.
+   */
+  send(id: string, message: Omit<Message, 'from' | 'role'>): boolean;
   /**
    * End the delegate with `id`: leave both its sub-channel seat and its reporting
    * seat on the spawner's channel, and close the sub-channel — releasing the
@@ -91,7 +99,9 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
   // Monotonic so a derived id is unique even if a role is spawned repeatedly; the
   // role stays in the id (`<spawner>-<role>-<n>`) for log traceability of lineage.
   let sequence = 0;
-  const delegates = new Map<string, { close(): void }>();
+  // Each live delegate keeps its `close` and its `driver` (the spawner's seat on the
+  // sub-channel) — the driver is how a follow-up reaches the delegate (#111).
+  const delegates = new Map<string, { close(): void; driver: Participant }>();
 
   return {
     spawn(role, openingTask) {
@@ -137,6 +147,7 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
       });
 
       delegates.set(id, {
+        driver,
         close() {
           driver.close();
           reporter.close();
@@ -147,6 +158,16 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
 
       driver.send(openingTask);
       return id;
+    },
+
+    send(id, message) {
+      const delegate = delegates.get(id);
+      if (!delegate) return false; // unknown/ended — the caller tells the spawner it's gone
+      // Drive the follow-up onto the sub-channel from the spawner's seat, exactly as
+      // the opening task: the delegate's responder takes it as another turn (it pins a
+      // claude session and `--resume`s), and its reply bridges up through the reporter.
+      delegate.driver.send(message);
+      return true;
     },
 
     shutdown(id) {

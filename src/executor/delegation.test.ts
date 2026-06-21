@@ -123,6 +123,27 @@ describe('createDelegationManager', () => {
     expect(() => manager.shutdown('never-spawned')).not.toThrow();
   });
 
+  it('sends a follow-up to a live delegate; it continues on its session and replies again (#111)', async () => {
+    const { manager, orchestratorInbox } = wire(resultDelegate);
+
+    const id = manager.spawn('executor', { type: 'text', payload: 'start' });
+    await flush();
+
+    // The spawner answers/steers the live delegate; it takes another turn and reports again.
+    expect(manager.send(id, { type: 'text', payload: 'how do I run the suite?' })).toBe(true);
+    await flush();
+
+    expect(orchestratorInbox).toEqual([
+      { from: id, role: 'executor', type: 'result', payload: 'received: start' },
+      { from: id, role: 'executor', type: 'result', payload: 'received: how do I run the suite?' },
+    ]);
+  });
+
+  it('reports a send to an unknown/ended delegate as not delivered (#111)', () => {
+    const { manager } = wire(resultDelegate);
+    expect(manager.send('never-spawned', { type: 'text', payload: 'hi' })).toBe(false);
+  });
+
   it('gives each delegate its own sub-channel and a distinct attributed report', async () => {
     const { manager, orchestratorInbox } = wire(resultDelegate);
 
