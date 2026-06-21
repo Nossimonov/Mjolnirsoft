@@ -523,6 +523,10 @@ describe('buildClaudeArgs', () => {
     };
     expect(policy.permissions.allow).toEqual(expect.arrayContaining(['Bash', 'Edit(./**)', 'Read']));
     expect(policy.permissions.deny).toEqual(expect.arrayContaining(['Bash(rm -rf *)', 'Bash(git push *)']));
+    // The native sub-agent tool is denied (a bare deny strips it) so a spawned agent
+    // can't spin up its own ad-hoc sub-agents — our `mcp__delegate__*` is the delegation path (#131).
+    expect(policy.permissions.deny).toContain('Agent');
+    expect(policy.permissions.allow).toEqual(expect.arrayContaining(['mcp__delegate__spawn', 'mcp__delegate__send']));
   });
 
   it('excludes every CLAUDE.md via --settings so a spawned agent loads only its role layer (#121)', () => {
