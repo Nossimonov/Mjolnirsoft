@@ -1,6 +1,5 @@
 import mermaid from 'mermaid';
 import { formatElapsed } from '../elapsed.ts';
-import type { ViewEvent } from '../../../src/executor/claude-code-responder.ts';
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void };
 
@@ -42,100 +41,47 @@ function stopWorking(): void {
     tick = null;
   }
   working?.setAttribute('hidden', '');
-  // The turn is over — drop its ephemeral live stream so a reopened "working"
-  // block (next turn) never inherits the previous turn's thinking/text (#109).
-  clearReasoning();
+  // The turn is over. Normally the digest message already settled the reasoning box
+  // (collapsed in place); this collapses any box left open by a turn that ended
+  // without a digest (e.g. an error mid-stream) so it never sits expanded.
+  collapseReasoning();
 }
 
-// The executor's live reasoning (#109) streams in as ephemeral host posts (never
-// from the channel, never logged). Everything it emits live — thinking, response
-// text, and tool uses — accumulates in a per-turn **collapsible trail** in the
-// conversation, open while it works so you can watch, then auto-collapsed when the
-// turn's durable result lands: preserved (one twisty-click to review) instead of
-// vanishing, while the clean result renders below it. The bottom block carries
-// only the elapsed timer.
-let currentTrail: HTMLDetailsElement | null = null;
-let trailSpan: HTMLElement | null = null; // running text/thinking span in the trail
-let trailSpanKind: 'thinking' | 'text' | null = null;
+// The executor's live reasoning (#108) renders as one block-level box per turn. The
+// host posts a fully-rendered HTML snapshot (the *same* markup as the persisted
+// digest, #110) each time the trail gains a block, and we replace the box in place —
+// so it builds up block-by-block while the turn runs, then settles collapsed without
+// a view swap. These posts are ephemeral (never from the channel, never logged). The
+// turn's final answer is not in this box; it arrives as its own result bubble.
+let currentReasoningBox: HTMLElement | null = null;
 
-// The body of the current turn's trail, creating the <details> (open) in the
-// conversation on first use. Lives in `#content` so it persists, collapsed, after
-// the turn.
-function trailBody(): HTMLElement | null {
-  if (!content) return null;
-  if (!currentTrail) {
-    currentTrail = document.createElement('details');
-    currentTrail.className = 'reasoning-trail';
-    currentTrail.open = true;
-    const summary = document.createElement('summary');
-    summary.textContent = '💭 Thinking';
-    const body = document.createElement('div');
-    body.className = 'trail-body';
-    currentTrail.append(summary, body);
-    content.appendChild(currentTrail);
-    content.scrollTop = content.scrollHeight;
-  }
-  return currentTrail.querySelector('.trail-body');
+// Render the latest reasoning snapshot, replacing the in-progress box in place — or
+// creating it at the end of the conversation on the turn's first snapshot.
+function setReasoning(html: string): void {
+  if (!content) return;
+  const template = document.createElement('template');
+  template.innerHTML = html.trim();
+  const next = template.content.firstElementChild as HTMLElement | null;
+  if (!next) return;
+  if (currentReasoningBox) currentReasoningBox.replaceWith(next);
+  else content.appendChild(next);
+  currentReasoningBox = next;
+  content.scrollTop = content.scrollHeight;
 }
 
-// Append a thinking or response-text token to the trail, coalescing consecutive
-// deltas of the same kind into one span and starting a fresh span when the kind
-// switches — thinking renders dimmed, response text normal-weight.
-function appendToTrail(kind: 'thinking' | 'text', text: string): void {
-  const body = trailBody();
-  if (!body) return;
-  if (!trailSpan || trailSpanKind !== kind) {
-    trailSpan = document.createElement('span');
-    trailSpan.className = kind === 'thinking' ? 'trail-thinking' : 'trail-text';
-    body.appendChild(trailSpan);
-    trailSpanKind = kind;
-  }
-  trailSpan.textContent += text;
-  if (content) content.scrollTop = content.scrollHeight;
+// Stop tracking the current box so the next turn starts a fresh one. The digest's
+// final (collapsed) render already replaced the in-progress box just before this, so
+// the box stays in the conversation, settled.
+function settleReasoning(): void {
+  currentReasoningBox = null;
 }
 
-function appendReasoning(event: ViewEvent): void {
-  if (event.kind === 'thinking') {
-    // Some CLI builds stream `thinking_delta` redacted to empty (only a token
-    // count); skip those so an empty span never appears.
-    if (event.text) appendToTrail('thinking', event.text);
-  } else if (event.kind === 'text') {
-    appendToTrail('text', event.text);
-  } else if (event.kind === 'tool-use') {
-    const body = trailBody();
-    if (!body) return;
-    const chip = document.createElement('span');
-    chip.className = 'tool-chip';
-    chip.textContent = `⚙ ${event.name}`;
-    body.appendChild(chip);
-    trailSpan = null; // text/thinking after a tool starts a fresh span past the chip
-    trailSpanKind = null;
-    if (content) content.scrollTop = content.scrollHeight;
-  }
-}
-
-function clearReasoning(): void {
-  // Collapse the turn's trail (keep it in the conversation, twisty shut) so the
-  // live reasoning + work stays reviewable rather than vanishing; the clean durable
-  // result message renders below it (#109).
-  if (currentTrail) {
-    currentTrail.open = false;
-    currentTrail = null;
-  }
-  trailSpan = null;
-  trailSpanKind = null;
-}
-
-function discardReasoning(): void {
-  // Remove the in-progress ephemeral trail entirely (not just collapse it): the
-  // durable reasoning digest (#110) now stands in its place and survives reload,
-  // so keeping the live copy would double-show the same reasoning for this turn.
-  if (currentTrail) {
-    currentTrail.remove();
-    currentTrail = null;
-  }
-  trailSpan = null;
-  trailSpanKind = null;
+// Safety net: if a turn ends without a digest settling the box (e.g. it errored
+// mid-stream), collapse whatever's still open so it doesn't sit expanded.
+function collapseReasoning(): void {
+  const details = currentReasoningBox?.querySelector('details');
+  if (details) details.removeAttribute('open');
+  currentReasoningBox = null;
 }
 
 // Show how many messages are waiting behind the in-flight turn. The executor
@@ -164,7 +110,6 @@ window.addEventListener('message', (event: MessageEvent) => {
     on?: boolean;
     text?: string;
     count?: number;
-    event?: ViewEvent;
   };
   if (data.kind === 'message' && data.html && content) {
     content.insertAdjacentHTML('beforeend', data.html);
@@ -173,12 +118,10 @@ window.addEventListener('message', (event: MessageEvent) => {
   } else if (data.kind === 'working') {
     if (data.on) startWorking();
     else stopWorking();
-  } else if (data.kind === 'reasoning' && data.event) {
-    appendReasoning(data.event);
-  } else if (data.kind === 'reasoning-clear') {
-    clearReasoning();
-  } else if (data.kind === 'reasoning-discard') {
-    discardReasoning();
+  } else if (data.kind === 'reasoning' && data.html) {
+    setReasoning(data.html);
+  } else if (data.kind === 'reasoning-settle') {
+    settleReasoning();
   } else if (data.kind === 'queued') {
     setQueued(data.count ?? 0);
   } else if (data.kind === 'notice' && notice) {

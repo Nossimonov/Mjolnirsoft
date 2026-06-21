@@ -113,34 +113,65 @@ export function renderMessage(message: Message): string {
 }
 
 /**
- * Render the durable reasoning digest (#110) as a collapsed, expandable trail —
- * the persistent counterpart to #109's live `💭 Thinking`, available on replay and
- * to a later log-reader. Thinking blocks render verbatim (dimmed); each tool-use is
- * its own nested, expandable detail showing the input (the actual query/command)
- * and a trimmed result, so a post-mortem can see what was searched without the
- * conversation drowning in it. Collapsed by default so the clean result stays the
- * focus; one twisty-click reveals the reasoning.
+ * Render the reasoning digest (#110) as an expandable trail. **The same renderer
+ * drives the live view and the persisted log** (#108 unification): as a turn runs,
+ * the host re-renders this from each block-level snapshot (`live: true` → open, an
+ * in-progress summary) so it builds up block-by-block in place; when the turn
+ * settles it renders once more collapsed (`live: false`, the default — also the
+ * replay/log-reader path). Because both come from the same entries and markup, the
+ * box never swaps views — it just collapses. Thinking renders verbatim (dimmed),
+ * interim narration normal-weight; each tool-use is its own nested, expandable
+ * detail showing the input and a trimmed result. The turn's final answer is *not*
+ * here — it renders in its own result bubble (the digest assembler excludes it).
  */
 function renderReasoningDigest(message: Message): string {
   const entries = (message.payload as ReasoningDigest | undefined)?.entries ?? [];
-  const hue = hueForSender(message.from);
+  return renderReasoningDigestHtml(message.from, entries, false);
+}
+
+/**
+ * The live-view render (#108): the host calls this with each block-level snapshot
+ * from the reasoning stream, posting the HTML to replace the in-progress box.
+ */
+export function renderReasoningDigestLive(from: string, digest: ReasoningDigest): string {
+  return renderReasoningDigestHtml(from, digest.entries, true);
+}
+
+/** Shared markup for the live and durable digest renders (the seam they unify on). */
+function renderReasoningDigestHtml(from: string, entries: readonly DigestEntry[], live: boolean): string {
+  const hue = hueForSender(from);
   const style = `border-inline-start:3px solid hsl(${hue} 70% 55%);background:hsl(${hue} 70% 55% / 0.08)`;
   const thinkCount = entries.filter((e) => e.kind === 'thinking').length;
+  const textCount = entries.filter((e) => e.kind === 'text').length;
   const toolCount = entries.filter((e) => e.kind === 'tool').length;
-  const summary = `💭 Reasoning — ${thinkCount} thinking, ${toolCount} tool${toolCount === 1 ? '' : 's'}`;
+  const parts = [
+    `${thinkCount} thinking`,
+    ...(textCount ? [`${textCount} text`] : []),
+    `${toolCount} tool${toolCount === 1 ? '' : 's'}`,
+  ];
+  // Live: an in-progress label + open so you watch it build. Settled/replay:
+  // counts + collapsed so the clean result bubble stays the focus.
+  const summary = live ? '💭 Reasoning…' : `💭 Reasoning — ${parts.join(', ')}`;
   return (
     `<div class="turn reasoning-digest" style="${style}">` +
-    `<div class="from">${escapeHtml(message.from)} · reasoning</div>` +
-    `<details class="reasoning-digest-trail"><summary>${escapeHtml(summary)}</summary>` +
+    `<div class="from">${escapeHtml(from)} · reasoning</div>` +
+    `<details class="reasoning-digest-trail"${live ? ' open' : ''}><summary>${escapeHtml(summary)}</summary>` +
     `<div class="digest-body">${entries.map(renderDigestEntry).join('')}</div>` +
     `</details></div>`
   );
 }
 
-/** One digest step: a verbatim thinking block, or a tool-use with its action detail. */
+/**
+ * One digest step: a verbatim thinking block (dimmed), a response-text block
+ * (normal weight — the agent's narration, mirroring the #109 live trail), or a
+ * tool-use with its action detail.
+ */
 function renderDigestEntry(entry: DigestEntry): string {
   if (entry.kind === 'thinking') {
     return `<div class="digest-thinking">${escapeHtml(entry.text)}</div>`;
+  }
+  if (entry.kind === 'text') {
+    return `<div class="digest-text">${escapeHtml(entry.text)}</div>`;
   }
   const result =
     entry.result !== undefined

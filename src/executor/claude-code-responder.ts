@@ -53,18 +53,21 @@ export interface ClaudeRunArgs {
   /** Path to the MCP config defining the server that backs {@link permissionPromptTool}. */
   readonly mcpConfigPath?: string;
   /**
-   * Live-event seam (#109): called for each intermediate {@link ViewEvent} parsed
-   * from the stream as the agent works (thinking/text tokens, tool starts). The
-   * host forwards these to the webview ephemerally; the durable channel/log is
-   * untouched. Omit to ignore the stream and only take the final result.
+   * Live seam (#109/#110): called with a block-level {@link ReasoningDigest}
+   * **snapshot** each time the trail gains a visible entry as the agent works (a
+   * thinking block, an interim narration block, or a tool finalizes; a tool result
+   * attaches). The host forwards these to the webview ephemerally; the durable
+   * channel/log is untouched. The same entries are persisted via {@link onDigest},
+   * so the live view and the reloaded digest show identical data — no settle-time
+   * swap, no token smear. Omit to ignore the stream and only take the final result.
    */
-  readonly onEvent?: (event: ViewEvent) => void;
+  readonly onReasoningChange?: (digest: ReasoningDigest) => void;
   /**
-   * Digest seam (#110): called once when the run completes with the assembled,
-   * **block-level** {@link ReasoningDigest} (whole thinking blocks + tool-uses
-   * with action detail). Unlike {@link onEvent}'s per-token, off-channel stream,
-   * this is the *durable* trail the responder persists to the channel alongside
-   * the result. Omit to skip digest assembly entirely (no per-line overhead).
+   * Digest seam (#110): called once when the run completes with the final assembled
+   * {@link ReasoningDigest} — the same block-level entries as the last
+   * {@link onReasoningChange} snapshot. This is the *durable* trail the responder
+   * persists to the channel alongside the result. Omit (along with
+   * {@link onReasoningChange}) to skip digest assembly entirely (no per-line overhead).
    */
   readonly onDigest?: (digest: ReasoningDigest) => void;
 }
@@ -122,8 +125,13 @@ export function parseStreamEvent(line: string): ViewEvent | { kind: 'result'; ra
 
 /** Receives the parsed output of an NDJSON stream: live view events and the final result line. */
 export interface StreamReaderHandlers {
-  /** Each intermediate {@link ViewEvent} parsed from a complete line, in order. */
-  readonly onEvent: (event: ViewEvent) => void;
+  /**
+   * Each intermediate {@link ViewEvent} parsed from a complete line, in order.
+   * Optional: the live view is now driven by the block-level digest assembler (via
+   * `onLine`), so production omits this; `parseStreamEvent` and this token seam are
+   * retained for direct unit testing of the stream shapes.
+   */
+  readonly onEvent?: (event: ViewEvent) => void;
   /** The raw JSON of the terminal `result` line, captured for {@link interpretClaudeResult}. */
   readonly onResult: (raw: string) => void;
   /**
@@ -155,7 +163,7 @@ export function createStreamReader(handlers: StreamReaderHandlers): {
     const event = parseStreamEvent(line);
     if (!event) return;
     if (event.kind === 'result') handlers.onResult(event.raw);
-    else handlers.onEvent(event);
+    else handlers.onEvent?.(event);
   };
   return {
     feed(chunk) {
@@ -293,17 +301,18 @@ export function interpretClaudeResult(stdout: string, stderr: string, code: numb
 /**
  * Default launcher: spawn `claude -p` headless. A non-`--bare` run uses the
  * logged-in Claude Code session (the user's subscription). With `--output-format
- * stream-json` the run streams as NDJSON: stdout is read line-by-line, each line
- * parsed by {@link parseStreamEvent}. Intermediate {@link ViewEvent}s are pushed
- * through `onEvent` for the live view (#109); the terminal `result` line is held
- * and passed to {@link interpretClaudeResult} on close, so the returned final
- * text — the only thing that reaches the durable channel — is exactly as before.
+ * stream-json` the run streams as NDJSON: stdout is read line-by-line. The raw
+ * lines feed the block-level digest assembler, which drives the live view
+ * (`onReasoningChange` snapshots, #109/#110) and the durable digest (`onDigest`);
+ * the terminal `result` line is held and passed to {@link interpretClaudeResult}
+ * on close, so the returned final text — the only thing that reaches the durable
+ * channel as the answer — is exactly as before.
  * The task is passed as an argv element (no shell), so prompt contents are not
  * interpreted by a shell.
  */
 export const runClaudeCodeCli: RunClaudeCode = (
   prompt,
-  { cwd, appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath, onEvent, onDigest },
+  { cwd, appendSystemPrompt, sessionId, resume, permissionPromptTool, mcpConfigPath, onReasoningChange, onDigest },
 ) =>
   new Promise((resolve, reject) => {
     const args = buildClaudeArgs(prompt, {
@@ -326,13 +335,17 @@ export const runClaudeCodeCli: RunClaudeCode = (
     // a bare "exited with code N".
     let resultRaw = '';
     let stdout = '';
-    // Assemble the durable, block-level reasoning digest (#110) only when a
-    // consumer wants it — no per-line work otherwise. It taps the raw stream via
-    // `onLine` to see the tool-input deltas and `tool_result` lines the view's
-    // `parseStreamEvent` discards.
-    const digest = onDigest ? createReasoningDigestAssembler() : undefined;
+    // Assemble the block-level reasoning trail (#110) when any consumer wants it —
+    // the live view (`onReasoningChange`, fed each snapshot via the assembler's
+    // `onChange`) and/or the durable digest (`onDigest`, taken from `build()` on
+    // close). One assembler serves both, so they never diverge. It taps the raw
+    // stream via `onLine` to see the tool-input deltas and `tool_result` lines the
+    // view's `parseStreamEvent` discards. No consumer → no per-line work.
+    const digest =
+      onDigest || onReasoningChange
+        ? createReasoningDigestAssembler({ onChange: onReasoningChange })
+        : undefined;
     const reader = createStreamReader({
-      onEvent: (event) => onEvent?.(event),
       onResult: (raw) => {
         resultRaw = raw;
       },
@@ -401,11 +414,11 @@ export interface ClaudeCodeResponderOptions {
   /** Override how Claude Code is run (tests inject a fake; default spawns the CLI). */
   readonly run?: RunClaudeCode;
   /**
-   * Live-event seam (#109): forwarded to each run as its `onEvent`, so the host
-   * receives the executor's intermediate {@link ViewEvent}s (thinking/text tokens,
-   * tool starts) and streams them to the view ephemerally. Omit for no streaming.
+   * Live seam (#109/#110): forwarded to each run as its `onReasoningChange`, so the
+   * host receives block-level {@link ReasoningDigest} snapshots as the executor
+   * works and streams them to the view ephemerally. Omit for no streaming.
    */
-  readonly onEvent?: (event: ViewEvent) => void;
+  readonly onReasoningChange?: (digest: ReasoningDigest) => void;
 }
 
 /**
@@ -426,7 +439,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     permissionPromptTool,
     mcpConfigPath,
     run = runClaudeCodeCli,
-    onEvent,
+    onReasoningChange,
   } = options;
   // The pinned Claude session: the first turn creates it (`--session-id`), later
   // turns resume it (`--resume`). `sessionId` is mutable because a turn that fails
@@ -468,7 +481,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
           resume: started,
           permissionPromptTool,
           mcpConfigPath,
-          onEvent,
+          onReasoningChange,
           onDigest: (d) => {
             digest = d;
           },

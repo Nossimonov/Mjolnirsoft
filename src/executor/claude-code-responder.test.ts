@@ -272,25 +272,33 @@ describe('createClaudeCodeResponder', () => {
     expect(run.mock.calls[2][1].resume).toBe(true);
   });
 
-  it('forwards each run\'s live events to the onEvent seam, ephemerally (#109)', async () => {
-    const events: ViewEvent[] = [];
-    // The injected run plays the role of the streaming CLI: it pushes intermediate
-    // events through the seam, then returns the final result (the only thing that
-    // reaches the channel). The seam must receive every event, untouched.
-    const run = vi.fn(async (_prompt: string, options: { onEvent?: (e: ViewEvent) => void }) => {
-      options.onEvent?.({ kind: 'thinking', text: 'is 91 prime?' });
-      options.onEvent?.({ kind: 'tool-use', name: 'Bash' });
-      options.onEvent?.({ kind: 'text', text: 'No, 7 × 13.' });
+  it('forwards each run\'s live reasoning snapshots to the onReasoningChange seam, ephemerally (#109/#110)', async () => {
+    const snapshots: ReasoningDigest[] = [];
+    // The injected run plays the role of the streaming CLI: it pushes block-level
+    // digest snapshots through the live seam, then returns the final result (the
+    // only thing that reaches the channel). The seam must receive each, untouched.
+    const run = vi.fn(async (_prompt: string, options: { onReasoningChange?: (d: ReasoningDigest) => void }) => {
+      options.onReasoningChange?.({ entries: [{ kind: 'thinking', text: 'is 91 prime?' }] });
+      options.onReasoningChange?.({
+        entries: [
+          { kind: 'thinking', text: 'is 91 prime?' },
+          { kind: 'tool', name: 'Bash', input: { command: 'factor 91' } },
+        ],
+      });
       return 'No, 7 × 13.';
     });
-    const respond = createClaudeCodeResponder({ workdir: '/w', run, onEvent: (e) => events.push(e) });
+    const respond = createClaudeCodeResponder({ workdir: '/w', run, onReasoningChange: (d) => snapshots.push(d) });
 
     const reply = await respond(task);
 
-    expect(events).toEqual([
-      { kind: 'thinking', text: 'is 91 prime?' },
-      { kind: 'tool-use', name: 'Bash' },
-      { kind: 'text', text: 'No, 7 × 13.' },
+    expect(snapshots).toEqual([
+      { entries: [{ kind: 'thinking', text: 'is 91 prime?' }] },
+      {
+        entries: [
+          { kind: 'thinking', text: 'is 91 prime?' },
+          { kind: 'tool', name: 'Bash', input: { command: 'factor 91' } },
+        ],
+      },
     ]);
     // The reply is still just the final result text — streaming changed nothing here.
     expect(reply).toEqual({ type: 'result', payload: 'No, 7 × 13.' });

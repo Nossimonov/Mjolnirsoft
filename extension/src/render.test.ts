@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { renderMarkdown, renderComposed, renderMessage, hueForSender, renderInteractionRequest } from './render.ts';
+import {
+  renderMarkdown,
+  renderComposed,
+  renderMessage,
+  hueForSender,
+  renderInteractionRequest,
+  renderReasoningDigestLive,
+} from './render.ts';
 import type { Message } from '../../src/core/channel.ts';
 import type { InteractionRequest } from '../../src/core/interaction.ts';
 
@@ -253,6 +260,23 @@ describe('renderMessage — reasoning digest (#110)', () => {
     expect(html).toContain('check &lt;tag&gt; &amp; flag'); // verbatim, HTML-escaped
   });
 
+  it('renders a response-text block verbatim (escaped), normal weight', () => {
+    const html = renderMessage(digestMessage([{ kind: 'text', text: 'Searching <here> & now' }]));
+    expect(html).toContain('class="digest-text"');
+    expect(html).toContain('Searching &lt;here&gt; &amp; now'); // verbatim, HTML-escaped
+  });
+
+  it('counts text entries in the summary alongside thinking and tools', () => {
+    const html = renderMessage(
+      digestMessage([
+        { kind: 'thinking', text: 'plan' },
+        { kind: 'text', text: 'narration' },
+        { kind: 'tool', name: 'Write', input: { file: 'x' } },
+      ]),
+    );
+    expect(html).toContain('1 thinking, 1 text, 1 tool');
+  });
+
   it('renders a tool-use as a nested expandable detail with its input and trimmed result', () => {
     const html = renderMessage(
       digestMessage([
@@ -282,5 +306,21 @@ describe('renderMessage — reasoning digest (#110)', () => {
     );
     expect(html).toContain('1 thinking, 1 tool');
     expect(html).not.toContain('result:'); // no result captured → no result block
+  });
+
+  it('renders the live variant open and in-progress, with the same entry markup', () => {
+    // The live render (driven by each stream snapshot) is the SAME markup as the
+    // persisted digest — only open + an in-progress label — so the box settles in
+    // place without a view swap.
+    const html = renderReasoningDigestLive('demo-executor', {
+      entries: [
+        { kind: 'thinking', text: 'planning' },
+        { kind: 'tool', name: 'Bash', input: { command: 'ls' } },
+      ],
+    });
+    expect(html).toContain('<details class="reasoning-digest-trail" open>'); // open while live
+    expect(html).toContain('💭 Reasoning…'); // in-progress label, not the final counts
+    expect(html).toContain('class="digest-thinking"');
+    expect(html).toContain('⚙ Bash'); // same entry markup as the persisted render
   });
 });

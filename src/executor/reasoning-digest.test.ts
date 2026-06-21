@@ -106,10 +106,62 @@ describe('createReasoningDigestAssembler (#110 durable digest)', () => {
     ]);
   });
 
-  it('ignores answer-text deltas — the digest is the reasoning, the answer is the result', () => {
+  it('interleaves thinking, response text, and tools in stream order — a faithful copy of the live trail', () => {
+    const entries = digestOf([
+      streamEvent({ type: 'message_start', message: { id: 'm1' } }),
+      streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } }),
+      streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'I should grep.' } }),
+      streamEvent({ type: 'content_block_stop', index: 0 }),
+      streamEvent({ type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } }),
+      streamEvent({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Searching now.' } }),
+      streamEvent({ type: 'content_block_stop', index: 1 }),
+      streamEvent({ type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: 'toolu_x', name: 'Grep', input: {} } }),
+      streamEvent({ type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"pattern":"foo"}' } }),
+      streamEvent({ type: 'content_block_stop', index: 2 }),
+      userToolResult('toolu_x', 'foo found'),
+    ]);
+    expect(entries).toEqual([
+      { kind: 'thinking', text: 'I should grep.' },
+      { kind: 'text', text: 'Searching now.' },
+      { kind: 'tool', name: 'Grep', input: { pattern: 'foo' }, result: 'foo found' },
+    ]);
+  });
+
+  it('excludes the final (trailing) text block — it is the answer and renders in the result bubble', () => {
+    // A turn whose only content is a text block: that text IS the answer, so the
+    // digest is empty (the answer shows in its own bubble, not the reasoning box).
     const entries = digestOf([
       streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
-      streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'The answer is 42.' } }),
+      streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'The answer ' } }),
+      streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'is 42.' } }),
+      streamEvent({ type: 'content_block_stop', index: 0 }),
+    ]);
+    expect(entries).toEqual([]);
+  });
+
+  it('keeps interim text (followed by more work) but drops the trailing text after it', () => {
+    const entries = digestOf([
+      streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+      streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Let me check.' } }),
+      streamEvent({ type: 'content_block_stop', index: 0 }),
+      streamEvent({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 't1', name: 'Read', input: {} } }),
+      streamEvent({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"file":"a"}' } }),
+      streamEvent({ type: 'content_block_stop', index: 1 }),
+      streamEvent({ type: 'content_block_start', index: 2, content_block: { type: 'text', text: '' } }),
+      streamEvent({ type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'Found it: 42.' } }),
+      streamEvent({ type: 'content_block_stop', index: 2 }),
+    ]);
+    // The first text is interim (a tool followed) → kept; the last text is the
+    // answer (nothing followed) → dropped.
+    expect(entries).toEqual([
+      { kind: 'text', text: 'Let me check.' },
+      { kind: 'tool', name: 'Read', input: { file: 'a' } },
+    ]);
+  });
+
+  it('drops an empty text block (opened but never filled)', () => {
+    const entries = digestOf([
+      streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
       streamEvent({ type: 'content_block_stop', index: 0 }),
     ]);
     expect(entries).toEqual([]);
@@ -143,6 +195,32 @@ describe('createReasoningDigestAssembler (#110 durable digest)', () => {
       streamEvent({ type: 'content_block_stop', index: 0 }),
     ]);
     expect(entries).toEqual([{ kind: 'tool', name: 'Write', input: { file: 'x' } }]);
+  });
+
+  it('drives the live view via onChange — block-level snapshots that exclude the held trailing text', () => {
+    const snapshots: DigestEntry[][] = [];
+    const assembler = createReasoningDigestAssembler({
+      onChange: (d) => snapshots.push(d.entries.map((e) => ({ ...e }))),
+    });
+    const feed = (event: unknown) => assembler.feed(streamEvent(event));
+    feed({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } });
+    feed({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'plan' } });
+    feed({ type: 'content_block_stop', index: 0 }); // → snapshot [thinking]
+    feed({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 't1', name: 'Read', input: {} } });
+    feed({ type: 'content_block_stop', index: 1 }); // → snapshot [thinking, tool]
+    assembler.feed(userToolResult('t1', 'data')); // result attaches → snapshot [thinking, tool(+result)]
+    feed({ type: 'content_block_start', index: 2, content_block: { type: 'text', text: '' } });
+    feed({ type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'done: data' } });
+    feed({ type: 'content_block_stop', index: 2 }); // final text → held, NO snapshot
+
+    // One snapshot per visible change; the trailing text never appears live.
+    expect(snapshots).toEqual([
+      [{ kind: 'thinking', text: 'plan' }],
+      [{ kind: 'thinking', text: 'plan' }, { kind: 'tool', name: 'Read', input: {} }],
+      [{ kind: 'thinking', text: 'plan' }, { kind: 'tool', name: 'Read', input: {}, result: 'data' }],
+    ]);
+    // build() agrees with the last live snapshot — same data, no swap.
+    expect(assembler.build().entries).toEqual(snapshots[snapshots.length - 1]);
   });
 
   it('does not mutate an already-built digest when fed more lines', () => {
