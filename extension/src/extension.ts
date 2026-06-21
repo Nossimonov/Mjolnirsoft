@@ -1,18 +1,18 @@
 import * as vscode from 'vscode';
-import { writeFileSync, rmSync } from 'node:fs';
+import { writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { Channel, Participant } from '../../src/core/channel.ts';
+import type { Channel, Participant, Message } from '../../src/core/channel.ts';
 import { SessionStore } from '../../src/core/session-store.ts';
 import { WorktreeManager, currentRemoteBase } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runExecutor } from '../../src/executor/executor-runtime.ts';
-import { createClaudeCodeResponder, resolveClaudeBin, addUsage, ZERO_USAGE, USAGE_MESSAGE, type Usage } from '../../src/executor/claude-code-responder.ts';
+import { createClaudeCodeResponder, resolveClaudeBin, addUsage, ZERO_USAGE, USAGE_MESSAGE, claudeSessionIdFor, type Usage } from '../../src/executor/claude-code-responder.ts';
 import { createReasoningStream, type ReasoningStream } from '../../src/executor/reasoning-stream.ts';
 import { createUsageMeter, type UsageMeter } from '../../src/executor/usage-meter.ts';
 import { createDelegationHost } from '../../src/executor/delegation-host.ts';
 import type { DelegateWiring } from '../../src/executor/delegation.ts';
-import { composeAgentInstructions, type AgentRole } from '../../src/core/agent-instructions.ts';
+import { composeAgentInstructions, isAgentRole, type AgentRole } from '../../src/core/agent-instructions.ts';
 import { recordLearnedRule } from '../../src/core/learned-permissions.ts';
 import {
   INTERACTION_DECISION,
@@ -53,6 +53,37 @@ function formatUsage(u: Usage): string {
 }
 
 /**
+ * Recover from a session's durable log what the in-host registry lost on a reload
+ * (#126): the agent's **role** (so a resume re-provisions it as the right kind of
+ * agent) and its **own usage so far** (so the resumed meter continues, #116). One
+ * pass over the JSONL. The role is read from the session's own agent seat
+ * (`${id}-executor`), not a bridged delegate's turns. Missing/unreadable → empty.
+ */
+function inspectSession(logPath: string, sessionId: string): { role?: AgentRole; usage: Usage } {
+  const agentSeat = `${sessionId}-executor`;
+  let usage = ZERO_USAGE;
+  let role: AgentRole | undefined;
+  let lines: string[];
+  try {
+    lines = readFileSync(logPath, 'utf8').split('\n');
+  } catch {
+    return { usage };
+  }
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let msg: Message;
+    try {
+      msg = JSON.parse(line) as Message;
+    } catch {
+      continue;
+    }
+    if (msg.type === USAGE_MESSAGE) usage = addUsage(usage, msg.payload as Usage);
+    else if (!role && msg.from === agentSeat && isAgentRole(msg.role)) role = msg.role;
+  }
+  return { role, usage };
+}
+
+/**
  * What a live, in-host session exposes for *attach-on-demand* (#114). A session
  * the extension started (an orchestrator or executor command) — and every executor
  * delegate an orchestrator spawns — registers here while it runs, so when the
@@ -81,6 +112,19 @@ export function activate(context: vscode.ExtensionContext): void {
   // while live, so the front door can attach to the live wiring on demand (#114).
   const liveSessions: LiveSessions = new Map();
 
+  // Best-effort: a prior window reload tears the host down without running a session's
+  // cleanup, which can leave stale `git worktree` admin entries behind. Prune them on
+  // activate so the worktree list stays tidy; the worktree *directories* themselves are
+  // kept — they're how an interrupted session resumes (#126). No repo/git → ignore.
+  const startupFolder = vscode.workspace.workspaceFolders?.[0];
+  if (startupFolder) {
+    try {
+      new WorktreeManager({ repoDir: startupFolder.uri.fsPath }).prune();
+    } catch {
+      /* not a git repo, or git absent — nothing to prune */
+    }
+  }
+
   const openView = vscode.commands.registerCommand('mjolnirsoft.openSessionView', async () => {
     const folder = requireFolder();
     if (!folder) return;
@@ -104,16 +148,30 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     // Attach to the live session if one is running (its reasoning + agent seat +
-    // role label), otherwise open a viewer-only replay (#114).
+    // role label, #114).
     const live = liveSessions.get(pick);
-    openSessionPanel(context, store, pick, folder.uri.fsPath, liveSessions, {
-      executorAttached: live !== undefined,
-      executorId: live?.agentId,
-      reasoning: live?.reasoning,
-      agentLabel: live?.role,
-      model: live?.model,
-      meter: live?.meter,
-    });
+    if (live) {
+      openSessionPanel(context, store, pick, folder.uri.fsPath, liveSessions, {
+        executorAttached: true,
+        executorId: live.agentId,
+        reasoning: live.reasoning,
+        agentLabel: live.role,
+        model: live.model,
+        meter: live.meter,
+      });
+      return;
+    }
+
+    // Not live in this host. If its worktree still exists, the session was interrupted
+    // by a reload (a clean close removes the worktree) — resume it live on that
+    // worktree, recovering its role from the log (#126). Otherwise it ended cleanly:
+    // open a viewer-only replay.
+    if (new WorktreeManager({ repoDir: folder.uri.fsPath }).exists(pick)) {
+      const role = inspectSession(store.logPath(pick), pick).role ?? 'executor';
+      launchSession(context, folder, store, pick, role, liveSessions, true);
+      return;
+    }
+    openSessionPanel(context, store, pick, folder.uri.fsPath, liveSessions, {});
   });
 
   const startExecutor = vscode.commands.registerCommand('mjolnirsoft.startExecutorSession', async () => {
@@ -180,14 +238,25 @@ function provisionSession(args: {
   const repoDir = folder.uri.fsPath;
   const model = modelForRole(role); // the per-role model this agent runs on (#119)
   const meter = createUsageMeter(args.onUsage); // accumulate token usage; bubble to the spawner (#116)
+  const claudeSessionId = claudeSessionIdFor(sessionId); // stable, so a reload can --resume (#126)
 
   // An isolated git worktree on its own branch, so the session edits the real repo
-  // without touching the developer's working tree. Base it on the freshest
-  // origin/main (not local HEAD), so it starts from the latest merged code (#83).
-  // A create failure (e.g. the branch already exists) throws *before* anything else
-  // is allocated, so it propagates cleanly to the caller (the command surfaces it;
-  // the delegation host answers the spawn with an error).
-  const worktree = new WorktreeManager({ repoDir, base: currentRemoteBase(repoDir) }).create(sessionId);
+  // without touching the developer's working tree. If a worktree already exists for
+  // this id, the session was interrupted by a reload (a clean close removes it), so
+  // **reattach** to it and resume its claude conversation rather than creating —
+  // recovering the in-flight work the host teardown left behind (#126). Otherwise
+  // create fresh, based on the freshest origin/main (not local HEAD) so it starts
+  // from the latest merged code (#83). A create failure (e.g. the branch already
+  // exists) throws before anything else is allocated, so it propagates cleanly to the
+  // caller (the command surfaces it; the delegation host answers the spawn with an error).
+  const worktrees = new WorktreeManager({ repoDir });
+  const resuming = worktrees.exists(sessionId);
+  const worktree = resuming
+    ? worktrees.open(sessionId)
+    : new WorktreeManager({ repoDir, base: currentRemoteBase(repoDir) }).create(sessionId);
+  // Seed the meter with this session's own usage so far, so a resumed header continues
+  // its tally instead of resetting — the durable per-turn log holds it (#116/#126).
+  if (resuming) meter.add(inspectSession(store.logPath(sessionId), sessionId).usage);
 
   // Once the worktree exists, a later failure must not leave it (or a written MCP
   // config) orphaned — track what's been allocated and unwind on a partial failure.
@@ -236,6 +305,8 @@ function provisionSession(args: {
       createClaudeCodeResponder({
         workdir: worktree.path,
         appendSystemPrompt: composeAgentInstructions(role),
+        claudeSessionId, // stable id (#126): a brand-new session creates it; a resume resumes it
+        resume: resuming, // first turn --resume the interrupted conversation rather than create (#126)
         permissionPromptTool: PERMISSION_PROMPT_TOOL,
         mcpConfigPath,
         model,
@@ -327,10 +398,6 @@ async function startSession(
   role: AgentRole,
   liveSessions: LiveSessions,
 ): Promise<void> {
-  // The in-process agent shells out to `claude`; load machine-specific config
-  // (CLAUDE_BIN) so it's found even when the extension host's PATH lacks it.
-  loadLocalEnv(join(folder.uri.fsPath, '.local.env'));
-
   const sessionId = await vscode.window.showInputBox({
     title: `Start ${article(role)} ${role} session`,
     prompt: 'Name this session',
@@ -345,6 +412,29 @@ async function startSession(
     return;
   }
 
+  launchSession(context, folder, store, sessionId, role, liveSessions, false);
+}
+
+/**
+ * Provision an in-host agent session on its channel and open its panel (#114),
+ * wiring the panel's dispose to capture-and-drop the worktree. Shared by the start
+ * commands and the front door's **resume** path (#126): `provisionSession` reattaches
+ * to an existing worktree (resuming the interrupted conversation) when one is present,
+ * or creates a fresh one — so this same wiring serves both "start" and "resume".
+ */
+function launchSession(
+  context: vscode.ExtensionContext,
+  folder: vscode.WorkspaceFolder,
+  store: SessionStore,
+  sessionId: string,
+  role: AgentRole,
+  liveSessions: LiveSessions,
+  resumed: boolean,
+): void {
+  // The in-process agent shells out to `claude`; load machine-specific config
+  // (CLAUDE_BIN) so it's found even when the extension host's PATH lacks it.
+  loadLocalEnv(join(folder.uri.fsPath, '.local.env'));
+
   // Open this session's channel once for the live wiring; the panel attaches its
   // own (replaying) handle separately. The command owns this channel's lifecycle.
   const channel = store.open(sessionId);
@@ -353,7 +443,9 @@ async function startSession(
     provisioned = provisionSession({ context, folder, store, sessionId, role, channel, liveSessions });
   } catch (error) {
     channel.close();
-    void vscode.window.showErrorMessage(`Could not start ${role} session "${sessionId}": ${String(error)}`);
+    void vscode.window.showErrorMessage(
+      `Could not ${resumed ? 'resume' : 'start'} ${role} session "${sessionId}": ${String(error)}`,
+    );
     return;
   }
 
@@ -375,8 +467,10 @@ async function startSession(
     },
   });
   void vscode.window.showInformationMessage(
-    `${capitalize(role)} session "${sessionId}" started on branch ${provisioned.branch} — ` +
-      `type ${role === 'orchestrator' ? 'a goal' : 'a task'} in the panel.`,
+    resumed
+      ? `${capitalize(role)} session "${sessionId}" resumed on branch ${provisioned.branch} — pick up where it left off.`
+      : `${capitalize(role)} session "${sessionId}" started on branch ${provisioned.branch} — ` +
+          `type ${role === 'orchestrator' ? 'a goal' : 'a task'} in the panel.`,
   );
 }
 

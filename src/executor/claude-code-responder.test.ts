@@ -7,6 +7,7 @@ import {
   interpretClaudeResult,
   extractUsage,
   addUsage,
+  claudeSessionIdFor,
   parseStreamEvent,
   createStreamReader,
   DEFAULT_EXECUTOR_ROLE,
@@ -18,6 +19,22 @@ import { SHARED_CORE, EXECUTOR_INSERT } from '../core/agent-instructions.ts';
 import type { ReasoningDigest } from './reasoning-digest.ts';
 
 const task = { from: 'orchestrator', role: 'planner', type: 'text', payload: 'write a haiku to haiku.md' } as const;
+
+describe('claudeSessionIdFor (#126)', () => {
+  it('is deterministic — the same session name always yields the same id (so a reload resumes it)', () => {
+    expect(claudeSessionIdFor('coordinate-feature-x')).toBe(claudeSessionIdFor('coordinate-feature-x'));
+  });
+
+  it('distinguishes different session names', () => {
+    expect(claudeSessionIdFor('a')).not.toBe(claudeSessionIdFor('b'));
+  });
+
+  it('is a well-formed RFC-4122 UUID (claude requires one for --session-id)', () => {
+    expect(claudeSessionIdFor('any-session')).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+  });
+});
 
 describe('interpretClaudeResult', () => {
   it('returns the result on a successful run', () => {
@@ -273,6 +290,34 @@ describe('createClaudeCodeResponder', () => {
     await respond(task);
     expect(run.mock.calls[0][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: false });
     expect(run.mock.calls[1][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: true });
+  });
+
+  it('resumes from the first turn when re-attaching an interrupted session (#126)', async () => {
+    const run = vi.fn().mockResolvedValue('ok');
+    const respond = createClaudeCodeResponder({ workdir: '/w', claudeSessionId: 'fixed-uuid', resume: true, run });
+    await respond(task);
+    await respond(task);
+    // A reload left this conversation behind, so even the *first* turn resumes it
+    // rather than colliding on create.
+    expect(run.mock.calls[0][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: true });
+    expect(run.mock.calls[1][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: true });
+  });
+
+  it('falls back to creating fresh when there is no conversation to resume (#126)', async () => {
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('claude failed (exit 1): No conversation found with session ID: fixed-uuid'))
+      .mockResolvedValue('ok'); // the fallback create, and every turn after, succeed
+    const respond = createClaudeCodeResponder({ workdir: '/w', claudeSessionId: 'fixed-uuid', resume: true, run });
+
+    // The resume finds nothing (old/pre-deterministic session), so the turn doesn't
+    // dead-end — it retries as a create on the same id and succeeds.
+    await expect(respond(task)).resolves.toBeDefined();
+    expect(run.mock.calls[0][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: true }); // tried to resume
+    expect(run.mock.calls[1][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: false }); // fell back to create
+    // And the next turn resumes the now-created conversation.
+    await respond(task);
+    expect(run.mock.calls[2][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: true });
   });
 
   it('rotates the session id after a failed first turn so a retry creates cleanly, not "already in use" (#90)', async () => {

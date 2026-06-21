@@ -99,6 +99,36 @@ describe('FileChannel', () => {
     expect(inbox).toContainEqual({ from: 'boss', role: 'planner', type: 'text', payload: 'and write tests' });
   });
 
+  it('replays a participant its OWN history, but never echoes its own live sends (#126)', () => {
+    // A window's prior turns are authored by `vscode-view`; on re-attach it rejoins
+    // under the same id, so replaying must include those — or the architect's own side
+    // of the conversation vanishes on reload. Live, its own sends are still not echoed
+    // back (the panel renders those locally).
+    writeFileSync(
+      logPath,
+      `${JSON.stringify({ from: 'vscode-view', role: 'planner', type: 'text', payload: 'my earlier message' })}\n` +
+        `${JSON.stringify({ from: 'agent', role: 'executor', type: 'result', payload: 'my reply' })}\n`,
+    );
+
+    const attached = new FileChannel(logPath, { ...MANUAL, replay: true });
+    open.push(attached);
+    const inbox: Message[] = [];
+    const view = attached.join('vscode-view', 'planner', (m) => inbox.push(m));
+    attached.poll(); // replay
+
+    // Both the participant's own past turn AND the agent's reply come back on re-attach.
+    expect(inbox).toEqual([
+      { from: 'vscode-view', role: 'planner', type: 'text', payload: 'my earlier message' },
+      { from: 'agent', role: 'executor', type: 'result', payload: 'my reply' },
+    ]);
+
+    // A live send by this same participant is NOT delivered back to it (no echo dupe).
+    inbox.length = 0;
+    view.send({ type: 'text', payload: 'a new message' });
+    attached.poll();
+    expect(inbox).toEqual([]);
+  });
+
   it('rejects joining with a duplicate participant id', () => {
     const c = channel();
     c.join('dup', 'planner', () => {});
