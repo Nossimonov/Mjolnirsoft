@@ -2,7 +2,7 @@
   "name": "mjolnirsoft-session-view",
   "displayName": "Mjolnirsoft Session View",
   "description": "Render a Mjolnirsoft executor session as Markdown and Mermaid.",
-  "version": "0.0.0",
+  "version": "0.0.3",
   "private": true,
   "publisher": "mjolnirsoft",
   "engines": {
