@@ -536,6 +536,11 @@ describe('buildClaudeArgs', () => {
     expect(policy.claudeMdExcludes).toEqual(expect.arrayContaining(['**/CLAUDE.md', '**/CLAUDE.local.md']));
   });
 
+  it('disables built-in auto-memory so a spawned agent does not write notes that orphan with its worktree (#132)', () => {
+    const policy = JSON.parse(EXECUTOR_PERMISSIONS) as { autoMemoryEnabled: boolean };
+    expect(policy.autoMemoryEnabled).toBe(false);
+  });
+
   it('always spawns with the exact base policy — learned "Always" rules are not merged here (#70)', () => {
     // #70's remembering is consumed in the permission MCP server's approve, not
     // in --settings (a learned allow rule doesn't reach out-of-cwd writes), so the

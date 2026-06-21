@@ -294,6 +294,14 @@ export const EXECUTOR_PERMISSION_POLICY = {
   // loads only its composed role instructions, not the project's architect-grade
   // protocol (#121). Globs match absolute paths; forward slashes work cross-platform.
   claudeMdExcludes: ['**/CLAUDE.md', '**/CLAUDE.local.md'],
+  // Turn off claude's built-in auto-memory for spawned agents (#132). Its memory dir
+  // is keyed to the agent's cwd — an ephemeral worktree — so anything it saves orphans
+  // when the worktree is removed and is never recalled by a later session (a different
+  // worktree). Worse, the learnings belong *up* with the architect/orchestrator, not in
+  // an agent's private notes (#71): the role layer tells agents to surface them in the
+  // hand-off. Auto-memory is a built-in (no tool to deny); this settings toggle is the
+  // off switch, read from `--settings` like the rest of this policy.
+  autoMemoryEnabled: false,
 };
 
 /**
