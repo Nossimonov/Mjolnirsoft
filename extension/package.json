@@ -1,8 +1,8 @@
 {
   "name": "mjolnirsoft-session-view",
-  "displayName": "Mjolnirsoft Session View",
-  "description": "Render a Mjolnirsoft executor session as Markdown and Mermaid.",
-  "version": "0.0.4",
+  "displayName": "Mjolnirsoft Orchestrator",
+  "description": "Coordinate Mjolnirsoft agent sessions — an orchestrator that delegates to executors, rendered as Markdown and Mermaid.",
+  "version": "0.0.5",
   "private": true,
   "publisher": "mjolnirsoft",
   "engines": {
@@ -21,7 +21,7 @@
       },
       {
         "command": "mjolnirsoft.startOrchestratorSession",
-        "title": "Mjolnirsoft: Start Orchestrator Session"
+        "title": "Mjolnirsoft: Open Orchestrator"
       }
     ]
   },
