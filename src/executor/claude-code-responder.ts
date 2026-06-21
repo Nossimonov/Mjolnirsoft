@@ -12,17 +12,28 @@ import type { Respond } from './executor-runtime.ts';
  * The labeled line that prefixes every message the executor turns into a prompt,
  * naming the sender's identity and role so the agent can tell the authoritative
  * human apart from a peer/subordinate agent (#86, #71). The `planner` role is the
- * architect/human and is marked authoritative; every other role reads as a
- * non-authoritative agent. This is the seam delegation (#85) needs: once an
- * executor shares its channel with delegates, a delegate's message can never be
- * mistaken for the architect's instruction. Renaming `planner`→`orchestrator` is
- * a separate concern and deliberately untouched here.
+ * architect/human and is the *only* authoritative sender. An `orchestrator` reads
+ * as the (non-authoritative) delegating supervisor — distinct from a plain agent
+ * so an executor can tell its task-giving orchestrator from a peer/subordinate
+ * agent's report, while still routing design/permission decisions past it to the
+ * architect (#114). Every other agent role (executor, evaluator, …) reads as a
+ * plain (non-authoritative) agent. This is the seam delegation (#85) needs: once a
+ * spawner shares its channel with delegates, a delegate's message can never be
+ * mistaken for the architect's instruction.
  */
 export function senderAttribution(message: Pick<Message, 'from' | 'role'>): string {
-  // `planner` is the authoritative human; every spawned agent role (executor,
-  // evaluator, …) reads as a non-authoritative `agent`, so a delegate's bridged
-  // report (#93) can never be mistaken for the architect's instruction (#86).
-  const descriptor = message.role === 'planner' ? 'architect — authoritative' : 'agent';
+  // `planner` is the authoritative human; an `orchestrator` is the (non-
+  // authoritative) delegating supervisor, named distinctly so an executor can tell
+  // its task-giver from a peer report (#114); every other spawned agent role
+  // (executor, evaluator, …) is a plain non-authoritative `agent`. So neither an
+  // orchestrator nor a bridged delegate report (#93) can be mistaken for the
+  // architect's instruction (#86), and only `planner` ever reads as authoritative.
+  const descriptor =
+    message.role === 'planner'
+      ? 'architect — authoritative'
+      : message.role === 'orchestrator'
+        ? 'orchestrator — delegating'
+        : 'agent';
   return `[Message from ${descriptor} (id: ${message.from})]`;
 }
 

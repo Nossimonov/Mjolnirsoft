@@ -3,6 +3,8 @@ import {
   composeAgentInstructions,
   isAgentRole,
   SHARED_CORE,
+  ORCHESTRATOR_INSERT,
+  ORCHESTRATOR_OPERATIONS,
   EXECUTOR_INSERT,
   EXECUTOR_OPERATIONS,
   EVALUATOR_INSERT,
@@ -35,6 +37,24 @@ describe('composeAgentInstructions (#57)', () => {
     );
   });
 
+  it('composes the orchestrator role from the same layers — plan, delegate, relay (#114)', () => {
+    const composed = composeAgentInstructions('orchestrator');
+    // Same shared core, then the orchestrator's own insert and operational layers,
+    // in the same general → specific order joined by blank lines.
+    expect(composed).toBe(`${SHARED_CORE}\n\n${ORCHESTRATOR_INSERT}\n\n${ORCHESTRATOR_OPERATIONS}`);
+    expect(composed.indexOf(SHARED_CORE)).toBe(0);
+    // The insert carries the standing rules: delegate one task at a time, relay a
+    // distilled hand-off, route decisions up rather than settling them.
+    expect(ORCHESTRATOR_INSERT).toContain('delegate one task at a time');
+    expect(ORCHESTRATOR_INSERT).toContain('relay a distilled hand-off');
+    expect(ORCHESTRATOR_INSERT).toContain('Route every design and permission decision up to the architect');
+    // Operational guidance is a distinct layer from the insert.
+    expect(ORCHESTRATOR_OPERATIONS).not.toContain(ORCHESTRATOR_INSERT);
+    // Rung-1 scope: it coordinates and relays — it does NOT review or commit the
+    // delegate's work (later rungs); the architect reviews the branch and commits.
+    expect(ORCHESTRATOR_OPERATIONS).toContain('the architect reviews the resulting branch and commits it');
+  });
+
   it('composes the evaluator role from the same layers — fresh eyes, critique-only (#93)', () => {
     const composed = composeAgentInstructions('evaluator');
     // Same shared core (the agent chain + classification), then the evaluator's
@@ -65,6 +85,7 @@ describe('session-log literacy in the shared core (#102)', () => {
   it('reaches every log-reading role via composeAgentInstructions', () => {
     // It rides in SHARED_CORE, so every composed role carries it. Assert on the
     // roles that exist today; new log-reading roles inherit it for free.
+    expect(composeAgentInstructions('orchestrator')).toContain('updatedInput.answers');
     expect(composeAgentInstructions('executor')).toContain('updatedInput.answers');
     expect(composeAgentInstructions('evaluator')).toContain('updatedInput.answers');
   });
@@ -97,6 +118,7 @@ describe('evaluator distinguishes legible findings from judgment calls (#104)', 
 
 describe('isAgentRole (#93)', () => {
   it('accepts the tool-spawnable agent roles and rejects the human/unknown roles', () => {
+    expect(isAgentRole('orchestrator')).toBe(true);
     expect(isAgentRole('executor')).toBe(true);
     expect(isAgentRole('evaluator')).toBe(true);
     // `planner` is the human seat — no composed prompt — and anything else is unknown.

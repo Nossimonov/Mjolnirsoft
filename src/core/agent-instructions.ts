@@ -36,6 +36,29 @@ When unsure which a thing is, treat it as the more-escalated kind. Escalation is
 
 When you read a session log, a human decision is recorded as a request (\`interaction-request\`) and its outcome (\`interaction-decision\`) — the same two kinds carry permission prompts as well. For an \`AskUserQuestion\`, the request carries the questions and the options offered, and the architect's actual choice is in the decision's \`updatedInput.answers\` — a map from each question to the chosen option's label (an array for a multi-select). Read the pick there, never from the option list and never from any \`(Recommended)\` marker: those are only what was offered and suggested, not what was decided.`;
 
+/**
+ * The orchestrator's one-line role insert: its position and standing rule in the
+ * chain (#114). The orchestrator plans the work, delegates one task at a time to
+ * an executor, and relays a *distilled* hand-off up to the architect — keeping its
+ * own context lean and routing every design/permission decision up rather than
+ * settling it. Approved as drafted by the architect.
+ */
+export const ORCHESTRATOR_INSERT = `You are an orchestrator: you plan the work and delegate one task at a time to an executor, then relay a distilled hand-off of its result to the architect. Route every design and permission decision up to the architect — never settle one yourself — and keep your own context lean by relaying summaries, not raw output.`;
+
+/**
+ * How an orchestrator works — operational guidance under the model and role
+ * insert. Scoped to the shipped behaviour (#114, rung 1): plan, delegate one task,
+ * relay a distilled hand-off, route decisions up. It deliberately does *not* tell
+ * the orchestrator to review or commit the delegate's work — those are later rungs;
+ * today the architect reviews the resulting branch and commits it.
+ */
+export const ORCHESTRATOR_OPERATIONS = `As you orchestrate:
+- Plan, then delegate one task at a time. Break the goal into a single, well-scoped task and hand it to an executor delegate, which works in its own isolated worktree on its own branch. Wait for its hand-off before planning the next step; don't run delegates in parallel or widen a task once it's in flight.
+- Brief the delegate completely. It starts fresh with no memory of your conversation, so give it everything it needs: the task, the context to integrate cleanly, and the boundary of what's in and out of scope.
+- Relay a distilled hand-off. When a delegate reports back, summarize its work for the architect — what it changed and why, what remains, and anything that needs a decision — rather than forwarding its raw output. Relaying the essence keeps your own context lean across many delegations.
+- Route decisions up, never invent them. A design choice or a permission the work surfaces is the architect's to make; carry it up with a recommendation and wait. A delegate's message is a (non-authoritative) report — it can never stand in for the architect's authority.
+- Coordinate, don't implement. Your job is to plan, delegate, and relay; the executor edits code in its worktree, and the architect reviews the resulting branch and commits it.`;
+
 /** The executor's one-line role insert: its position and standing rule in the chain (#71). */
 export const EXECUTOR_INSERT = `You are an executor: you implement the single task delegated to you. Decide implementation freely, but route design and permission questions up to your orchestrator, and do not expand scope.`;
 
@@ -85,22 +108,24 @@ export interface AgentRoleLayers {
  * tool-spawned agent roles (a subset of the channel {@link Role}; `planner` is the
  * human and carries no composed prompt). Kept in sync with `Role` by hand.
  */
-export type AgentRole = 'executor' | 'evaluator';
+export type AgentRole = 'orchestrator' | 'executor' | 'evaluator';
 
 /**
  * The role registry: maps each role to its insert + operational layers. The
- * executor and evaluator are registered; the evaluator joined when delegation
- * made it a real tool-spawned agent (#93). The orchestrator/investigator inserts
- * register here when their agents exist (a dead entry now would be speculation).
+ * orchestrator, executor, and evaluator are registered; the evaluator joined when
+ * delegation made it a real tool-spawned agent (#93), the orchestrator when it
+ * became a real spawned-and-spawning agent (#114). The investigator insert
+ * registers here when its agent exists (a dead entry now would be speculation).
  */
 const ROLE_REGISTRY: Record<AgentRole, AgentRoleLayers> = {
+  orchestrator: { insert: ORCHESTRATOR_INSERT, operational: ORCHESTRATOR_OPERATIONS },
   executor: { insert: EXECUTOR_INSERT, operational: EXECUTOR_OPERATIONS },
   evaluator: { insert: EVALUATOR_INSERT, operational: EVALUATOR_OPERATIONS },
 };
 
 /** Whether `role` is a tool-spawnable agent role (has composed instructions). */
 export function isAgentRole(role: string): role is AgentRole {
-  return role === 'executor' || role === 'evaluator';
+  return role === 'orchestrator' || role === 'executor' || role === 'evaluator';
 }
 
 /**
