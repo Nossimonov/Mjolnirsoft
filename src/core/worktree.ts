@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 export interface WorktreeManagerOptions {
@@ -60,14 +60,45 @@ export class WorktreeManager {
 
   /** Add a worktree for `id` on a fresh branch; returns a handle to it. */
   create(id: string): Worktree {
+    const { path, branch } = this.locate(id);
+    mkdirSync(this.baseDir, { recursive: true });
+    // `-b` creates the branch; fails fast if the branch or the path already exists.
+    this.git(['worktree', 'add', '-b', branch, path, this.base]);
+    return this.handleFor(path, branch);
+  }
+
+  /**
+   * Re-attach to the worktree `create` already made for `id` (#126), returning a
+   * handle to it without touching its contents — so a session the extension host had
+   * to tear down (a window reload) resumes on its existing worktree, uncommitted work
+   * intact, rather than losing it. The caller should {@link exists} first; reattaching
+   * a missing worktree yields a handle whose git operations fail.
+   */
+  open(id: string): Worktree {
+    const { path, branch } = this.locate(id);
+    return this.handleFor(path, branch);
+  }
+
+  /** Whether a worktree for `id` already exists on disk — the signal that a session was interrupted, not ended (#126). */
+  exists(id: string): boolean {
+    return existsSync(this.locate(id).path);
+  }
+
+  /** Clear stale worktree registrations (e.g. after a killed executor left one behind). */
+  prune(): void {
+    this.git(['worktree', 'prune']);
+  }
+
+  /** The on-disk path and branch name for `id` (validates the id). */
+  private locate(id: string): { path: string; branch: string } {
     if (!SAFE_ID.test(id)) {
       throw new Error(`invalid worktree id: ${id} (use letters, digits, '_' or '-')`);
     }
-    mkdirSync(this.baseDir, { recursive: true });
-    const path = join(this.baseDir, id);
-    const branch = `${this.branchPrefix}${id}`;
-    // `-b` creates the branch; fails fast if the branch or the path already exists.
-    this.git(['worktree', 'add', '-b', branch, path, this.base]);
+    return { path: join(this.baseDir, id), branch: `${this.branchPrefix}${id}` };
+  }
+
+  /** The {@link Worktree} handle (commit/remove) for a worktree at `path` on `branch`. */
+  private handleFor(path: string, branch: string): Worktree {
     return {
       path,
       branch,
@@ -85,11 +116,6 @@ export class WorktreeManager {
         this.git(['worktree', 'remove', path]);
       },
     };
-  }
-
-  /** Clear stale worktree registrations (e.g. after a killed executor left one behind). */
-  prune(): void {
-    this.git(['worktree', 'prune']);
   }
 
   private assertGitRepo(): void {
