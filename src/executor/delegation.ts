@@ -1,5 +1,5 @@
 import type { Channel, Message, Role } from '../core/channel.ts';
-import { acknowledge, runExecutor, type Respond } from './executor-runtime.ts';
+import { acknowledge, runExecutor } from './executor-runtime.ts';
 import { REASONING_DIGEST } from './reasoning-digest.ts';
 
 /**
@@ -18,9 +18,12 @@ import { REASONING_DIGEST } from './reasoning-digest.ts';
  * Mirrors the shape `PermissionBridge` established: transport-free, wired by the
  * caller (who supplies the channels and how a sub-channel is opened), and unit-
  * testable over {@link InMemoryChannel}s with no real `claude`. Rung 2 proves the
- * seam with a stub delegate (the {@link acknowledge} responder); rung 3 swaps a
- * real agent in behind the same {@link DelegationDeps.createResponder} seam, the
- * way `createClaudeCodeResponder` dropped in behind `runExecutor`'s `Respond`.
+ * seam with a stub delegate (the {@link acknowledge} responder); rung 3 swapped a
+ * real `claude`-backed agent in behind the {@link DelegationDeps.createDelegate}
+ * seam; #114 generalized that seam from "a responder" to "wire the whole delegate
+ * on its sub-channel" so an executor delegate can stand up its *own* full wiring
+ * (a fresh worktree, permission/delegation MCP, a nested host) there — the
+ * evaluator stays a plain responder, an executor brings a session.
  */
 export interface DelegationManager {
   /**
@@ -37,6 +40,24 @@ export interface DelegationManager {
   shutdown(id: string): void;
 }
 
+/**
+ * What a {@link DelegationDeps.createDelegate} factory returns: how to tear the
+ * delegate down, and which sub-channel seat its *report* is posted from.
+ */
+export interface DelegateWiring {
+  /** End the delegate and everything wired for it on the sub-channel. */
+  close(): void;
+  /**
+   * The sub-channel seat whose messages are the delegate's report to bridge up.
+   * Defaults to the delegate id — a plain {@link runExecutor} delegate (the stub
+   * and the evaluator) joins as `id`. A *full executor delegate* runs its agent
+   * under a distinct seat (`${id}-executor`, alongside its `${id}-perms` /
+   * `${id}-delegate` MCP seats) and names that here, so the bridge tracks the
+   * agent's reply rather than one of its own MCP seats (#114).
+   */
+  reportFrom?: string;
+}
+
 export interface DelegationDeps {
   /** The spawner's id on its own channel; roots every derived delegate id. */
   readonly spawnerId: string;
@@ -51,16 +72,22 @@ export interface DelegationDeps {
    */
   readonly openSubChannel: (id: string) => Channel;
   /**
-   * Build a delegate's responder. Defaults to the {@link acknowledge} stub (the
-   * rung-2 echo delegate). Rung 3 injects a real `claude`-backed responder here.
+   * Wire a delegate of `role` on its sub-channel `sub`, returning a closer (and,
+   * optionally, the seat its report is posted from). Defaults to a plain
+   * {@link runExecutor} delegate driven by the {@link acknowledge} stub — the
+   * rung-2 echo. A real deployment passes a factory that runs a `claude`-backed
+   * critique delegate (an evaluator on the spawner's worktree) or stands up full
+   * executor wiring (#114). The manager owns the bridge (reporter + driver) around
+   * whatever this wires.
    */
-  readonly createResponder?: (role: Role, id: string) => Respond;
+  readonly createDelegate?: (role: Role, id: string, sub: Channel) => DelegateWiring;
 }
 
 /** Create a {@link DelegationManager} for one spawner. */
 export function createDelegationManager(deps: DelegationDeps): DelegationManager {
   const { spawnerId, spawnerRole, spawnerChannel, openSubChannel } = deps;
-  const createResponder = deps.createResponder ?? (() => acknowledge);
+  const createDelegate: NonNullable<DelegationDeps['createDelegate']> =
+    deps.createDelegate ?? ((role, id, sub) => ({ close: runExecutor(sub, id, acknowledge, role).close }));
 
   // Monotonic so a derived id is unique even if a role is spawned repeatedly; the
   // role stays in the id (`<spawner>-<role>-<n>`) for log traceability of lineage.
@@ -72,25 +99,38 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
       const id = `${spawnerId}-${role}-${++sequence}`;
       const sub = openSubChannel(id);
 
-      // The delegate: responds to tasks on its own sub-channel, in its own role.
-      const delegate = runExecutor(sub, id, createResponder(role, id), role);
+      // The delegate: whatever the factory wires on the sub-channel — a plain
+      // responder (stub/evaluator) or a full executor session (#114). It must join
+      // its agent seat before the opening task is sent (below). Provisioning a full
+      // executor delegate can fail (e.g. its worktree branch already exists), so if
+      // the factory throws, close the just-opened sub-channel before rethrowing —
+      // otherwise the sub leaks and the caller's spawn dead-ends (#114).
+      let delegate: DelegateWiring;
+      try {
+        delegate = createDelegate(role, id, sub);
+      } catch (error) {
+        sub.close();
+        throw error;
+      }
+      const reportFrom = delegate.reportFrom ?? id;
 
       // The reporter: the delegate's seat on the *spawner's* channel. Posting the
       // bridged reply through this seat makes the channel stamp it `from: <id>`,
-      // `role`, so #86 attribution reads it as an agent report (never the human).
+      // `role`, so #86 attribution reads it as an agent report (never the human) —
+      // and uses the clean delegate id even when the agent's own seat is suffixed.
       const reporter = spawnerChannel.join(id, role, () => {});
 
       // The driver: the spawner's seat on the sub-channel — it sends the opening
       // task and listens for the delegate's reply, which it bridges up verbatim
-      // through the reporter. Every message it hears is from the delegate (a
-      // channel never echoes a sender to itself); the `from` guard documents that.
+      // through the reporter.
       const driver = sub.join(spawnerId, spawnerRole, (message) => {
         // The delegate's reasoning digest (#110) stays on its own sub-channel log
         // for later post-mortem; only its distilled *report* (the result/error)
         // crosses up to the spawner, so the spawner isn't fed the delegate's full
-        // reasoning as a turn to react to. Every other message here is from the
-        // delegate (a channel never echoes a sender to itself).
-        if (message.from === id && message.type !== REASONING_DIGEST) {
+        // reasoning as a turn to react to. The `reportFrom` guard also keeps a full
+        // executor delegate's own MCP-seat traffic (permission cards, delegation
+        // control) on the sub-channel — only the agent's reply crosses up (#114).
+        if (message.from === reportFrom && message.type !== REASONING_DIGEST) {
           reporter.send({ type: message.type, payload: message.payload });
         }
       });

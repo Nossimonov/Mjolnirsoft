@@ -2,14 +2,16 @@ import * as vscode from 'vscode';
 import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import type { Channel } from '../../src/core/channel.ts';
 import { SessionStore } from '../../src/core/session-store.ts';
-import { WorktreeManager, currentRemoteBase, type Worktree } from '../../src/core/worktree.ts';
+import { WorktreeManager, currentRemoteBase } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runExecutor } from '../../src/executor/executor-runtime.ts';
 import { createClaudeCodeResponder, resolveClaudeBin } from '../../src/executor/claude-code-responder.ts';
 import { createReasoningStream, type ReasoningStream } from '../../src/executor/reasoning-stream.ts';
 import { createDelegationHost } from '../../src/executor/delegation-host.ts';
-import { composeAgentInstructions } from '../../src/core/agent-instructions.ts';
+import type { DelegateWiring } from '../../src/executor/delegation.ts';
+import { composeAgentInstructions, type AgentRole } from '../../src/core/agent-instructions.ts';
 import { recordLearnedRule } from '../../src/core/learned-permissions.ts';
 import {
   INTERACTION_DECISION,
@@ -28,7 +30,31 @@ const PERMISSION_PROMPT_TOOL = 'mcp__perm__approve';
 // session names forbids spaces/'+', so this can never collide with a real id.
 const START_NEW_SESSION = '+ Start a new executor session…';
 
+/**
+ * What a live, in-host session exposes for *attach-on-demand* (#114). A session
+ * the extension started (an orchestrator or executor command) — and every executor
+ * delegate an orchestrator spawns — registers here while it runs, so when the
+ * architect opens it from the front door the panel attaches to the *live* wiring
+ * (its reasoning stream, its agent seat, a role-apt label) rather than a viewer-
+ * only replay. A delegate is deliberately not auto-opened — the architect attaches
+ * when they choose ("each session's info in its own tab"); this registry is how
+ * that attach finds the live session.
+ */
+interface LiveSession {
+  /** The agent participant whose reply settles a turn (and whose digest is live). */
+  readonly agentId: string;
+  /** This session's live reasoning stream, to forward to a panel that attaches. */
+  readonly reasoning: ReasoningStream;
+  /** The session's role, for an apt "working" label in an attached panel. */
+  readonly role: AgentRole;
+}
+type LiveSessions = Map<string, LiveSession>;
+
 export function activate(context: vscode.ExtensionContext): void {
+  // Sessions started in-host (commands + every executor delegate) register here
+  // while live, so the front door can attach to the live wiring on demand (#114).
+  const liveSessions: LiveSessions = new Map();
+
   const openView = vscode.commands.registerCommand('mjolnirsoft.openSessionView', async () => {
     const folder = requireFolder();
     if (!folder) return;
@@ -38,7 +64,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // take the newcomer straight into starting an executor.
     const sessions = store.list();
     if (sessions.length === 0) {
-      await startExecutorSession(context, folder, store);
+      await startSession(context, folder, store, 'executor', liveSessions);
       return;
     }
     const pick = await vscode.window.showQuickPick([START_NEW_SESSION, ...sessions], {
@@ -47,40 +73,206 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     if (!pick) return;
     if (pick === START_NEW_SESSION) {
-      await startExecutorSession(context, folder, store);
+      await startSession(context, folder, store, 'executor', liveSessions);
       return;
     }
 
-    openSessionPanel(context, store, pick, folder.uri.fsPath);
+    // Attach to the live session if one is running (its reasoning + agent seat +
+    // role label), otherwise open a viewer-only replay (#114).
+    const live = liveSessions.get(pick);
+    openSessionPanel(context, store, pick, folder.uri.fsPath, {
+      executorAttached: live !== undefined,
+      executorId: live?.agentId,
+      reasoning: live?.reasoning,
+      agentLabel: live?.role,
+    });
   });
 
   const startExecutor = vscode.commands.registerCommand('mjolnirsoft.startExecutorSession', async () => {
     const folder = requireFolder();
     if (!folder) return;
-    await startExecutorSession(context, folder, storeFor(folder));
+    await startSession(context, folder, storeFor(folder), 'executor', liveSessions);
   });
 
-  context.subscriptions.push(openView, startExecutor);
+  const startOrchestrator = vscode.commands.registerCommand('mjolnirsoft.startOrchestratorSession', async () => {
+    const folder = requireFolder();
+    if (!folder) return;
+    await startSession(context, folder, storeFor(folder), 'orchestrator', liveSessions);
+  });
+
+  context.subscriptions.push(openView, startExecutor, startOrchestrator);
+}
+
+/** A live in-host session's wiring, returned by {@link provisionSession}. */
+interface ProvisionedSession {
+  /** The agent participant on the session channel (`${sessionId}-executor`). */
+  readonly agentId: string;
+  /** The session's live reasoning stream (forward it to a panel that attaches). */
+  readonly reasoning: ReasoningStream;
+  /** The branch holding the session's work, for the developer to review. */
+  readonly branch: string;
+  /** Tear down the agent + delegation host + MCP config, capture and drop the worktree. Returns whether anything was committed. Does NOT close the channel (the caller owns it). */
+  close(): boolean;
 }
 
 /**
- * Prompt for a name, spawn an executor in its own git worktree, and open its panel.
- * Shared by the "Start Executor Session" command and the "Open Session View" front
- * door, so the start-an-executor logic lives in exactly one place.
+ * Provision a full in-host agent session on `channel` — **everything but the
+ * panel** (#114): an isolated git worktree on its own branch, the per-session MCP
+ * config (permission + delegation servers), the live reasoning stream, the
+ * `claude`-backed responder composing the role's instructions, and the in-host
+ * delegation host that answers its spawn/shutdown requests. Factored out of the
+ * old `startExecutorSession` so three callers share one wiring: the
+ * `Start Executor Session` and `Start Orchestrator Session` commands, and the
+ * delegation host's **executor-delegate mode** (an orchestrator spawning an
+ * executor delegate provisions one of these on the delegate's sub-channel).
+ *
+ * The session's own delegation host provisions *its* executor delegates by
+ * recursing into this same function (a fresh worktree per delegate), and runs
+ * shared-worktree critique delegates (the evaluator) on *this* session's worktree
+ * — so an evaluator reviews "what is". Each provisioned session registers in
+ * `liveSessions` while it runs so the architect can attach to it on demand; it
+ * unregisters on close.
  */
-async function startExecutorSession(
+function provisionSession(args: {
+  context: vscode.ExtensionContext;
+  folder: vscode.WorkspaceFolder;
+  store: SessionStore;
+  sessionId: string;
+  role: AgentRole;
+  channel: Channel;
+  liveSessions: LiveSessions;
+}): ProvisionedSession {
+  const { context, folder, store, sessionId, role, channel, liveSessions } = args;
+  const repoDir = folder.uri.fsPath;
+
+  // An isolated git worktree on its own branch, so the session edits the real repo
+  // without touching the developer's working tree. Base it on the freshest
+  // origin/main (not local HEAD), so it starts from the latest merged code (#83).
+  // A create failure (e.g. the branch already exists) throws *before* anything else
+  // is allocated, so it propagates cleanly to the caller (the command surfaces it;
+  // the delegation host answers the spawn with an error).
+  const worktree = new WorktreeManager({ repoDir, base: currentRemoteBase(repoDir) }).create(sessionId);
+
+  // Once the worktree exists, a later failure must not leave it (or a written MCP
+  // config) orphaned — track what's been allocated and unwind on a partial failure.
+  let mcpConfigPath: string | undefined;
+  try {
+    // MCP-backed capabilities: one per-session config wiring Claude to both bundled
+    // servers — the permission server for escalation (#66/#70) and the delegation
+    // server for spawning delegates (#93) — each bridging over this session's channel.
+    const permParticipantId = `${sessionId}-perms`;
+    const delegateParticipantId = `${sessionId}-delegate`;
+    mcpConfigPath = writeExecutorMcpConfig(
+      context,
+      store.logPath(sessionId),
+      permParticipantId,
+      delegateParticipantId,
+      repoDir,
+      worktree.path,
+    );
+
+    // The live, ephemeral path for the agent's reasoning (#108): the responder pushes
+    // block-level digest snapshots here as it streams, and a panel that attaches
+    // subscribes to forward them. Off the channel — never logged or replayed.
+    const reasoning = createReasoningStream();
+
+    // Run the agent in-process: it joins the session in its role and answers each
+    // message by running a headless Claude Code agent with the worktree as workspace.
+    const agentId = `${sessionId}-executor`;
+    const agent = runExecutor(
+      channel,
+      agentId,
+      createClaudeCodeResponder({
+        workdir: worktree.path,
+        appendSystemPrompt: composeAgentInstructions(role),
+        permissionPromptTool: PERMISSION_PROMPT_TOOL,
+        mcpConfigPath,
+        onReasoningChange: reasoning.emit,
+      }),
+      role,
+    );
+
+    // Host the live side of delegation (#93/#114): answer this agent's spawn/shutdown
+    // requests. An `executor` spawn provisions a *full executor delegate* — a fresh
+    // worktree + this same wiring on the delegate's own sub-channel (a real,
+    // attachable session) — while a critique role (the evaluator) runs a `claude`
+    // responder on *this* session's worktree so it reviews "what is". Either way the
+    // delegate's distilled report bridges up onto this session, attributed (#86).
+    const configPath = mcpConfigPath;
+    const delegationHost = createDelegationHost({
+      spawnerChannel: channel,
+      spawnerId: agentId,
+      spawnerRole: role,
+      hostId: `${sessionId}-delegation-host`,
+      openSubChannel: (id) => store.open(id),
+      provisionExecutorDelegate: (id, sub): DelegateWiring => {
+        const child = provisionSession({ context, folder, store, sessionId: id, role: 'executor', channel: sub, liveSessions });
+        // Surface the delegate so the architect can find it: it's a real, attachable
+        // session with no auto-panel (#114), so tell them it exists, on which branch,
+        // and that it's opened on demand from the session view.
+        void vscode.window.showInformationMessage(
+          `Executor delegate "${id}" started on branch ${child.branch} — ` +
+            `open it from “Mjolnirsoft: Open Session View” to watch or answer it.`,
+        );
+        return { reportFrom: child.agentId, close: () => void child.close() };
+      },
+      createResponder: (delegateRole) =>
+        createClaudeCodeResponder({
+          workdir: worktree.path,
+          appendSystemPrompt: composeAgentInstructions(delegateRole),
+          // claudeSessionId defaults to a fresh UUID — a delegate's *channel* id is
+          // not a valid `--session-id`, and a critique delegate is short-lived anyway.
+        }),
+    });
+
+    liveSessions.set(sessionId, { agentId, reasoning, role });
+
+    return {
+      agentId,
+      reasoning,
+      branch: worktree.branch,
+      close(): boolean {
+        liveSessions.delete(sessionId);
+        delegationHost.close();
+        agent.close();
+        rmSync(configPath, { force: true });
+        // System capture: commit whatever the session changed onto its branch, then
+        // drop the worktree (the branch survives for review).
+        const captured = worktree.commit(`Mjolnir ${role} session ${sessionId}`);
+        worktree.remove();
+        return captured;
+      },
+    };
+  } catch (error) {
+    // Unwind the partial allocation so a failed provision leaves nothing behind:
+    // delete any written MCP config and remove the just-created worktree.
+    if (mcpConfigPath) rmSync(mcpConfigPath, { force: true });
+    worktree.remove();
+    throw error;
+  }
+}
+
+/**
+ * Prompt for a name, provision an agent session of `role` in its own git worktree,
+ * and open its panel. Shared by the `Start Executor Session` and
+ * `Start Orchestrator Session` commands (and the front door's start-a-new path),
+ * so the start-a-session logic lives in exactly one place (#114).
+ */
+async function startSession(
   context: vscode.ExtensionContext,
   folder: vscode.WorkspaceFolder,
   store: SessionStore,
+  role: AgentRole,
+  liveSessions: LiveSessions,
 ): Promise<void> {
-  // The in-process executor shells out to `claude`; load machine-specific config
+  // The in-process agent shells out to `claude`; load machine-specific config
   // (CLAUDE_BIN) so it's found even when the extension host's PATH lacks it.
   loadLocalEnv(join(folder.uri.fsPath, '.local.env'));
 
   const sessionId = await vscode.window.showInputBox({
-    title: 'Start an executor session',
+    title: `Start ${article(role)} ${role} session`,
     prompt: 'Name this session',
-    placeHolder: 'e.g. add-feature-x',
+    placeHolder: role === 'orchestrator' ? 'e.g. coordinate-feature-x' : 'e.g. add-feature-x',
     validateInput: (value) =>
       /^[A-Za-z0-9_-]+$/.test(value) ? undefined : "use letters, digits, '_' or '-'",
   });
@@ -91,100 +283,47 @@ async function startExecutorSession(
     return;
   }
 
-  // Give the executor an isolated git worktree on its own branch, so it edits
-  // the real repo without ever touching the developer's working tree. Base it on
-  // the freshest origin/main (not local HEAD), so a new session starts from the
-  // latest merged code even if this checkout hasn't been pulled (#83).
-  let worktree: Worktree;
+  // Open this session's channel once for the live wiring; the panel attaches its
+  // own (replaying) handle separately. The command owns this channel's lifecycle.
+  const channel = store.open(sessionId);
+  let provisioned: ProvisionedSession;
   try {
-    const repoDir = folder.uri.fsPath;
-    worktree = new WorktreeManager({ repoDir, base: currentRemoteBase(repoDir) }).create(sessionId);
+    provisioned = provisionSession({ context, folder, store, sessionId, role, channel, liveSessions });
   } catch (error) {
-    void vscode.window.showErrorMessage(`Could not create a worktree for "${sessionId}": ${String(error)}`);
+    channel.close();
+    void vscode.window.showErrorMessage(`Could not start ${role} session "${sessionId}": ${String(error)}`);
     return;
   }
 
-  // Give the executor its MCP-backed capabilities: one per-session config wiring
-  // Claude to both bundled servers — the permission server for escalation (#66/#70)
-  // and the delegation server for spawning delegates (#93) — each bridging over
-  // this session's channel. The human allows/denies gated tool uses in the panel;
-  // a delegation request is answered by the in-host delegation manager wired below.
-  const permParticipantId = `${sessionId}-perms`;
-  const delegateParticipantId = `${sessionId}-delegate`;
-  const mcpConfigPath = writeExecutorMcpConfig(
-    context,
-    store.logPath(sessionId),
-    permParticipantId,
-    delegateParticipantId,
-    folder.uri.fsPath,
-    worktree.path,
-  );
-
-  // The live, ephemeral path for the executor's reasoning (#108): the responder
-  // pushes block-level digest snapshots here as it streams, and the panel (opened
-  // below) subscribes to forward them to the webview as the reasoning box builds up.
-  // It is deliberately *off* the channel — these snapshots never hit the JSONL log
-  // or replay; only the final `result` and the durable digest persist on the channel.
-  const reasoning = createReasoningStream();
-
-  // Spawn the executor in-process: it joins the session and answers each message
-  // by running a headless Claude Code agent with the worktree as its workspace.
-  const executorChannel = store.open(sessionId);
-  const executorId = `${sessionId}-executor`;
-  const executor = runExecutor(
-    executorChannel,
-    executorId,
-    createClaudeCodeResponder({
-      workdir: worktree.path,
-      permissionPromptTool: PERMISSION_PROMPT_TOOL,
-      mcpConfigPath,
-      onReasoningChange: reasoning.emit,
-    }),
-  );
-
-  // Host the live side of delegation (#93): answer the executor's spawn/shutdown
-  // requests by running the delegation manager in-process. A spawned delegate
-  // (e.g. an evaluator) runs a headless Claude Code agent with **the executor's
-  // own worktree** as its workspace — so it reviews "what is" — on its own
-  // sub-channel session log, composing that role's instructions; its finding
-  // bridges back up onto this session, attributed as an agent (#86).
-  const delegationHost = createDelegationHost({
-    spawnerChannel: executorChannel,
-    spawnerId: executorId,
-    hostId: `${sessionId}-delegation-host`,
-    openSubChannel: (id) => store.open(id),
-    createResponder: (role) =>
-      createClaudeCodeResponder({
-        workdir: worktree.path,
-        appendSystemPrompt: composeAgentInstructions(role),
-        // claudeSessionId defaults to a fresh UUID — the delegate's *channel* id
-        // is not a valid `--session-id`, and a delegate is short-lived anyway.
-      }),
-  });
-
   openSessionPanel(context, store, sessionId, folder.uri.fsPath, {
     executorAttached: true,
-    executorId,
-    reasoning,
+    executorId: provisioned.agentId,
+    reasoning: provisioned.reasoning,
+    agentLabel: role,
     onDispose: () => {
-      delegationHost.close();
-      executor.close();
-      executorChannel.close();
-      rmSync(mcpConfigPath, { force: true });
-      // System capture: commit whatever the executor changed onto its branch,
-      // then drop the worktree (the branch survives for review).
-      const captured = worktree.commit(`Mjolnir executor session ${sessionId}`);
-      worktree.remove();
+      const captured = provisioned.close();
+      channel.close();
       void vscode.window.showInformationMessage(
         captured
-          ? `Executor session "${sessionId}" ended — review its work on branch ${worktree.branch}.`
-          : `Executor session "${sessionId}" ended — it made no changes (branch ${worktree.branch}).`,
+          ? `${capitalize(role)} session "${sessionId}" ended — review its work on branch ${provisioned.branch}.`
+          : `${capitalize(role)} session "${sessionId}" ended — it made no changes (branch ${provisioned.branch}).`,
       );
     },
   });
   void vscode.window.showInformationMessage(
-    `Executor session "${sessionId}" started on branch ${worktree.branch} — type a task in the panel.`,
+    `${capitalize(role)} session "${sessionId}" started on branch ${provisioned.branch} — ` +
+      `type ${role === 'orchestrator' ? 'a goal' : 'a task'} in the panel.`,
   );
+}
+
+/** "an" for orchestrator, "a" otherwise — for the input-box title. */
+function article(role: AgentRole): string {
+  return /^[aeiou]/i.test(role) ? 'an' : 'a';
+}
+
+/** Capitalize a role for a user-facing message ("Orchestrator", "Executor"). */
+function capitalize(role: AgentRole): string {
+  return role.charAt(0).toUpperCase() + role.slice(1);
 }
 
 export function deactivate(): void {}
@@ -220,9 +359,12 @@ function openSessionPanel(
     executorAttached?: boolean;
     executorId?: string;
     reasoning?: ReasoningStream;
+    /** What to call the working agent in the indicator (e.g. "orchestrator"); default "executor". */
+    agentLabel?: string;
   } = {},
 ): void {
   const executorAttached = options.executorAttached ?? false;
+  const agentLabel = options.agentLabel ?? 'executor';
   // The executor whose replies settle a sent turn. Only this participant's
   // messages advance the queue/indicator — a bridged delegate report (#93) is
   // someone else's id, so it renders but never counts as a turn completion (#100).
@@ -240,7 +382,7 @@ function openSessionPanel(
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')],
     },
   );
-  panel.webview.html = renderHtml(panel.webview, context.extensionUri);
+  panel.webview.html = renderHtml(panel.webview, context.extensionUri, agentLabel);
 
   // Forward the executor's live reasoning (#108) to the webview ephemerally: each
   // block-level snapshot is rendered with the *same* renderer the durable digest
@@ -426,7 +568,7 @@ function openSessionPanel(
   });
 }
 
-function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri, agentLabel: string): string {
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'));
   const nonce = makeNonce();
   const csp = [
@@ -519,7 +661,7 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 <body>
 <div id="content"></div>
 <div id="working" hidden>
-  <div id="working-header">● executor is working…</div>
+  <div id="working-header">● ${agentLabel} is working…</div>
 </div>
 <div id="queued" hidden></div>
 <div id="notice" hidden></div>

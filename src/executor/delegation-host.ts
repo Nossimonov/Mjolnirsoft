@@ -1,4 +1,4 @@
-import type { Channel, Message } from '../core/channel.ts';
+import type { Channel, Message, Role } from '../core/channel.ts';
 import { type AgentRole, isAgentRole } from '../core/agent-instructions.ts';
 import {
   DELEGATION_REQUEST,
@@ -6,14 +6,21 @@ import {
   type DelegationRequest,
   type DelegationResponse,
 } from '../core/delegation-protocol.ts';
-import { createDelegationManager } from './delegation.ts';
-import type { Respond } from './executor-runtime.ts';
+import { createDelegationManager, type DelegateWiring } from './delegation.ts';
+import { runExecutor, type Respond } from './executor-runtime.ts';
 
 export interface DelegationHostDeps {
-  /** The spawner's (executor's) channel — where requests arrive and reports bridge up. */
+  /** The spawner's channel — where requests arrive and reports bridge up. */
   readonly spawnerChannel: Channel;
   /** The spawner's id; roots every derived delegate id and drives each sub-channel. */
   readonly spawnerId: string;
+  /**
+   * The spawner's own role, stamped on the seat that drives a delegate's
+   * sub-channel — so the delegate reads its opening task attributed to its actual
+   * supervisor (an `orchestrator` delegating to an executor, an `executor`
+   * delegating to an evaluator). Defaults to `executor` (the original caller shape).
+   */
+  readonly spawnerRole?: Role;
   /** This host's seat on the spawner's channel — receives requests, sends responses. */
   readonly hostId: string;
   /**
@@ -22,7 +29,19 @@ export interface DelegationHostDeps {
    * own session log.
    */
   readonly openSubChannel: (id: string) => Channel;
-  /** Build a delegate's responder for its (validated) agent role — production passes a `claude`-backed one. */
+  /**
+   * Provision a full **executor delegate** on its own sub-channel (#114): a fresh
+   * isolated worktree + full executor wiring (responder, permission/delegation MCP,
+   * a nested host) — distinct from the evaluator's shared, no-worktree review mode.
+   * Production wires this from the extension's session-provisioning helper; returns
+   * the delegate wiring (its closer + its agent's report seat).
+   */
+  readonly provisionExecutorDelegate: (id: string, sub: Channel) => DelegateWiring;
+  /**
+   * Build a shared-worktree **critique delegate's** responder for its (validated,
+   * non-executor) agent role — production passes a `claude`-backed one running on
+   * the spawner's own worktree (the evaluator that cold-reads "what is").
+   */
   readonly createResponder: (role: AgentRole, id: string) => Respond;
 }
 
@@ -33,30 +52,39 @@ export interface DelegationHost {
 
 /**
  * The host side of live delegation (#93): owns a {@link createDelegationManager}
- * and answers the executor's {@link DelegationRequest}s arriving over the channel
- * from its delegation MCP server. On `spawn` it validates the role is a real
- * agent role, opens the delegate (which runs the injected `claude`-backed
- * responder on its own sub-channel, reporting back up the spawner's channel), and
- * returns the new id; on `shutdown` it ends that delegate. The manager already
- * mirrors `PermissionBridge`'s transport-free shape, so this host is unit-testable
- * over an {@link InMemoryChannel} with a fake responder and no real `claude`.
+ * and answers the spawner's {@link DelegationRequest}s arriving over the channel
+ * from its delegation MCP server. On `spawn` it validates the role is a real agent
+ * role, then provisions the delegate by **role** (#114): an `executor` gets a
+ * fresh isolated worktree + full executor wiring (a real, attachable session) via
+ * {@link DelegationHostDeps.provisionExecutorDelegate}, while a critique role (the
+ * evaluator) runs a plain `claude`-backed responder on the *spawner's own*
+ * worktree (reviewing "what is"). Either way the delegate runs on its own
+ * sub-channel and its distilled report bridges back up the spawner's channel; on
+ * `shutdown` it ends that delegate. The manager mirrors `PermissionBridge`'s
+ * transport-free shape, so this host is unit-testable over an {@link InMemoryChannel}
+ * with fakes and no real `claude`.
  *
  * The spawn is automatic — no human decision gates it (unlike a permission
  * prompt): concurrency and read-only safety are handled by *protocol and role*
- * (the spawner delegates at a quiescent point; the evaluator role is critique-only),
- * not by machinery here.
+ * (the spawner delegates at a quiescent point; the evaluator role is critique-only;
+ * an executor delegate is confined to its own worktree), not by machinery here.
  */
 export function createDelegationHost(deps: DelegationHostDeps): DelegationHost {
   const { spawnerChannel, spawnerId, hostId, openSubChannel } = deps;
 
   const manager = createDelegationManager({
     spawnerId,
-    spawnerRole: 'executor',
+    spawnerRole: deps.spawnerRole ?? 'executor',
     spawnerChannel,
     openSubChannel,
     // The role reaching the manager is always validated to an AgentRole below
-    // before spawn is called, so this narrowing cast is safe.
-    createResponder: (role, id) => deps.createResponder(role as AgentRole, id),
+    // before spawn is called, so the narrowing cast is safe. Executor delegates get
+    // a fresh worktree + full wiring (a real, attachable session); every other
+    // critique role (the evaluator) is a plain responder on the spawner's worktree.
+    createDelegate: (role, id, sub) => {
+      if (role === 'executor') return deps.provisionExecutorDelegate(id, sub);
+      return { close: runExecutor(sub, id, deps.createResponder(role as AgentRole, id), role).close };
+    },
   });
 
   // Track spawned ids so close() can end every delegate (the manager keeps its
@@ -77,7 +105,16 @@ export function createDelegationHost(deps: DelegationHostDeps): DelegationHost {
         respond({ error: `cannot spawn unknown role: ${role || '(none)'}` });
         return;
       }
-      const id = manager.spawn(role, { type: 'text', payload: request.task ?? '' });
+      // Provisioning a full executor delegate (#114) can fail (its worktree branch
+      // may already exist); answer with an error rather than letting the throw
+      // propagate unanswered and hang the spawner's `mcp__delegate__spawn` call.
+      let id: string;
+      try {
+        id = manager.spawn(role, { type: 'text', payload: request.task ?? '' });
+      } catch (error) {
+        respond({ error: `failed to spawn ${role} delegate: ${String(error)}` });
+        return;
+      }
       spawned.add(id);
       respond({ delegateId: id });
     } else if (request.action === 'shutdown') {
