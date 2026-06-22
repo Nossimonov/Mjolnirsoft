@@ -225,6 +225,51 @@ describe('renderInteractionRequest', () => {
   });
 });
 
+describe('renderMessage — AskUserQuestion replay path (#161)', () => {
+  it('routes an interaction-request through the card renderer on replay, not raw JSON', () => {
+    const message: Message = {
+      from: 'sess-perms',
+      role: 'executor',
+      type: 'interaction-request',
+      payload: {
+        requestId: 'req-replay-1',
+        toolName: 'AskUserQuestion',
+        input: {
+          questions: [
+            {
+              question: 'Which approach?',
+              header: 'Approach',
+              options: [{ label: 'Fast', description: 'quick' }, { label: 'Safe', description: 'careful' }],
+              multiSelect: false,
+            },
+          ],
+        },
+      },
+    };
+    const html = renderMessage(message);
+    // Must produce the question-card structure, not a raw JSON code block.
+    expect(html).toContain('class="question"');
+    expect(html).toContain('data-question="Which approach?"');
+    expect(html).toContain('data-label="Fast"');
+    expect(html).toContain('submit-answers');
+    expect(html).not.toContain('```json');
+    expect(html).not.toContain('"questions"');
+  });
+
+  it('routes a non-AskUserQuestion interaction-request through the permission card renderer', () => {
+    const message: Message = {
+      from: 'sess-perms',
+      role: 'executor',
+      type: 'interaction-request',
+      payload: { requestId: 'req-perm-1', toolName: 'Write', input: { file_path: '/etc/hosts' } },
+    };
+    const html = renderMessage(message);
+    expect(html).toContain('<strong>Write</strong>');
+    expect(html).toContain('data-behavior="allow"');
+    expect(html).not.toContain('```json');
+  });
+});
+
 describe('hueForSender', () => {
   it('is stable for a given sender and within 0–359', () => {
     expect(hueForSender('vscode-view')).toBe(hueForSender('vscode-view'));

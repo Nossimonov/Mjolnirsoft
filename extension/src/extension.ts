@@ -690,6 +690,10 @@ function openSessionPanel(
       }
       return;
     }
+    // An interaction decision is the human's answer sent back to the perm bridge —
+    // plumbing, not conversation. On replay the vscode-view's own decisions are
+    // echoed back; skip them so they don't render as raw JSON (#161).
+    if (message.type === INTERACTION_DECISION) return;
     // An interaction request means the executor is blocked waiting on us — render
     // its card and keep the "working" indicator on (it hasn't replied yet).
     if (message.type === INTERACTION_REQUEST) {
