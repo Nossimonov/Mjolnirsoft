@@ -177,7 +177,7 @@ function renderReasoningDigestHtml(from: string, entries: readonly DigestEntry[]
  */
 function renderDigestEntry(entry: DigestEntry): string {
   if (entry.kind === 'thinking') {
-    return `<div class="digest-thinking">${escapeHtml(entry.text)}</div>`;
+    return `<div class="digest-thinking">${renderMarkdown(entry.text)}</div>`;
   }
   if (entry.kind === 'text') {
     return `<div class="digest-text">${renderMarkdown(entry.text)}</div>`;
