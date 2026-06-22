@@ -43,6 +43,11 @@ export interface DelegationHostDeps {
    * the spawner's own worktree (the evaluator that cold-reads "what is").
    */
   readonly createResponder: (role: AgentRole, id: string) => Respond;
+  /**
+   * Optional token generator forwarded to {@link createDelegationManager} — see
+   * {@link DelegationDeps.generateToken}. Injectable for deterministic tests.
+   */
+  readonly generateToken?: () => string;
 }
 
 /** A running delegation host; `close()` ends all its delegates and leaves the channel. */
@@ -85,6 +90,7 @@ export function createDelegationHost(deps: DelegationHostDeps): DelegationHost {
       if (role === 'executor') return deps.provisionExecutorDelegate(id, sub);
       return { close: runExecutor(sub, id, deps.createResponder(role as AgentRole, id), role).close };
     },
+    generateToken: deps.generateToken,
   });
 
   // Track spawned ids so close() can end every delegate (the manager keeps its
