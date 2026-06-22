@@ -25,7 +25,7 @@ describe('loadProjectConfig', () => {
 
   it('reads the declared storage backend', () => {
     expect(loadProjectConfig(tempConfig('{ "storage": { "backend": "git" } }')))
-      .toEqual({ storage: { backend: 'git' } });
+      .toEqual({ storage: { backend: 'git' }, compaction: { thresholdWeightedTokens: 500_000 } });
   });
 
   it('defaults the backend when storage is omitted', () => {
@@ -52,5 +52,37 @@ describe('loadProjectConfig', () => {
   it('throws when storage.backend is not a string', () => {
     expect(() => loadProjectConfig(tempConfig('{ "storage": { "backend": 123 } }')))
       .toThrow(/must be a string/);
+  });
+});
+
+describe('loadProjectConfig — compaction config (#165)', () => {
+  it('uses the default threshold when compaction is omitted', () => {
+    const cfg = loadProjectConfig(tempConfig('{}'));
+    expect(cfg.compaction.thresholdWeightedTokens).toBe(500_000);
+  });
+
+  it('reads a custom threshold', () => {
+    const cfg = loadProjectConfig(tempConfig('{ "compaction": { "thresholdWeightedTokens": 300000 } }'));
+    expect(cfg.compaction.thresholdWeightedTokens).toBe(300_000);
+  });
+
+  it('defaults the threshold when compaction is present but thresholdWeightedTokens is absent', () => {
+    const cfg = loadProjectConfig(tempConfig('{ "compaction": {} }'));
+    expect(cfg.compaction.thresholdWeightedTokens).toBe(500_000);
+  });
+
+  it('throws when compaction is not an object', () => {
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": "yes" }')))
+      .toThrow(/"compaction" must be an object/);
+  });
+
+  it('throws when thresholdWeightedTokens is not a number', () => {
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "thresholdWeightedTokens": "big" } }')))
+      .toThrow(/must be a number/);
+  });
+
+  it('DEFAULT_PROJECT_CONFIG has the compaction field with the named default', () => {
+    expect(DEFAULT_PROJECT_CONFIG.compaction).toBeDefined();
+    expect(DEFAULT_PROJECT_CONFIG.compaction.thresholdWeightedTokens).toBe(500_000);
   });
 });

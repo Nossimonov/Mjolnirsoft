@@ -295,3 +295,39 @@ describe('orchestrator parallel delegation, architect-directed (#153)', () => {
     expect(ORCHESTRATOR_INSERT).toContain('architect directs');
   });
 });
+
+describe('orchestrator proactive compaction and drift-safeguard (#165)', () => {
+  it('ORCHESTRATOR_OPERATIONS contains the proactive-compaction clause', () => {
+    // The clause directs the orchestrator to call mcp__compact__request at task
+    // boundaries when the context note signals it is past the threshold.
+    expect(ORCHESTRATOR_OPERATIONS).toContain('mcp__compact__request');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('self-hand-off');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('no live delegate');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('Context size');
+  });
+
+  it('ORCHESTRATOR_OPERATIONS carries the task-boundary constraint for compaction', () => {
+    // Compaction fires at task boundaries only, never mid-delegation.
+    expect(ORCHESTRATOR_OPERATIONS).toContain('task boundaries only');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('Do NOT call it mid-delegation');
+  });
+
+  it('ORCHESTRATOR_OPERATIONS contains the compaction-drift safeguard', () => {
+    // After a compaction, recalled details must be verified against primary sources.
+    expect(ORCHESTRATOR_OPERATIONS).toContain('drift safeguard');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('primary source');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('re-verification');
+  });
+
+  it('the composed orchestrator instructions carry both compaction clauses', () => {
+    const composed = composeAgentInstructions('orchestrator');
+    expect(composed).toContain('mcp__compact__request');
+    expect(composed).toContain('drift safeguard');
+  });
+
+  it('executor and evaluator instructions do NOT carry the compaction clause (orchestrator-only)', () => {
+    // Compaction is an orchestrator concern — no other role has context longevity.
+    expect(composeAgentInstructions('executor')).not.toContain('mcp__compact__request');
+    expect(composeAgentInstructions('evaluator')).not.toContain('mcp__compact__request');
+  });
+});
