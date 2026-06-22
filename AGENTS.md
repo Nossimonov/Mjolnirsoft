@@ -10,7 +10,7 @@ This project runs on Windows. The Bash tool is available and preferred over Powe
 
 ```bash
 git status
-cat /c/Users/Kevin/development/Mjolnirsoft/some/path.txt
+cat /c/Users/<you>/development/Mjolnirsoft/some/path.txt
 ```
 
 **Never use backslash paths in the Bash tool** (`c:\Users\...` fails). Backslashes are only valid in PowerShell tool calls. Reserve the PowerShell tool for Windows-only operations with no Bash equivalent (registry, PS-native cmdlets).

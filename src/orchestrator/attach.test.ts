@@ -11,8 +11,8 @@ describe('attachInvitation', () => {
   });
 
   it('uses a given user id', () => {
-    expect(attachInvitation({ id: 'w', sessionId: 'demo' }, 'kevin').command).toBe(
-      'npm run session -- planner kevin --session demo --replay',
+    expect(attachInvitation({ id: 'w', sessionId: 'demo' }, 'alice').command).toBe(
+      'npm run session -- planner alice --session demo --replay',
     );
   });
 });

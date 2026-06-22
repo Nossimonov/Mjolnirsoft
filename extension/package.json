@@ -4,6 +4,7 @@
   "description": "Coordinate Mjolnirsoft agent sessions — an orchestrator that delegates to executors, rendered as Markdown and Mermaid.",
   "version": "0.0.5",
   "private": true,
+  "license": "MIT",
   "publisher": "mjolnirsoft",
   "engines": {
     "vscode": "^1.84.0"

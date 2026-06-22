@@ -2,14 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { outOfWorktreeWriteDenial } from './worktree-confinement.ts';
 
 // A representative nested-worktree path, in Windows form (the production host).
-const WORKTREE = 'C:\\Users\\Kevin\\development\\Mjolnirsoft\\.mjolnir\\worktrees\\executor-101';
+const WORKTREE = 'C:\\Users\\you\\development\\Mjolnirsoft\\.mjolnir\\worktrees\\executor-101';
 
 describe('outOfWorktreeWriteDenial', () => {
   it('auto-denies an absolute write into the repo-root copy (the #95 foot-gun)', () => {
     // The exact mistake #95 hit: targeting the main checkout's file by absolute path.
     const denial = outOfWorktreeWriteDenial(
       'Write',
-      { file_path: 'C:\\Users\\Kevin\\development\\Mjolnirsoft\\extension\\src\\render.ts', content: 'x' },
+      { file_path: 'C:\\Users\\you\\development\\Mjolnirsoft\\extension\\src\\render.ts', content: 'x' },
       WORKTREE,
     );
     expect(denial).toBeDefined();
@@ -54,7 +54,7 @@ describe('outOfWorktreeWriteDenial', () => {
 
   it('normalises drive-letter case and separators (C:\\ vs c:/) before comparing', () => {
     // Same dir, different case + slashes — must still count as inside.
-    const lowerSlash = 'c:/users/kevin/development/mjolnirsoft/.mjolnir/worktrees/executor-101';
+    const lowerSlash = 'c:/users/you/development/mjolnirsoft/.mjolnir/worktrees/executor-101';
     expect(
       outOfWorktreeWriteDenial('Write', { file_path: `${lowerSlash}/src/a.ts` }, WORKTREE),
     ).toBeUndefined();
@@ -68,7 +68,7 @@ describe('outOfWorktreeWriteDenial', () => {
 
   it('leaves reads (non-write tools) untouched — read widely, write narrowly', () => {
     expect(
-      outOfWorktreeWriteDenial('Read', { file_path: 'C:\\Users\\Kevin\\development\\Mjolnirsoft\\README.md' }, WORKTREE),
+      outOfWorktreeWriteDenial('Read', { file_path: 'C:\\Users\\you\\development\\Mjolnirsoft\\README.md' }, WORKTREE),
     ).toBeUndefined();
     expect(outOfWorktreeWriteDenial('Bash', { command: 'echo hi > C:/outside.txt' }, WORKTREE)).toBeUndefined();
   });
