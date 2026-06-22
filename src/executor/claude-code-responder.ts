@@ -76,6 +76,28 @@ export function addUsage(a: Usage, b: Usage): Usage {
 /** A zero tally to seed an accumulator. */
 export const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
 
+// Per-kind cost-proxy multipliers (#133). Output is ~5× more limit-heavy than fresh input;
+// cache-read is ~10× cheaper; cache-creation carries a small write premium.
+const WEIGHT_INPUT = 1;
+const WEIGHT_OUTPUT = 5;
+const WEIGHT_CACHE_READ = 0.1;
+const WEIGHT_CACHE_CREATION = 1.25;
+
+/**
+ * A cost-equivalent token weight for {@link Usage} (#133): applies per-kind multipliers
+ * (output × 5, cache-read × 0.1, cache-creation × 1.25, input × 1) to give a figure that
+ * tracks real budget impact rather than raw count. Rounded to the nearest integer so it
+ * compacts cleanly alongside the raw total.
+ */
+export function weightedUsage(u: Usage): number {
+  return Math.round(
+    u.inputTokens * WEIGHT_INPUT +
+    u.outputTokens * WEIGHT_OUTPUT +
+    u.cacheReadTokens * WEIGHT_CACHE_READ +
+    u.cacheCreationTokens * WEIGHT_CACHE_CREATION,
+  );
+}
+
 /**
  * Channel message type carrying one turn's {@link Usage} (#116). Like the delegation
  * and interaction control messages, it rides the channel for persistence/transport
