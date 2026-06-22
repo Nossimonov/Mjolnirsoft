@@ -117,11 +117,14 @@ describe('composeAgentInstructions (#57)', () => {
     // + opening a PR (the architect's merge is the ratification), or refines via #111.
     expect(ORCHESTRATOR_OPERATIONS).toContain('open a pull request');
     expect(ORCHESTRATOR_OPERATIONS).toContain('the architect reviews and merges');
-    // #142: it integrates from the distilled hand-off, not by re-reading the whole
-    // diff (which bloats its long-lived context) — design-fit from the summary,
-    // diff only for a specific unresolved point.
+    // #142: active pre-action gate — before opening any diff the orchestrator must
+    // name the specific unresolved question it will answer; if it can't, it integrates
+    // from the hand-off as it stands; when it does reach in, it states that question
+    // first and reads only what answers it (never a wholesale diff pull).
     expect(ORCHESTRATOR_OPERATIONS).toContain('from the distilled hand-off');
-    expect(ORCHESTRATOR_OPERATIONS).toContain('never wholesale');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('name the specific unresolved question');
+    expect(ORCHESTRATOR_OPERATIONS).toContain("can't name one");
+    expect(ORCHESTRATOR_OPERATIONS).toContain('state that question first');
   });
 
   it('composes the evaluator role from the same layers — fresh eyes, critique-only (#93)', () => {
