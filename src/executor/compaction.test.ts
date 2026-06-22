@@ -98,19 +98,59 @@ describe('inspectSession — compaction generation (#165)', () => {
     expect(inspectSession(logPath, 'orchestrator').generation).toBe(2);
   });
 
-  it('still reads role and usage alongside the generation', () => {
-    const usage = { inputTokens: 100, outputTokens: 50, cacheReadTokens: 200, cacheCreationTokens: 10 };
+  it('still reads role and generation alongside lifetimeUsage and lastTurnUsage (#9)', () => {
+    const preUsage = { inputTokens: 100, outputTokens: 50, cacheReadTokens: 200, cacheCreationTokens: 10 };
     const payload: CompactionGenerationPayload = { generation: 1 };
     const logPath = tempLog([
       JSON.stringify({ from: 'orchestrator-executor', role: 'orchestrator', type: 'result', payload: 'hi' }),
-      JSON.stringify({ from: 'orchestrator-usage', role: 'orchestrator', type: 'usage', payload: usage }),
+      JSON.stringify({ from: 'orchestrator-usage', role: 'orchestrator', type: 'usage', payload: preUsage }),
       JSON.stringify({ from: 'orchestrator-compact-host', role: 'planner', type: COMPACTION_GENERATION, payload }),
     ]);
     const meta = inspectSession(logPath, 'orchestrator');
     expect(meta.generation).toBe(1);
     expect(meta.role).toBe('orchestrator');
-    expect(meta.usage.inputTokens).toBe(100);
-    expect(meta.usage.outputTokens).toBe(50);
+    // lifetimeUsage = all-time sum: includes the pre-compaction turn.
+    expect(meta.lifetimeUsage.inputTokens).toBe(100);
+    expect(meta.lifetimeUsage.outputTokens).toBe(50);
+    // lastTurnUsage = undefined: COMPACTION_GENERATION reset it; no post-compaction turns.
+    expect(meta.lastTurnUsage).toBeUndefined();
+  });
+
+  it('lastTurnUsage reflects the most recent post-compaction turn (#9)', () => {
+    const preUsage = { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheCreationTokens: 0 };
+    const postTurn1 = { inputTokens: 30, outputTokens: 20, cacheReadTokens: 50, cacheCreationTokens: 5 };
+    const postTurn2 = { inputTokens: 10, outputTokens: 8, cacheReadTokens: 80, cacheCreationTokens: 0 };
+    const payload: CompactionGenerationPayload = { generation: 1 };
+    const logPath = tempLog([
+      JSON.stringify({ from: 'orchestrator-usage', role: 'orchestrator', type: 'usage', payload: preUsage }),
+      JSON.stringify({ from: 'orchestrator-compact-host', role: 'planner', type: COMPACTION_GENERATION, payload }),
+      JSON.stringify({ from: 'orchestrator-usage', role: 'orchestrator', type: 'usage', payload: postTurn1 }),
+      JSON.stringify({ from: 'orchestrator-usage', role: 'orchestrator', type: 'usage', payload: postTurn2 }),
+    ]);
+    const meta = inspectSession(logPath, 'orchestrator');
+    // lastTurnUsage = the last post-compaction turn (not pre-compaction, not the first post).
+    expect(meta.lastTurnUsage).toEqual(postTurn2);
+    // lifetimeUsage = all three turns combined.
+    expect(meta.lifetimeUsage.inputTokens).toBe(140);
+    expect(meta.lifetimeUsage.outputTokens).toBe(78);
+  });
+
+  it('lastTurnUsage is the last USAGE_MESSAGE when there is no compaction', () => {
+    const u1 = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheCreationTokens: 0 };
+    const u2 = { inputTokens: 20, outputTokens: 15, cacheReadTokens: 200, cacheCreationTokens: 10 };
+    const logPath = tempLog([
+      JSON.stringify({ from: 'orchestrator-usage', role: 'orchestrator', type: 'usage', payload: u1 }),
+      JSON.stringify({ from: 'orchestrator-usage', role: 'orchestrator', type: 'usage', payload: u2 }),
+    ]);
+    const meta = inspectSession(logPath, 'orchestrator');
+    expect(meta.lastTurnUsage).toEqual(u2); // last turn wins
+    expect(meta.lifetimeUsage.inputTokens).toBe(30);
+    expect(meta.lifetimeUsage.cacheReadTokens).toBe(300);
+  });
+
+  it('lastTurnUsage is undefined when log is empty', () => {
+    const logPath = tempLog([]);
+    expect(inspectSession(logPath, 'orchestrator').lastTurnUsage).toBeUndefined();
   });
 });
 
@@ -255,22 +295,22 @@ describe('getContextNote injection into orchestrator prompt (#165)', () => {
 
   it('context note reflects threshold verdict when above threshold', async () => {
     // Verify the note format used by the extension's getContextNote closure by testing
-    // the format string logic directly. The extension builds: "[Context size: X wt — verdict]"
+    // the format string logic directly. The extension builds: "[Context size: X tokens — verdict]"
     // The below tests the threshold comparison logic used when wiring getContextNote.
-    function makeContextNote(weightedTokens: number, threshold: number): string {
+    function makeContextNote(tokens: number, threshold: number): string {
       const fmtK = (n: number) => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n);
-      const aboveThreshold = weightedTokens > threshold;
+      const aboveThreshold = tokens > threshold;
       const verdict = aboveThreshold
         ? `⚠ PAST THRESHOLD — after integrating the current task, write a self-hand-off and call mcp__compact__request.`
         : `Below threshold — continue.`;
-      return `[Context size: ${fmtK(weightedTokens)} weighted tokens (threshold ${fmtK(threshold)} wt). ${verdict}]`;
+      return `[Context size: ${fmtK(tokens)} tokens (threshold ${fmtK(threshold)} tokens). ${verdict}]`;
     }
 
-    const belowNote = makeContextNote(200_000, 500_000);
+    const belowNote = makeContextNote(80_000, 150_000);
     expect(belowNote).toContain('Below threshold');
     expect(belowNote).not.toContain('PAST THRESHOLD');
 
-    const aboveNote = makeContextNote(600_000, 500_000);
+    const aboveNote = makeContextNote(160_000, 150_000);
     expect(aboveNote).toContain('PAST THRESHOLD');
     expect(aboveNote).toContain('mcp__compact__request');
   });
