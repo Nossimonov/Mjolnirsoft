@@ -7,7 +7,7 @@ import { SessionStore } from '../../src/core/session-store.ts';
 import { WorktreeManager, currentRemoteBase } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { runExecutor } from '../../src/executor/executor-runtime.ts';
-import { createClaudeCodeResponder, resolveClaudeBin, addUsage, ZERO_USAGE, USAGE_MESSAGE, claudeSessionIdFor, permissionPolicyFor, type Usage } from '../../src/executor/claude-code-responder.ts';
+import { createClaudeCodeResponder, resolveClaudeBin, addUsage, ZERO_USAGE, USAGE_MESSAGE, claudeSessionIdFor, permissionPolicyFor, weightedUsage, type Usage } from '../../src/executor/claude-code-responder.ts';
 import { createReasoningStream, type ReasoningStream } from '../../src/executor/reasoning-stream.ts';
 import { createUsageMeter, type UsageMeter } from '../../src/executor/usage-meter.ts';
 import { createDelegationHost } from '../../src/executor/delegation-host.ts';
@@ -51,10 +51,10 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-/** The header token tally (#116): grand total + output (the generation/limit-heavy slice). */
+/** The header token tally (#116/#133): grand total, cost-weighted equivalent, and output count. */
 function formatUsage(u: Usage): string {
   const total = u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheCreationTokens;
-  return `${formatTokens(total)} tok · ${formatTokens(u.outputTokens)} out`;
+  return `${formatTokens(total)} tok · ${formatTokens(weightedUsage(u))} wt · ${formatTokens(u.outputTokens)} out`;
 }
 
 /**

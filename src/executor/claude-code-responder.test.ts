@@ -7,6 +7,7 @@ import {
   interpretClaudeResult,
   extractUsage,
   addUsage,
+  weightedUsage,
   claudeSessionIdFor,
   permissionPolicyFor,
   parseStreamEvent,
@@ -105,6 +106,27 @@ describe('extractUsage / addUsage (#116)', () => {
         { inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheCreationTokens: 40 },
       ),
     ).toEqual({ inputTokens: 11, outputTokens: 22, cacheReadTokens: 33, cacheCreationTokens: 44 });
+  });
+});
+
+describe('weightedUsage (#133)', () => {
+  it('computes the cost-equivalent weight: input×1 + output×5 + cacheRead×0.1 + cacheCreation×1.25', () => {
+    // input 100×1=100, output 200×5=1000, cacheRead 50×0.1=5, cacheCreation 40×1.25=50 → 1155
+    expect(
+      weightedUsage({ inputTokens: 100, outputTokens: 200, cacheReadTokens: 50, cacheCreationTokens: 40 }),
+    ).toBe(1155);
+  });
+
+  it('returns 0 for a zero tally', () => {
+    expect(weightedUsage({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 })).toBe(0);
+  });
+
+  it('weights output tokens at 5× — a 90% cache-read session looks much lighter than its raw total', () => {
+    // 512K raw: 10K input + 2K output + 490K cacheRead + 10K cacheCreation
+    // weighted: 10000×1 + 2000×5 + 490000×0.1 + 10000×1.25 = 10000+10000+49000+12500 = 81500
+    expect(
+      weightedUsage({ inputTokens: 10_000, outputTokens: 2_000, cacheReadTokens: 490_000, cacheCreationTokens: 10_000 }),
+    ).toBe(81_500);
   });
 });
 
