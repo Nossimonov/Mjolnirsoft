@@ -175,8 +175,9 @@ export function createDelegationHost(deps: DelegationHostDeps): DelegationHost {
       let wiring: DelegateWiring;
       try {
         wiring = deps.provisionExecutorDelegate(role, id, sub);
-      } catch {
+      } catch (error) {
         sub.close();
+        console.error(`[mjolnir] rewireDelegate: could not re-provision ${id}: ${String(error)}`);
         return; // provisioning failed — skip this delegate
       }
       spawned.add(id);

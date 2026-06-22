@@ -139,6 +139,10 @@ export function activate(context: vscode.ExtensionContext): void {
     const restoreStore = storeFor(startupFolder);
     const allSessions = restoreStore.list();
     const repoDir = startupFolder.uri.fsPath;
+    // Construct WorktreeManager once for the whole restore loop so assertGitRepo
+    // runs a single git subprocess rather than one per session.
+    let wt: WorktreeManager | undefined;
+    try { wt = new WorktreeManager({ repoDir }); } catch { /* not a git repo */ }
     for (const sessionId of [...openPanelIds]) {
       if (sessionId === ORCHESTRATOR_ID) {
         openOrchestrator(context, startupFolder, restoreStore, liveSessions, undefined, panelTracker);
@@ -149,19 +153,11 @@ export function activate(context: vscode.ExtensionContext): void {
         panelTracker.untrack(sessionId);
         continue;
       }
-      try {
-        const wt = new WorktreeManager({ repoDir });
-        if (wt.exists(sessionId)) {
-          const { role } = inspectSession(restoreStore.logPath(sessionId), sessionId);
-          launchSession(context, startupFolder, restoreStore, sessionId, role ?? 'executor', liveSessions, true, undefined, panelTracker);
-        } else {
-          // Ended cleanly — restore as a viewer-only replay (already tracked).
-          openSessionPanel(context, restoreStore, sessionId, repoDir, liveSessions, {
-            onDispose: () => panelTracker.untrack(sessionId),
-          });
-        }
-      } catch {
-        // Not a git repo or WorktreeManager construction failed — open as viewer-only.
+      if (wt?.exists(sessionId)) {
+        const { role } = inspectSession(restoreStore.logPath(sessionId), sessionId);
+        launchSession(context, startupFolder, restoreStore, sessionId, role ?? 'executor', liveSessions, true, undefined, panelTracker);
+      } else {
+        // Ended cleanly (or no git repo) — restore as a viewer-only replay (already tracked).
         openSessionPanel(context, restoreStore, sessionId, repoDir, liveSessions, {
           onDispose: () => panelTracker.untrack(sessionId),
         });
