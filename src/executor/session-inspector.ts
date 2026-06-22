@@ -65,9 +65,14 @@ export function inspectSession(logPath: string, sessionId: string): SessionMetad
       const delta = msg.payload as Usage;
       lifetimeUsage = addUsage(lifetimeUsage, delta);
       lastTurnUsage = delta; // keep only the most recent (#9: snapshot, not cumulative)
-    } else if (!role && msg.from === agentSeat && isAgentRole(msg.role)) {
+    }
+    // Role and compaction-generation checks are independent (not else-if) so a message
+    // that matches both by coincidence — e.g. a COMPACTION_GENERATION sent from the
+    // executor seat — is dispatched to each branch that applies, not just the first.
+    if (!role && msg.from === agentSeat && isAgentRole(msg.role)) {
       role = msg.role;
-    } else if (msg.type === COMPACTION_GENERATION) {
+    }
+    if (msg.type === COMPACTION_GENERATION) {
       const payload = msg.payload as CompactionGenerationPayload | undefined;
       if (typeof payload?.generation === 'number') {
         generation = payload.generation;

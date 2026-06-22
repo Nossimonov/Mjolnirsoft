@@ -98,6 +98,27 @@ describe('inspectSession — compaction generation (#165)', () => {
     expect(inspectSession(logPath, 'orchestrator').generation).toBe(2);
   });
 
+  it('lastTurnUsage resets at each COMPACTION_GENERATION boundary (multiple compactions) (#9)', () => {
+    // Three generations: gen-0 turn → compact(1) → gen-1 turn → compact(2) → gen-2 turn
+    const gen0Turn = { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheCreationTokens: 0 };
+    const gen1Turn = { inputTokens: 30, outputTokens: 20, cacheReadTokens: 50, cacheCreationTokens: 5 };
+    const gen2Turn = { inputTokens: 10, outputTokens: 8, cacheReadTokens: 80, cacheCreationTokens: 2 };
+    const logPath = tempLog([
+      JSON.stringify({ from: 'orchestrator-usage', role: 'orchestrator', type: 'usage', payload: gen0Turn }),
+      JSON.stringify({ from: 'host', role: 'planner', type: COMPACTION_GENERATION, payload: { generation: 1 } }),
+      JSON.stringify({ from: 'orchestrator-usage', role: 'orchestrator', type: 'usage', payload: gen1Turn }),
+      JSON.stringify({ from: 'host', role: 'planner', type: COMPACTION_GENERATION, payload: { generation: 2 } }),
+      JSON.stringify({ from: 'orchestrator-usage', role: 'orchestrator', type: 'usage', payload: gen2Turn }),
+    ]);
+    const meta = inspectSession(logPath, 'orchestrator');
+    expect(meta.generation).toBe(2);
+    // lastTurnUsage = only the gen-2 turn (reset twice by compaction boundaries).
+    expect(meta.lastTurnUsage).toEqual(gen2Turn);
+    // lifetimeUsage = all three turns.
+    expect(meta.lifetimeUsage.inputTokens).toBe(140); // 100 + 30 + 10
+    expect(meta.lifetimeUsage.outputTokens).toBe(78); // 50 + 20 + 8
+  });
+
   it('still reads role and generation alongside lifetimeUsage and lastTurnUsage (#9)', () => {
     const preUsage = { inputTokens: 100, outputTokens: 50, cacheReadTokens: 200, cacheCreationTokens: 10 };
     const payload: CompactionGenerationPayload = { generation: 1 };
