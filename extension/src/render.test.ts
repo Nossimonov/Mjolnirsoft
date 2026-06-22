@@ -311,10 +311,31 @@ describe('renderMessage — reasoning digest (#110)', () => {
     expect(html).not.toContain('```json'); // never the structured-payload fallback
   });
 
-  it('renders a thinking block verbatim (escaped), dimmed', () => {
+  it('renders a thinking block as Markdown (HTML-escaped by markdown-it), dimmed (#174)', () => {
     const html = renderMessage(digestMessage([{ kind: 'thinking', text: 'check <tag> & flag' }]));
     expect(html).toContain('class="digest-thinking"');
-    expect(html).toContain('check &lt;tag&gt; &amp; flag'); // verbatim, HTML-escaped
+    expect(html).toContain('check &lt;tag&gt; &amp; flag'); // HTML still escaped by markdown-it
+  });
+
+  it('applies Markdown to thinking entries — bold renders as <strong> (#174)', () => {
+    const html = renderMessage(digestMessage([{ kind: 'thinking', text: '**important** finding' }]));
+    expect(html).toContain('class="digest-thinking"');
+    expect(html).toContain('<strong>important</strong>');
+  });
+
+  it('applies Markdown to thinking entries — list items become <ul> (#174)', () => {
+    const html = renderMessage(digestMessage([{ kind: 'thinking', text: '- step one\n- step two' }]));
+    expect(html).toContain('class="digest-thinking"');
+    expect(html).toContain('<ul>');
+    expect(html).toContain('<li>step one</li>');
+  });
+
+  it('applies Markdown in thinking in the live digest too — no view swap (#174)', () => {
+    const html = renderReasoningDigestLive('demo-executor', {
+      entries: [{ kind: 'thinking', text: 'Found **3 issues**' }],
+    });
+    expect(html).toContain('class="digest-thinking"');
+    expect(html).toContain('<strong>3 issues</strong>');
   });
 
   it('renders a response-text block as Markdown, normal weight (#160)', () => {
