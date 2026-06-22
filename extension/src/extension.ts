@@ -187,13 +187,13 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     if (!pick) return;
     if (pick === START_NEW_SESSION) {
-      await startSession(context, folder, store, 'executor', liveSessions);
+      await startSession(context, folder, store, 'executor', liveSessions, panelTracker);
       return;
     }
     // The orchestrator is the singleton front door (#123): attach if live, else resume
     // its one conversation — it has no worktree, so the worktree-resume path below doesn't apply.
     if (pick === ORCHESTRATOR_ID) {
-      openOrchestrator(context, folder, store, liveSessions);
+      openOrchestrator(context, folder, store, liveSessions, undefined, panelTracker);
       return;
     }
 
