@@ -12,21 +12,20 @@ export interface StorageConfig {
 
 /**
  * Compaction settings for the orchestrator (#165). After integrating a task the
- * orchestrator checks its accumulated weighted-token total; if it exceeds the
- * threshold it writes a self-hand-off and requests a context rotation.
+ * orchestrator checks its context size; if it exceeds the threshold it writes a
+ * self-hand-off and requests a context rotation.
  */
 export interface CompactionConfig {
   /**
-   * Accumulated weighted-token threshold above which the orchestrator is invited
-   * to compact its context after a task boundary. Weighted cost: output × 5,
-   * cache-read × 0.1, cache-creation × 1.25, input × 1. A lower value triggers
-   * more frequent compaction (smaller context, cheaper cache misses); a higher
-   * value allows longer sessions before rotating.
+   * Fraction of the running model's context window above which the orchestrator
+   * is invited to compact its context after a task boundary. Must be between 0
+   * (exclusive) and 1 (inclusive). Combined with a per-model window lookup, this
+   * resolves to an absolute token threshold at runtime.
    *
-   * Default: 500_000 weighted tokens — roughly a medium-heavy orchestrator session.
-   * The architect tunes this in mjolnir.config.json ("compaction.thresholdWeightedTokens").
+   * Default: 0.75 (75% of the model's context window).
+   * The architect tunes this in mjolnir.config.json ("compaction.thresholdContextPercent").
    */
-  readonly thresholdWeightedTokens: number;
+  readonly thresholdContextPercent: number;
 }
 
 /** The committed, machine-readable project strategy (see `mjolnir.config.json`). */
@@ -38,7 +37,7 @@ export interface ProjectConfig {
 /** Default when no committed config is present: the dependency-free local backend. */
 export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   storage: { backend: 'local' },
-  compaction: { thresholdWeightedTokens: 500_000 },
+  compaction: { thresholdContextPercent: 0.75 },
 };
 
 /**
@@ -75,14 +74,19 @@ export function loadProjectConfig(path = resolve(process.cwd(), 'mjolnir.config.
   if (compaction !== undefined && !isJsonObject(compaction)) {
     throw new Error(`invalid mjolnir.config.json: "compaction" must be an object, got ${describeJson(compaction)}`);
   }
-  const thresholdWeightedTokens =
-    compaction?.thresholdWeightedTokens ?? DEFAULT_PROJECT_CONFIG.compaction.thresholdWeightedTokens;
-  if (typeof thresholdWeightedTokens !== 'number') {
+  const thresholdContextPercent =
+    compaction?.thresholdContextPercent ?? DEFAULT_PROJECT_CONFIG.compaction.thresholdContextPercent;
+  if (typeof thresholdContextPercent !== 'number') {
     throw new Error(
-      `invalid mjolnir.config.json: compaction.thresholdWeightedTokens must be a number, got ${describeJson(thresholdWeightedTokens)}`,
+      `invalid mjolnir.config.json: compaction.thresholdContextPercent must be a number, got ${describeJson(thresholdContextPercent)}`,
     );
   }
-  return { storage: { backend }, compaction: { thresholdWeightedTokens } };
+  if (thresholdContextPercent <= 0 || thresholdContextPercent > 1) {
+    throw new Error(
+      `invalid mjolnir.config.json: compaction.thresholdContextPercent must be between 0 (exclusive) and 1 (inclusive), got ${thresholdContextPercent}`,
+    );
+  }
+  return { storage: { backend }, compaction: { thresholdContextPercent } };
 }
 
 /** A non-null, non-array object — the only valid shape for the config and its `storage`. */

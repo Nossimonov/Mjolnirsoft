@@ -25,7 +25,7 @@ describe('loadProjectConfig', () => {
 
   it('reads the declared storage backend', () => {
     expect(loadProjectConfig(tempConfig('{ "storage": { "backend": "git" } }')))
-      .toEqual({ storage: { backend: 'git' }, compaction: { thresholdWeightedTokens: 500_000 } });
+      .toEqual({ storage: { backend: 'git' }, compaction: { thresholdContextPercent: 0.75 } });
   });
 
   it('defaults the backend when storage is omitted', () => {
@@ -55,20 +55,20 @@ describe('loadProjectConfig', () => {
   });
 });
 
-describe('loadProjectConfig — compaction config (#165)', () => {
+describe('loadProjectConfig — compaction config (#165/#180)', () => {
   it('uses the default threshold when compaction is omitted', () => {
     const cfg = loadProjectConfig(tempConfig('{}'));
-    expect(cfg.compaction.thresholdWeightedTokens).toBe(500_000);
+    expect(cfg.compaction.thresholdContextPercent).toBe(0.75);
   });
 
-  it('reads a custom threshold', () => {
-    const cfg = loadProjectConfig(tempConfig('{ "compaction": { "thresholdWeightedTokens": 300000 } }'));
-    expect(cfg.compaction.thresholdWeightedTokens).toBe(300_000);
+  it('reads a custom threshold percent', () => {
+    const cfg = loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": 0.5 } }'));
+    expect(cfg.compaction.thresholdContextPercent).toBe(0.5);
   });
 
-  it('defaults the threshold when compaction is present but thresholdWeightedTokens is absent', () => {
+  it('defaults the threshold when compaction is present but thresholdContextPercent is absent', () => {
     const cfg = loadProjectConfig(tempConfig('{ "compaction": {} }'));
-    expect(cfg.compaction.thresholdWeightedTokens).toBe(500_000);
+    expect(cfg.compaction.thresholdContextPercent).toBe(0.75);
   });
 
   it('throws when compaction is not an object', () => {
@@ -76,13 +76,27 @@ describe('loadProjectConfig — compaction config (#165)', () => {
       .toThrow(/"compaction" must be an object/);
   });
 
-  it('throws when thresholdWeightedTokens is not a number', () => {
-    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "thresholdWeightedTokens": "big" } }')))
+  it('throws when thresholdContextPercent is not a number', () => {
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": "big" } }')))
       .toThrow(/must be a number/);
+  });
+
+  it('throws when thresholdContextPercent is out of range', () => {
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": 0 } }')))
+      .toThrow(/between 0.*and 1/);
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": 1.5 } }')))
+      .toThrow(/between 0.*and 1/);
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": -0.1 } }')))
+      .toThrow(/between 0.*and 1/);
+  });
+
+  it('accepts thresholdContextPercent of exactly 1', () => {
+    const cfg = loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": 1 } }'));
+    expect(cfg.compaction.thresholdContextPercent).toBe(1);
   });
 
   it('DEFAULT_PROJECT_CONFIG has the compaction field with the named default', () => {
     expect(DEFAULT_PROJECT_CONFIG.compaction).toBeDefined();
-    expect(DEFAULT_PROJECT_CONFIG.compaction.thresholdWeightedTokens).toBe(500_000);
+    expect(DEFAULT_PROJECT_CONFIG.compaction.thresholdContextPercent).toBe(0.75);
   });
 });
