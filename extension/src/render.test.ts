@@ -272,10 +272,28 @@ describe('renderMessage — reasoning digest (#110)', () => {
     expect(html).toContain('check &lt;tag&gt; &amp; flag'); // verbatim, HTML-escaped
   });
 
-  it('renders a response-text block verbatim (escaped), normal weight', () => {
+  it('renders a response-text block as Markdown, normal weight (#160)', () => {
     const html = renderMessage(digestMessage([{ kind: 'text', text: 'Searching <here> & now' }]));
     expect(html).toContain('class="digest-text"');
-    expect(html).toContain('Searching &lt;here&gt; &amp; now'); // verbatim, HTML-escaped
+    expect(html).toContain('Searching &lt;here&gt; &amp; now'); // HTML entities still escaped by markdown-it
+  });
+
+  it('applies Markdown to text entries — bold and list render as HTML (#160)', () => {
+    const html = renderMessage(digestMessage([{ kind: 'text', text: 'This is **bold** text' }]));
+    expect(html).toContain('<strong>bold</strong>');
+  });
+
+  it('applies Markdown to text entries — list items become <ul> (#160)', () => {
+    const html = renderMessage(digestMessage([{ kind: 'text', text: '- item one\n- item two' }]));
+    expect(html).toContain('<ul>');
+    expect(html).toContain('<li>item one</li>');
+  });
+
+  it('applies Markdown in the live digest too (renderReasoningDigestLive, #160)', () => {
+    const html = renderReasoningDigestLive('demo-executor', {
+      entries: [{ kind: 'text', text: 'Found **3 issues**' }],
+    });
+    expect(html).toContain('<strong>3 issues</strong>');
   });
 
   it('counts text entries in the summary alongside thinking and tools', () => {
