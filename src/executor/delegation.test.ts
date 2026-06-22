@@ -221,6 +221,85 @@ describe('createDelegationManager', () => {
     expect(id2).toContain('dddd0002');
   });
 
+  describe('rewire (#128)', () => {
+    it('re-establishes the bridge without sending an opening task, and routes follow-ups', async () => {
+      // A reload tears the old manager down. The new manager creates a fresh bridge
+      // via `rewire` — the delegate is already running and resumes; no opening task.
+      const { manager, orchestratorInbox } = wire();
+      const sub = new InMemoryChannel();
+      const delegateId = 'spawner-executor-1-rewired';
+      const agentSeat = `${delegateId}-executor`;
+
+      // Wire up a delegate agent on the sub-channel *before* calling rewire — just
+      // as provisionSession wires the real agent before the bridge is re-established.
+      const agent = runExecutor(
+        sub,
+        agentSeat,
+        async (m) => ({ type: 'result', payload: `resumed: ${m.payload}` }),
+        'executor',
+      );
+
+      manager.rewire('executor', delegateId, sub, { reportFrom: agentSeat, close: agent.close });
+
+      // No opening task should have been sent (the delegate is resuming, not starting).
+      expect(orchestratorInbox).toEqual([]);
+
+      // Use manager.send to route a follow-up through the re-wired driver seat —
+      // exactly how the spawner communicates with a live delegate after spawning.
+      manager.send(delegateId, { type: 'text', payload: 'what is the status?' });
+      await flush();
+
+      expect(orchestratorInbox).toEqual([
+        { from: delegateId, role: 'executor', type: 'result', payload: 'resumed: what is the status?' },
+      ]);
+    });
+
+    it('is idempotent: re-wiring an already-wired id is a no-op', async () => {
+      const { manager, orchestratorInbox } = wire(resultDelegate);
+
+      // First: spawn normally.
+      const id = manager.spawn('executor', { type: 'text', payload: 'task' });
+      await flush();
+      expect(orchestratorInbox).toHaveLength(1);
+
+      // Second: try to rewire the same id — should silently no-op (does not throw
+      // or replace the existing bridge with the new sub-channel).
+      const sub2 = new InMemoryChannel();
+      manager.rewire('executor', id, sub2, { close: () => {} });
+      // The original bridge still holds. Sending via manager.send still routes to
+      // the original delegate (since the rewire for `id` was ignored).
+      manager.send(id, { type: 'text', payload: 'follow-up' });
+      await flush();
+      expect(orchestratorInbox).toHaveLength(2); // original + follow-up, NOT from sub2
+    });
+
+    it('a rewired delegate can be shut down, releasing the bridge', async () => {
+      const { manager, orchestratorInbox } = wire();
+      const sub = new InMemoryChannel();
+      const delegateId = 'spawner-executor-rewired-shutdown';
+      const agentSeat = `${delegateId}-executor`;
+      const agent = runExecutor(
+        sub, agentSeat,
+        async (m) => ({ type: 'result', payload: `done: ${m.payload}` }),
+        'executor',
+      );
+
+      manager.rewire('executor', delegateId, sub, { reportFrom: agentSeat, close: agent.close });
+
+      // Drive a follow-up through the re-wired driver — it bridges up.
+      manager.send(delegateId, { type: 'text', payload: 'go' });
+      await flush();
+      expect(orchestratorInbox).toHaveLength(1);
+
+      // Shutdown releases the bridge: manager.send returns false and no further
+      // messages cross up to the spawner's channel.
+      manager.shutdown(delegateId);
+      expect(manager.send(delegateId, { type: 'text', payload: 'too late' })).toBe(false);
+      await flush();
+      expect(orchestratorInbox).toHaveLength(1); // no new message
+    });
+  });
+
   it('bridges from a distinct report seat when the delegate names one (#114 full-executor shape)', async () => {
     // A full executor delegate runs its agent under `${id}-executor` (alongside its
     // own MCP seats) and names that seat via reportFrom — so the manager bridges the

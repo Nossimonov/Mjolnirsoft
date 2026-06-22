@@ -275,6 +275,106 @@ describe('createDelegationHost — investigator-delegate mode (#166)', () => {
   });
 });
 
+describe('createDelegationHost — rewireDelegate (#128)', () => {
+  it('re-establishes the bridge for an executor delegate without sending an opening task', async () => {
+    // Simulate a reload: a new host is created for the resumed orchestrator. The
+    // delegate already has its own sub-channel (its session log), and the host
+    // re-provisions it (resuming via #126) and wires the bridge.
+    const { host, reports } = wire();
+
+    const delegateId = 'w1-executor-executor-1-rewired';
+
+    // The new host re-wires the bridge for this pre-existing delegate.
+    host.rewireDelegate('executor', delegateId);
+
+    // No opening task should have been sent — the delegate is resuming, not starting.
+    expect(reports).toEqual([]);
+  });
+
+  it('bridges a resumed delegate\'s future reply up to the spawner channel', async () => {
+    // After rewiring, when the delegate's agent sends a result (e.g. the resumed
+    // claude turn completes), it bridges up under the clean delegate id.
+    const { bridge, host, reports } = wire({
+      provisionExecutorDelegate: (_role, id, sub) => {
+        const agentSeat = `${id}-executor`;
+        const agent = runExecutor(
+          sub, agentSeat,
+          async (m) => ({ type: 'result', payload: `resumed: ${m.payload}` }),
+          'executor',
+        );
+        return { reportFrom: agentSeat, close: agent.close };
+      },
+    });
+
+    const delegateId = 'w1-executor-executor-1-rewired';
+    host.rewireDelegate('executor', delegateId);
+
+    // Send a follow-up via the MCP bridge — routes through the host to manager.send
+    // which uses the re-wired driver seat to deliver to the delegate.
+    void bridge.message(delegateId, 'continue the task');
+    await flush();
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      from: delegateId,
+      role: 'executor',
+      type: 'result',
+      payload: 'resumed: continue the task',
+    });
+  });
+
+  it('skips critique-only roles (evaluator, investigator) — they have no persistent worktree', () => {
+    const { host, reports } = wire();
+
+    host.rewireDelegate('evaluator', 'w1-executor-evaluator-1-rewired');
+    host.rewireDelegate('investigator', 'w1-executor-investigator-1-rewired');
+
+    expect(reports).toEqual([]);
+  });
+
+  it('is idempotent: re-wiring an already-wired delegate is a no-op', async () => {
+    const { bridge, host, reports } = wire();
+
+    // Normal spawn first.
+    const { delegateId: id } = await bridge.spawn('executor', 'original task');
+    await flush();
+    expect(reports).toHaveLength(1);
+
+    // Attempt to rewire the same id — should be silently ignored.
+    host.rewireDelegate('executor', id!);
+    await flush();
+    expect(reports).toHaveLength(1); // no additional message
+  });
+
+  it('a rewired delegate is closed by host.close()', async () => {
+    const { host, reports, subChannels } = wire({
+      provisionExecutorDelegate: (_role, id, sub) => {
+        const agentSeat = `${id}-executor`;
+        const agent = runExecutor(
+          sub, agentSeat,
+          async (m) => ({ type: 'result', payload: `done: ${m.payload}` }),
+          'executor',
+        );
+        return { reportFrom: agentSeat, close: agent.close };
+      },
+    });
+
+    const delegateId = 'w1-executor-executor-1-rewired-close';
+    host.rewireDelegate('executor', delegateId);
+
+    host.close();
+
+    // After close the bridge seats are released; a probe on the sub-channel
+    // can't reach the spawner's reports any more (same pattern as the existing
+    // "ends every live delegate on host close" test).
+    const sub = subChannels.get(delegateId)!;
+    const probe = sub.join('probe', 'planner', () => {});
+    probe.send({ type: 'result', payload: 'too late' });
+    await flush();
+    expect(reports).toEqual([]);
+  });
+});
+
 describe('createDelegationHost — arbitrator-delegate mode (#99)', () => {
   it('provisions an arbitrator on the isolated-worktree path (not the critique responder)', async () => {
     const { bridge, provisioned, seen, subLogs } = wire();

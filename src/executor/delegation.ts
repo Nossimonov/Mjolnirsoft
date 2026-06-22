@@ -46,6 +46,15 @@ export interface DelegationManager {
    * bridge. Unknown ids are a no-op (idempotent).
    */
   shutdown(id: string): void;
+  /**
+   * Re-establish the bridge for a delegate that survived a reload (#128): wire the
+   * reporter seat on the spawner's channel and the driver seat on `sub` without
+   * sending an opening task (the delegate is already running and resumes via #126).
+   * Future replies from `delegate.reportFrom` on `sub` bridge up to the spawner's
+   * channel under `id`, exactly as after a normal spawn. Idempotent: re-wiring an
+   * already-live `id` is a no-op.
+   */
+  rewire(role: Role, id: string, sub: Channel, delegate: DelegateWiring): void;
 }
 
 /**
@@ -187,6 +196,26 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
       if (!delegate) return;
       delegates.delete(id);
       delegate.close();
+    },
+
+    rewire(role, id, sub, delegate) {
+      if (delegates.has(id)) return; // already wired — idempotent
+      const reportFrom = delegate.reportFrom ?? id;
+      const reporter = spawnerChannel.join(id, role, () => {});
+      const driver = sub.join(spawnerId, spawnerRole, (message) => {
+        if (message.from === reportFrom && deliversToAgent(message)) {
+          reporter.send({ type: message.type, payload: message.payload });
+        }
+      });
+      delegates.set(id, {
+        driver,
+        close() {
+          driver.close();
+          reporter.close();
+          delegate.close();
+          sub.close();
+        },
+      });
     },
   };
 }
