@@ -477,11 +477,19 @@ function provisionSession(args: {
     // prefixed by the orchestrator's agent id, and only those with a still-present
     // worktree were interrupted (a clean close removes the worktree). Critique roles
     // (evaluator, investigator) have no persistent worktree, so they never appear here.
+    //
+    // Only direct children are wired: the suffix after the prefix has exactly 2
+    // dashes (role-sequence-token). A deeper descendant (a delegate's own sub-
+    // delegate) would have more dashes; it is instead wired by the resumed executor
+    // delegate's own delegation host when that delegate's provisionSession fires.
+    // Role names contain no dashes, and the token has dashes stripped (#128).
     if (isOrchestrator && resuming) {
       const delegatePrefix = `${agentId}-`;
       const wt = new WorktreeManager({ repoDir });
       for (const delegateId of store.list()) {
         if (!delegateId.startsWith(delegatePrefix)) continue;
+        const suffix = delegateId.slice(delegatePrefix.length);
+        if ((suffix.match(/-/g) ?? []).length !== 2) continue; // not a direct child
         if (!wt.exists(delegateId)) continue; // finished cleanly — skip
         const { role: delegateRole } = inspectSession(store.logPath(delegateId), delegateId);
         if (delegateRole !== undefined && isAgentRole(delegateRole)) {
