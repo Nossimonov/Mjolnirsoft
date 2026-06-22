@@ -1,12 +1,24 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorktreeManager, currentRemoteBase } from './worktree.ts';
 
+const tempDirs: string[] = [];
+afterAll(() => {
+  for (const dir of tempDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort: git background processes may briefly hold handles on Windows
+    }
+  }
+});
+
 function initRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'mjolnir-wt-'));
+  tempDirs.push(dir);
   const g = (...a: string[]) => execFileSync('git', a, { cwd: dir, stdio: 'ignore' });
   g('init');
   g('config', 'user.email', 't@t');
@@ -85,6 +97,7 @@ describe('WorktreeManager', () => {
     mgr.create('dup');
     expect(() => mgr.create('dup')).toThrow(); // branch + path already exist
     const notRepo = mkdtempSync(join(tmpdir(), 'mjolnir-norepo-'));
+    tempDirs.push(notRepo);
     expect(() => new WorktreeManager({ repoDir: notRepo })).toThrow(/git repository/);
   });
 
@@ -138,6 +151,7 @@ describe('currentRemoteBase (#83)', () => {
     // The trap that put #57 on stale code: a repo pushed to origin, then origin/main
     // advanced from elsewhere, leaving this checkout's local main behind.
     const remote = mkdtempSync(join(tmpdir(), 'mjolnir-remote-'));
+    tempDirs.push(remote);
     execFileSync('git', ['init', '--bare', '-b', 'main', remote], { stdio: 'ignore' });
     const repo = initRepo();
     const g = (...a: string[]) => execFileSync('git', a, { cwd: repo, stdio: 'ignore' });
@@ -147,6 +161,7 @@ describe('currentRemoteBase (#83)', () => {
 
     // Advance origin/main from a second clone (repo's local main stays behind).
     const other = mkdtempSync(join(tmpdir(), 'mjolnir-other-'));
+    tempDirs.push(other);
     const o = (...a: string[]) => execFileSync('git', a, { cwd: other, stdio: 'ignore' });
     o('clone', remote, '.');
     o('config', 'user.email', 't@t');

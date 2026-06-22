@@ -1,11 +1,17 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, afterAll } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadLocalEnv } from './load-local-env.ts';
 
+const tempDirs: string[] = [];
+afterAll(() => {
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+});
+
 function tempFile(contents: string): string {
   const dir = mkdtempSync(join(tmpdir(), 'mjolnir-localenv-'));
+  tempDirs.push(dir);
   const path = join(dir, '.local.env');
   writeFileSync(path, contents);
   return path;

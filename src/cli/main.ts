@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Channel } from '../core/channel.ts';
@@ -38,9 +38,17 @@ async function main(argv: readonly string[]): Promise<void> {
     // Claude Code session. It owns no terminal conversation, so stay alive on
     // the open stdin until stopped.
     const workdir = mkdtempSync(join(tmpdir(), `mjolnir-executor-${args.id}-`));
-    runExecutor(channel, args.id, createClaudeCodeResponder({ workdir }));
-    for await (const _line of rl) {
-      // an automated executor ignores terminal input
+    try {
+      runExecutor(channel, args.id, createClaudeCodeResponder({ workdir }));
+      for await (const _line of rl) {
+        // an automated executor ignores terminal input
+      }
+    } finally {
+      try {
+        rmSync(workdir, { recursive: true, force: true });
+      } catch {
+        // best-effort: a claude subprocess may still hold file handles on Windows
+      }
     }
     return;
   }
