@@ -27,6 +27,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { FileChannel } from '../core/file-channel.ts';
 import { createDelegationBridge } from './delegation-bridge.ts';
+import { projectDelegationLedger, findByDelegateId, findByTaskKey } from './delegation-ledger.ts';
 
 const logPath = process.env.MJOLNIR_SESSION_LOG;
 const participantId = process.env.MJOLNIR_DELEGATE_ID ?? 'delegation';
@@ -89,11 +90,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         additionalProperties: false,
       },
     },
+    {
+      name: 'lookup_delegation',
+      description:
+        'Look up a past delegation\'s original hand-off task and any returned reports, derived from the ' +
+        'durable channel log — not from in-context memory. Use it to re-read the exact task you gave a ' +
+        'delegate after context has been compacted. Provide delegateId for an exact lookup (takes priority ' +
+        'if both are given), taskKey for a case-insensitive substring search (e.g. "#168", a keyword), ' +
+        'or omit both to list all currently active delegations.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          delegateId: { type: 'string', description: 'Exact delegate id to look up.' },
+          taskKey: {
+            type: 'string',
+            description: 'Substring to search in the task text (e.g. "#168", a keyword, or any fragment).',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
   ],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  const args = (req.params.arguments ?? {}) as { role?: string; task?: string; delegateId?: string; message?: string };
+  const args = (req.params.arguments ?? {}) as { role?: string; task?: string; delegateId?: string; message?: string; taskKey?: string };
   if (req.params.name === 'spawn') {
     const response = await bridge.spawn(args.role ?? '', args.task ?? '');
     const text = response.error
@@ -111,6 +132,32 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'shutdown') {
     await bridge.shutdown(args.delegateId ?? '');
     return { content: [{ type: 'text', text: `delegate shut down: ${args.delegateId}` }] };
+  }
+  if (req.params.name === 'lookup_delegation') {
+    const { delegateId, taskKey } = args;
+    const entries = projectDelegationLedger(logPath);
+    if (delegateId) {
+      const entry = findByDelegateId(entries, delegateId);
+      const text = entry
+        ? JSON.stringify(entry, null, 2)
+        : `no delegation found for id: ${delegateId}`;
+      return { content: [{ type: 'text', text }] };
+    }
+    if (taskKey) {
+      const matches = findByTaskKey(entries, taskKey);
+      const text =
+        matches.length > 0
+          ? JSON.stringify(matches, null, 2)
+          : `no delegations found matching: ${taskKey}`;
+      return { content: [{ type: 'text', text }] };
+    }
+    // No filter: return active delegations (the reload-survival use case).
+    const active = entries.filter((e) => e.active);
+    const text =
+      active.length > 0
+        ? JSON.stringify(active, null, 2)
+        : 'no active delegations';
+    return { content: [{ type: 'text', text }] };
   }
   return { content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }], isError: true };
 });
