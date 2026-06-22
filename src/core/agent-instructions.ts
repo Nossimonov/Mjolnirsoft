@@ -32,8 +32,8 @@
  * marker (#102). Identical for all roles — it tells an agent the chain it is
  * structurally inside and where the human's authority sits. The general-most
  * layer (layer 1). Session-log literacy rides here (rather than a dedicated
- * log-reader layer) because the targeted reader roles (#99 Arbitrator,
- * Investigators) aren't built yet and the added text is a couple of sentences.
+ * log-reader layer) because it is a couple of sentences and the Investigator
+ * role — the other planned log-reader — isn't built yet; see #99 for Arbitrator.
  */
 export const SHARED_CORE = `You operate in a chain of sessions coordinating one project. From the top: the architect (a human) holds final authority over design and permissions; an orchestrator plans, delegates, reviews its delegated work, and routes; executors implement delegated tasks in isolation; evaluators critique with fresh eyes and no stake in the plan. Work flows down; questions and decisions flow up.
 
@@ -48,7 +48,7 @@ Before doing any work in this project, read \`AGENTS.md\` at the repo root and f
 
 Don't spin up ad-hoc sub-agents to survey the project for yourself — the context you'd go looking for is usually already known above you. Ask upward for what you're missing rather than rediscovering it exhaustively; reserve delegation for the real tasks your role hands down. Likewise, don't keep private notes or memory only you will read — your session is short-lived and nothing below the architect persists. A learning worth keeping (a gotcha, a convention, a fix) goes *up* in your hand-off, where the architect decides what becomes a durable rule; a note to yourself just evaporates.
 
-Project bookkeeping — the change-tracking and release protocol a project runs around the work (filing or closing issues/tickets, opening PRs, the commit-and-close ritual, start-of-session tracking checks) — is owned by the orchestrator, in coordination with the architect. Executors and evaluators never run it: do your work and surface what needs tracking in your hand-off; the orchestrator handles it from there. The architect remains the authority the orchestrator coordinates with — on design decisions, permissions, and what gets merged.
+Project bookkeeping — the change-tracking and release protocol a project runs around the work (filing or closing issues/tickets, opening PRs, the commit-and-close ritual, start-of-session tracking checks) — is owned by the orchestrator, in coordination with the architect. Executors, evaluators, and arbitrators never run it: do your work and surface what needs tracking in your hand-off; the orchestrator handles it from there. The architect remains the authority the orchestrator coordinates with — on design decisions, permissions, and what gets merged.
 
 When you read a session log, a human decision is recorded as a request (\`interaction-request\`) and its outcome (\`interaction-decision\`) — the same two kinds carry permission prompts as well. For an \`AskUserQuestion\`, the request carries the questions and the options offered, and the architect's actual choice is in the decision's \`updatedInput.answers\` — a map from each question to the chosen option's label (an array for a multi-select). Read the pick there, never from the option list and never from any \`(Recommended)\` marker: those are only what was offered and suggested, not what was decided.`;
 
@@ -107,6 +107,30 @@ export const EXECUTOR_OPERATIONS = `As you implement:
 export const EVALUATOR_INSERT = `You are an evaluator: you review the changes or state put in front of you with fresh eyes and no stake in it. Critique only — never modify what you review — and return a distilled finding, not a rewrite.`;
 
 /**
+ * The arbitrator's one-line role insert: its position and standing rule in the
+ * chain (#99). An arbitrator reconciles two conflicting branches into a clean
+ * merge — neutral, no stake in either side — working from each side's *intent*
+ * (what its session log shows it was trying to accomplish) rather than the
+ * textual diff alone; it never authors new design, and it escalates to the
+ * architect when the record cannot settle a conflict.
+ */
+export const ARBITRATOR_INSERT = `You are an arbitrator: you reconcile two conflicting branches into a clean merge, neutral with no stake in either side; you work from each side's intent — what its session log shows it was trying to accomplish — not from the textual diff alone, and you never author new design; where the record cannot settle a conflict, you escalate to the architect with a precise question rather than guessing.`;
+
+/**
+ * How an arbitrator works — operational guidance under the model and role
+ * insert. Reads both sides (branches via git + session logs via the session
+ * store), reconciles by intent, produces the result in its own worktree and
+ * hands off like an executor, and escalates precisely when the record can't
+ * settle a conflict (#99).
+ */
+export const ARBITRATOR_OPERATIONS = `As you reconcile:
+- Read both sides fully. The two conflicting branches are available via git in your worktree. Each side's session log and hand-off are available through the session store — read them by session id, not as hardcoded file paths (with the git backend, session logs live on the \`refs/mjolnir/sessions\` ref, not in the working tree). The log is where intent lives: read it to understand what each side was doing and why before you examine the textual diff.
+- Reconcile by intent, not by diff. When the textual diff conflicts, ask what each side's session log shows was the goal — that is what the merge must preserve. Where both intents are compatible, find a form that expresses both. Where one intent should supersede the other, the record must establish that clearly — the log, the brief, the design record.
+- Produce the reconciled result in your own worktree and hand off — like an executor: do not commit. The orchestrator integrates via push + PR. Your branch is the deliverable; a clean, test-passing branch is the goal.
+- Escalate when the record cannot settle a conflict. If two intents genuinely cannot both be satisfied and the logs do not establish which should win, end your turn with a precise question — the conflicting goals, what is at stake, what you need the architect to decide — rather than guessing or applying one side's design over the other unilaterally. Guessing entrenches a direction that may not be what the architect intended; one precise question ends the ambiguity at the right level.
+- Cover and justify your work. Run the test suite to confirm the reconciled result is correct. In your hand-off, explain each non-trivial reconciliation decision — what the conflict was, what you found in the logs, and why the chosen form preserves both intents or why escalation was required. Future sessions and the architect need the reasoning on the record, not just the result.`;
+
+/**
  * How an evaluator works on the state under review — operational guidance under
  * the model and role insert. Includes the legible-vs-judgment classification
  * (#104): objective findings are scored cold; reader-effect judgment calls (a
@@ -135,24 +159,26 @@ export interface AgentRoleLayers {
  * tool-spawned agent roles (a subset of the channel {@link Role}; `planner` is the
  * human and carries no composed prompt). Kept in sync with `Role` by hand.
  */
-export type AgentRole = 'orchestrator' | 'executor' | 'evaluator';
+export type AgentRole = 'orchestrator' | 'executor' | 'evaluator' | 'arbitrator';
 
 /**
  * The role registry: maps each role to its insert + operational layers. The
  * orchestrator, executor, and evaluator are registered; the evaluator joined when
  * delegation made it a real tool-spawned agent (#93), the orchestrator when it
- * became a real spawned-and-spawning agent (#114). The investigator insert
+ * became a real spawned-and-spawning agent (#114), the arbitrator when conflict
+ * reconciliation became a first-class delegate role (#99). The investigator insert
  * registers here when its agent exists (a dead entry now would be speculation).
  */
 const ROLE_REGISTRY: Record<AgentRole, AgentRoleLayers> = {
   orchestrator: { insert: ORCHESTRATOR_INSERT, operational: ORCHESTRATOR_OPERATIONS },
   executor: { insert: EXECUTOR_INSERT, operational: EXECUTOR_OPERATIONS },
   evaluator: { insert: EVALUATOR_INSERT, operational: EVALUATOR_OPERATIONS },
+  arbitrator: { insert: ARBITRATOR_INSERT, operational: ARBITRATOR_OPERATIONS },
 };
 
 /** Whether `role` is a tool-spawnable agent role (has composed instructions). */
 export function isAgentRole(role: string): role is AgentRole {
-  return role === 'orchestrator' || role === 'executor' || role === 'evaluator';
+  return role === 'orchestrator' || role === 'executor' || role === 'evaluator' || role === 'arbitrator';
 }
 
 /**

@@ -72,16 +72,17 @@ function wire(options: WireOptions = {}) {
       return async (message) => ({ type: 'result', payload: `critique by ${role}: ${String(message.payload)}` });
     });
 
-  // The full executor-delegate (#114) path: a fake stand-in for the extension's
-  // real provisioning. It runs a plain responder under the *suffixed* agent seat
-  // (`${id}-executor`, as the real wiring does alongside its MCP seats), records
-  // the provisioning, and names that seat via reportFrom.
-  const provisioned: Array<{ id: string }> = [];
+  // The full isolated-worktree delegate (#114, #99) path: a fake stand-in for the
+  // extension's real provisioning. It runs a plain responder under the *suffixed*
+  // agent seat (`${id}-executor`, as the real wiring does alongside its MCP seats),
+  // records the provisioning (including the role, so tests can verify correct
+  // instructions would be composed), and names that seat via reportFrom.
+  const provisioned: Array<{ role: AgentRole; id: string }> = [];
   let closedExecutorDelegates = 0;
   const provisionExecutorDelegate: DelegationHostDeps['provisionExecutorDelegate'] =
     options.provisionExecutorDelegate ??
-    ((id: string, sub: Channel): DelegateWiring => {
-      provisioned.push({ id });
+    ((role: AgentRole, id: string, sub: Channel): DelegateWiring => {
+      provisioned.push({ role, id });
       const agentSeat = `${id}-executor`;
       const agent = runExecutor(
         sub,
@@ -244,6 +245,34 @@ describe('createDelegationHost (#93)', () => {
   });
 });
 
+describe('createDelegationHost — arbitrator-delegate mode (#99)', () => {
+  it('provisions an arbitrator on the isolated-worktree path (not the critique responder)', async () => {
+    const { bridge, provisioned, seen, subLogs } = wire();
+
+    const { delegateId: id } = await bridge.spawn('arbitrator', 'reconcile branch-a and branch-b');
+    await flush();
+
+    // The arbitrator role takes the provisionExecutorDelegate path (isolated worktree),
+    // not the shared-worktree critique-responder path; the role is passed through so
+    // the provisioner can compose the correct instructions.
+    expect(provisioned).toEqual([{ role: 'arbitrator', id }]);
+    expect(seen).toEqual([]);
+    expect(subLogs.get(id!)?.[0]).toMatchObject({ type: 'text', payload: 'reconcile branch-a and branch-b' });
+  });
+
+  it('bridges the arbitrator hand-off up under the clean delegate id, attributed as a (non-authoritative) agent', async () => {
+    const { bridge, reports } = wire();
+
+    const { delegateId: id } = await bridge.spawn('arbitrator', 'reconcile');
+    await flush();
+
+    expect(reports).toEqual([
+      { from: id, role: 'arbitrator', type: 'result', payload: 'executed: reconcile' },
+    ]);
+    expect(senderAttribution(reports[0])).toBe(`[Message from agent (id: ${id})]`);
+  });
+});
+
 describe('createDelegationHost — executor-delegate mode (#114)', () => {
   it('provisions a full executor delegate (fresh wiring) for the executor role, not the critique responder', async () => {
     const { bridge, provisioned, seen, subLogs } = wire();
@@ -253,7 +282,7 @@ describe('createDelegationHost — executor-delegate mode (#114)', () => {
 
     // The executor role took the provisioning path — a real, attachable session on
     // its own sub-channel — *not* the shared-worktree critique-responder path.
-    expect(provisioned).toEqual([{ id }]);
+    expect(provisioned).toEqual([{ role: 'executor', id }]);
     expect(seen).toEqual([]);
     // The opening task landed on the delegate's own sub-channel.
     expect(subLogs.get(id!)?.[0]).toMatchObject({ type: 'text', payload: 'build the feature' });
