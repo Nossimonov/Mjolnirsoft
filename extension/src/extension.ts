@@ -41,6 +41,15 @@ const PERMISSION_PROMPT_TOOL = 'mcp__perm__approve';
 // session names forbids spaces/'+', so this can never collide with a real id.
 const START_NEW_SESSION = '+ Start a new executor session…';
 
+/**
+ * Tracks which session panels are open so they can be restored after a window
+ * reload (#128). `track` is called when a panel opens, `untrack` when it closes.
+ */
+interface PanelTracker {
+  track(id: string): void;
+  untrack(id: string): void;
+}
+
 // The single orchestrator's fixed session id (#123). There is only ever one
 // orchestrator per workspace, so it's opened directly under this id — no name prompt —
 // and re-opening attaches to it (if live) or resumes its one conversation.
@@ -112,6 +121,54 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
+  // Panel persistence (#128): track which sessions have open panels in globalState so
+  // they can be restored after a window reload. `track` when a panel opens,
+  // `untrack` when it closes — the Set survives reloads via VS Code's storage.
+  const OPEN_PANELS_KEY = 'mjolnirsoft.openPanels';
+  const openPanelIds = new Set<string>(context.globalState.get<string[]>(OPEN_PANELS_KEY) ?? []);
+  const persistPanels = (): void => { void context.globalState.update(OPEN_PANELS_KEY, [...openPanelIds]); };
+  const panelTracker: PanelTracker = {
+    track(id: string): void { openPanelIds.add(id); persistPanels(); },
+    untrack(id: string): void { openPanelIds.delete(id); persistPanels(); },
+  };
+
+  // Restore panels that were open before the reload (#128). Each session resumes
+  // via #126 if its worktree exists; otherwise it replays as viewer-only. The
+  // orchestrator always resumes (no worktree — its resume path is always live).
+  if (startupFolder) {
+    const restoreStore = storeFor(startupFolder);
+    const allSessions = restoreStore.list();
+    const repoDir = startupFolder.uri.fsPath;
+    for (const sessionId of [...openPanelIds]) {
+      if (sessionId === ORCHESTRATOR_ID) {
+        openOrchestrator(context, startupFolder, restoreStore, liveSessions, undefined, panelTracker);
+        continue;
+      }
+      if (!allSessions.includes(sessionId)) {
+        // Session no longer in the store — drop it from tracking.
+        panelTracker.untrack(sessionId);
+        continue;
+      }
+      try {
+        const wt = new WorktreeManager({ repoDir });
+        if (wt.exists(sessionId)) {
+          const { role } = inspectSession(restoreStore.logPath(sessionId), sessionId);
+          launchSession(context, startupFolder, restoreStore, sessionId, role ?? 'executor', liveSessions, true, undefined, panelTracker);
+        } else {
+          // Ended cleanly — restore as a viewer-only replay (already tracked).
+          openSessionPanel(context, restoreStore, sessionId, repoDir, liveSessions, {
+            onDispose: () => panelTracker.untrack(sessionId),
+          });
+        }
+      } catch {
+        // Not a git repo or WorktreeManager construction failed — open as viewer-only.
+        openSessionPanel(context, restoreStore, sessionId, repoDir, liveSessions, {
+          onDispose: () => panelTracker.untrack(sessionId),
+        });
+      }
+    }
+  }
+
   const openView = vscode.commands.registerCommand('mjolnirsoft.openSessionView', async () => {
     const folder = requireFolder();
     if (!folder) return;
@@ -151,6 +208,8 @@ export function activate(context: vscode.ExtensionContext): void {
         agentLabel: live.role,
         model: live.model,
         meter: live.meter,
+        onOpen: () => panelTracker.track(pick),
+        onDispose: () => panelTracker.untrack(pick),
       });
       return;
     }
@@ -161,22 +220,25 @@ export function activate(context: vscode.ExtensionContext): void {
     // open a viewer-only replay.
     if (new WorktreeManager({ repoDir: folder.uri.fsPath }).exists(pick)) {
       const role = inspectSession(store.logPath(pick), pick).role ?? 'executor';
-      launchSession(context, folder, store, pick, role, liveSessions, true);
+      launchSession(context, folder, store, pick, role, liveSessions, true, undefined, panelTracker);
       return;
     }
-    openSessionPanel(context, store, pick, folder.uri.fsPath, liveSessions, {});
+    openSessionPanel(context, store, pick, folder.uri.fsPath, liveSessions, {
+      onOpen: () => panelTracker.track(pick),
+      onDispose: () => panelTracker.untrack(pick),
+    });
   });
 
   const startExecutor = vscode.commands.registerCommand('mjolnirsoft.startExecutorSession', async () => {
     const folder = requireFolder();
     if (!folder) return;
-    await startSession(context, folder, storeFor(folder), 'executor', liveSessions);
+    await startSession(context, folder, storeFor(folder), 'executor', liveSessions, panelTracker);
   });
 
   const startOrchestrator = vscode.commands.registerCommand('mjolnirsoft.startOrchestratorSession', () => {
     const folder = requireFolder();
     if (!folder) return;
-    openOrchestrator(context, folder, storeFor(folder), liveSessions);
+    openOrchestrator(context, folder, storeFor(folder), liveSessions, undefined, panelTracker);
   });
 
   context.subscriptions.push(openView, startExecutor, startOrchestrator);
@@ -410,6 +472,24 @@ function provisionSession(args: {
         }),
     });
 
+    // Re-establish bridges for isolated-worktree delegates that survived a reload
+    // (#128). Only applies when the orchestrator resumes: its delegates' IDs are
+    // prefixed by the orchestrator's agent id, and only those with a still-present
+    // worktree were interrupted (a clean close removes the worktree). Critique roles
+    // (evaluator, investigator) have no persistent worktree, so they never appear here.
+    if (isOrchestrator && resuming) {
+      const delegatePrefix = `${agentId}-`;
+      const wt = new WorktreeManager({ repoDir });
+      for (const delegateId of store.list()) {
+        if (!delegateId.startsWith(delegatePrefix)) continue;
+        if (!wt.exists(delegateId)) continue; // finished cleanly — skip
+        const { role: delegateRole } = inspectSession(store.logPath(delegateId), delegateId);
+        if (delegateRole !== undefined && isAgentRole(delegateRole)) {
+          delegationHost.rewireDelegate(delegateRole, delegateId);
+        }
+      }
+    }
+
     liveSessions.set(sessionId, { agentId, reasoning, role, model, meter });
 
     return {
@@ -461,6 +541,7 @@ function openOrchestrator(
   store: SessionStore,
   liveSessions: LiveSessions,
   compactionHandoff?: string,
+  tracker?: PanelTracker,
 ): void {
   const live = liveSessions.get(ORCHESTRATOR_ID);
   if (live) {
@@ -471,6 +552,8 @@ function openOrchestrator(
       agentLabel: live.role,
       model: live.model,
       meter: live.meter,
+      onOpen: () => tracker?.track(ORCHESTRATOR_ID),
+      onDispose: () => tracker?.untrack(ORCHESTRATOR_ID),
     });
     return;
   }
@@ -483,6 +566,7 @@ function openOrchestrator(
     liveSessions,
     store.list().includes(ORCHESTRATOR_ID),
     compactionHandoff,
+    tracker,
   );
 }
 
@@ -498,6 +582,7 @@ async function startSession(
   store: SessionStore,
   role: AgentRole,
   liveSessions: LiveSessions,
+  tracker?: PanelTracker,
 ): Promise<void> {
   const sessionId = await vscode.window.showInputBox({
     title: `Start ${article(role)} ${role} session`,
@@ -513,7 +598,7 @@ async function startSession(
     return;
   }
 
-  launchSession(context, folder, store, sessionId, role, liveSessions, false);
+  launchSession(context, folder, store, sessionId, role, liveSessions, false, undefined, tracker);
 }
 
 /**
@@ -536,6 +621,7 @@ function launchSession(
   liveSessions: LiveSessions,
   resumed: boolean,
   compactionHandoff?: string,
+  tracker?: PanelTracker,
 ): void {
   // The in-process agent shells out to `claude`; load machine-specific config
   // (CLAUDE_BIN) so it's found even when the extension host's PATH lacks it.
@@ -629,7 +715,7 @@ function launchSession(
 
     // 7. Relaunch: open a fresh orchestrator session on the next generation's claude
     //    session id, sending the hand-off as its first turn.
-    openOrchestrator(context, folder, store, liveSessions, handoff);
+    openOrchestrator(context, folder, store, liveSessions, handoff, tracker);
   }
 
   openSessionPanel(context, store, sessionId, folder.uri.fsPath, liveSessions, {
@@ -639,7 +725,9 @@ function launchSession(
     agentLabel: role,
     model: provisioned.model,
     meter: provisioned.meter,
+    onOpen: () => tracker?.track(sessionId),
     onDispose: () => {
+      tracker?.untrack(sessionId);
       if (compacted) return; // compaction already cleaned up; don't double-close
       compactionObserver?.close();
       compactionHost?.close();
@@ -722,6 +810,8 @@ function openSessionPanel(
   projectDir: string,
   liveSessions: LiveSessions,
   options: {
+    /** Called immediately after the panel is created — used to track the panel in persistent storage (#128). */
+    onOpen?: () => void;
     onDispose?: () => void;
     executorAttached?: boolean;
     executorId?: string;
@@ -762,6 +852,7 @@ function openSessionPanel(
     },
   );
   panel.webview.html = renderHtml(panel.webview, context.extensionUri, sessionId, agentLabel, options.model);
+  options.onOpen?.();
 
   // Forward the executor's live reasoning (#108) to the webview ephemerally: each
   // block-level snapshot is rendered with the *same* renderer the durable digest

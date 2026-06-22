@@ -56,6 +56,15 @@ export interface DelegationHostDeps {
 /** A running delegation host; `close()` ends all its delegates and leaves the channel. */
 export interface DelegationHost {
   close(): void;
+  /**
+   * Re-establish the bridge for an isolated-worktree delegate that survived a
+   * reload (#128): opens its sub-channel, re-provisions it (which resumes via #126
+   * since its worktree still exists), and wires the report bridge so future replies
+   * flow up to the spawner's channel without a new opening task. Only acts on roles
+   * in {@link ISOLATED_WORKTREE_ROLES} (executor, arbitrator) — critique roles have
+   * no persistent worktree and are never passed here. Idempotent for already-wired ids.
+   */
+  rewireDelegate(role: AgentRole, id: string): void;
 }
 
 /**
@@ -157,6 +166,21 @@ export function createDelegationHost(deps: DelegationHostDeps): DelegationHost {
       for (const id of spawned) manager.shutdown(id);
       spawned.clear();
       host.close();
+    },
+
+    rewireDelegate(role: AgentRole, id: string): void {
+      if (spawned.has(id)) return; // already wired — idempotent
+      if (!ISOLATED_WORKTREE_ROLES.has(role)) return; // critique roles have no persistent worktree
+      const sub = openSubChannel(id);
+      let wiring: DelegateWiring;
+      try {
+        wiring = deps.provisionExecutorDelegate(role, id, sub);
+      } catch {
+        sub.close();
+        return; // provisioning failed — skip this delegate
+      }
+      spawned.add(id);
+      manager.rewire(role, id, sub, wiring);
     },
   };
 }
