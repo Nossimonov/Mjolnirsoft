@@ -9,6 +9,8 @@ import {
   EXECUTOR_OPERATIONS,
   EVALUATOR_INSERT,
   EVALUATOR_OPERATIONS,
+  ARBITRATOR_INSERT,
+  ARBITRATOR_OPERATIONS,
 } from './agent-instructions.ts';
 
 describe('composeAgentInstructions (#57)', () => {
@@ -44,8 +46,8 @@ describe('composeAgentInstructions (#57)', () => {
     // Orchestrator ownership:
     expect(SHARED_CORE).toContain('owned by the orchestrator');
     expect(SHARED_CORE).toContain('in coordination with the architect');
-    // Executors/evaluators excluded:
-    expect(SHARED_CORE).toContain('Executors and evaluators never run it');
+    // Executors/evaluators/arbitrators excluded:
+    expect(SHARED_CORE).toContain('Executors, evaluators, and arbitrators never run it');
     // Old "belongs to the architect" framing is gone:
     expect(SHARED_CORE).not.toContain('belongs to the architect, not a subordinate agent');
     expect(SHARED_CORE).not.toContain('the architect tracks it');
@@ -193,9 +195,60 @@ describe('isAgentRole (#93)', () => {
     expect(isAgentRole('orchestrator')).toBe(true);
     expect(isAgentRole('executor')).toBe(true);
     expect(isAgentRole('evaluator')).toBe(true);
+    expect(isAgentRole('arbitrator')).toBe(true);
     // `planner` is the human seat — no composed prompt — and anything else is unknown.
     expect(isAgentRole('planner')).toBe(false);
     expect(isAgentRole('')).toBe(false);
     expect(isAgentRole('investigator')).toBe(false);
+  });
+});
+
+describe('arbitrator role (#99)', () => {
+  it('is a recognized agent role: isAgentRole returns true', () => {
+    expect(isAgentRole('arbitrator')).toBe(true);
+  });
+
+  it('composes in the same general → specific shape as the other roles', () => {
+    const composed = composeAgentInstructions('arbitrator');
+    expect(composed).toBe(`${SHARED_CORE}\n\n${ARBITRATOR_INSERT}\n\n${ARBITRATOR_OPERATIONS}`);
+    expect(composed.indexOf(SHARED_CORE)).toBe(0);
+    expect(composed.indexOf(ARBITRATOR_INSERT)).toBeGreaterThan(0);
+    expect(composed.indexOf(ARBITRATOR_OPERATIONS)).toBeGreaterThan(composed.indexOf(ARBITRATOR_INSERT));
+  });
+
+  it('the insert carries the key semantics: neutral, reconcile two sides, no new design, escalate when unresolvable', () => {
+    expect(ARBITRATOR_INSERT).toContain('neutral');
+    expect(ARBITRATOR_INSERT).toContain('no stake');
+    expect(ARBITRATOR_INSERT).toContain('intent');
+    expect(ARBITRATOR_INSERT).toContain('never author new design');
+    expect(ARBITRATOR_INSERT).toContain('escalate');
+    expect(ARBITRATOR_INSERT).toContain('architect');
+    expect(ARBITRATOR_INSERT).toContain('record cannot settle');
+  });
+
+  it('the operations layer is distinct from the insert and directs reading both session logs', () => {
+    expect(ARBITRATOR_OPERATIONS).not.toContain(ARBITRATOR_INSERT);
+    expect(ARBITRATOR_OPERATIONS).toContain('session log');
+    expect(ARBITRATOR_OPERATIONS).toContain('session store');
+  });
+
+  it('the operations layer directs escalation via a precise question, not guessing', () => {
+    // The bullet starts with a capital "Escalate"; check the full context instead.
+    expect(ARBITRATOR_OPERATIONS).toContain('Escalate when the record cannot settle');
+    expect(ARBITRATOR_OPERATIONS).toContain('precise question');
+    expect(ARBITRATOR_OPERATIONS).toContain('rather than guessing');
+  });
+
+  it('the operations layer directs producing the reconciled result in the worktree and handing off (not committing)', () => {
+    expect(ARBITRATOR_OPERATIONS).toContain('your own worktree');
+    expect(ARBITRATOR_OPERATIONS).toContain('hand off');
+    expect(ARBITRATOR_OPERATIONS).toContain('do not commit');
+  });
+
+  it('the composed arbitrator instructions carry SHARED_CORE (session-log literacy, bookkeeping, etc.)', () => {
+    const composed = composeAgentInstructions('arbitrator');
+    expect(composed).toContain('updatedInput.answers');
+    expect(composed).toContain('Project bookkeeping');
+    expect(composed).toContain('AGENTS.md');
   });
 });
