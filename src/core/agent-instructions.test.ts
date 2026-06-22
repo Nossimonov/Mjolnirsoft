@@ -11,6 +11,8 @@ import {
   EVALUATOR_OPERATIONS,
   ARBITRATOR_INSERT,
   ARBITRATOR_OPERATIONS,
+  INVESTIGATOR_INSERT,
+  INVESTIGATOR_OPERATIONS,
 } from './agent-instructions.ts';
 
 describe('composeAgentInstructions (#57)', () => {
@@ -46,8 +48,8 @@ describe('composeAgentInstructions (#57)', () => {
     // Orchestrator ownership:
     expect(SHARED_CORE).toContain('owned by the orchestrator');
     expect(SHARED_CORE).toContain('in coordination with the architect');
-    // Executors/evaluators/arbitrators excluded:
-    expect(SHARED_CORE).toContain('Executors, evaluators, and arbitrators never run it');
+    // Executors/evaluators/arbitrators/investigators excluded:
+    expect(SHARED_CORE).toContain('Executors, evaluators, arbitrators, and investigators never run it');
     // Old "belongs to the architect" framing is gone:
     expect(SHARED_CORE).not.toContain('belongs to the architect, not a subordinate agent');
     expect(SHARED_CORE).not.toContain('the architect tracks it');
@@ -55,6 +57,7 @@ describe('composeAgentInstructions (#57)', () => {
     expect(composeAgentInstructions('orchestrator')).toContain('Project bookkeeping');
     expect(composeAgentInstructions('executor')).toContain('Project bookkeeping');
     expect(composeAgentInstructions('evaluator')).toContain('Project bookkeeping');
+    expect(composeAgentInstructions('investigator')).toContain('Project bookkeeping');
   });
 
   it('directs every agent to read AGENTS.md and its role norms file before working (#80)', () => {
@@ -198,10 +201,11 @@ describe('isAgentRole (#93)', () => {
     expect(isAgentRole('executor')).toBe(true);
     expect(isAgentRole('evaluator')).toBe(true);
     expect(isAgentRole('arbitrator')).toBe(true);
+    expect(isAgentRole('investigator')).toBe(true);
     // `planner` is the human seat — no composed prompt — and anything else is unknown.
     expect(isAgentRole('planner')).toBe(false);
     expect(isAgentRole('')).toBe(false);
-    expect(isAgentRole('investigator')).toBe(false);
+    expect(isAgentRole('wizard')).toBe(false);
   });
 });
 
@@ -293,6 +297,70 @@ describe('orchestrator parallel delegation, architect-directed (#153)', () => {
     expect(ORCHESTRATOR_INSERT).not.toContain('one task at a time');
     // Architect-direction for concurrency is still prominent in the insert.
     expect(ORCHESTRATOR_INSERT).toContain('architect directs');
+  });
+});
+
+describe('investigator role (#166)', () => {
+  it('is a recognized agent role: isAgentRole returns true', () => {
+    expect(isAgentRole('investigator')).toBe(true);
+  });
+
+  it('composes in the same general → specific shape as the other roles', () => {
+    const composed = composeAgentInstructions('investigator');
+    expect(composed).toBe(`${SHARED_CORE}\n\n${INVESTIGATOR_INSERT}\n\n${INVESTIGATOR_OPERATIONS}`);
+    expect(composed.indexOf(SHARED_CORE)).toBe(0);
+    expect(composed.indexOf(INVESTIGATOR_INSERT)).toBeGreaterThan(0);
+    expect(composed.indexOf(INVESTIGATOR_OPERATIONS)).toBeGreaterThan(
+      composed.indexOf(INVESTIGATOR_INSERT),
+    );
+  });
+
+  it('the insert carries the key semantics: fact-find from primary sources, source citations, never edit', () => {
+    expect(INVESTIGATOR_INSERT).toContain('primary sources');
+    expect(INVESTIGATOR_INSERT).toContain('source citations');
+    expect(INVESTIGATOR_INSERT).toContain('never edit');
+  });
+
+  it('the insert distinguishes fact-finding of existing state from critique of proposed work', () => {
+    // Distinct from the evaluator (critique) and arbitrator (reconcile).
+    expect(INVESTIGATOR_INSERT).toContain('existing state');
+  });
+
+  it('the operations layer is distinct from the insert and directs reading primary sources', () => {
+    expect(INVESTIGATOR_OPERATIONS).not.toContain(INVESTIGATOR_INSERT);
+    expect(INVESTIGATOR_OPERATIONS).toContain('primary sources');
+    expect(INVESTIGATOR_OPERATIONS).toContain('session log');
+  });
+
+  it('the operations layer requires source citations on every factual claim', () => {
+    expect(INVESTIGATOR_OPERATIONS).toContain('Cite every factual claim');
+    expect(INVESTIGATOR_OPERATIONS).toContain('citation');
+  });
+
+  it('the operations layer enforces the read-only constraint: no editing, committing, or modifying', () => {
+    expect(INVESTIGATOR_OPERATIONS).toContain('write nothing');
+    expect(INVESTIGATOR_OPERATIONS).toContain('do not edit');
+  });
+
+  it('the operations layer distinguishes fact-finding of existing state from critique of proposed work', () => {
+    expect(INVESTIGATOR_OPERATIONS).toContain('fact-finding of existing state');
+    expect(INVESTIGATOR_OPERATIONS).toContain('not critique of proposed work');
+  });
+
+  it('the operations layer directs routing design questions up, not deciding them', () => {
+    expect(INVESTIGATOR_OPERATIONS).toContain('Route decisions up');
+    expect(INVESTIGATOR_OPERATIONS).toContain('You cannot decide');
+  });
+
+  it('the composed investigator instructions carry SHARED_CORE (session-log literacy, bookkeeping, etc.)', () => {
+    const composed = composeAgentInstructions('investigator');
+    expect(composed).toContain('updatedInput.answers');
+    expect(composed).toContain('Project bookkeeping');
+    expect(composed).toContain('AGENTS.md');
+  });
+
+  it('investigator instructions do NOT carry the compaction clause (orchestrator-only)', () => {
+    expect(composeAgentInstructions('investigator')).not.toContain('mcp__compact__request');
   });
 });
 

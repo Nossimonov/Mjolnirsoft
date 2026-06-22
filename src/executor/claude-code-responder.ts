@@ -340,12 +340,14 @@ export const EXECUTOR_PERMISSION_POLICY = {
 export const EXECUTOR_PERMISSIONS = JSON.stringify(EXECUTOR_PERMISSION_POLICY);
 
 /**
- * The serialized `--settings` policy for an agent of `role`. Executors and evaluators
- * get the base {@link EXECUTOR_PERMISSIONS}; the **orchestrator** additionally may
- * `git push` and run `gh` so it can integrate a delegate's work by pushing the branch
- * and opening a PR (#137) — it still can't force-push or hard-reset (the architect
- * reviews and merges; that merge is the ratification, #71). Everything else (the
- * `Agent` deny #131, auto-memory off #132, CLAUDE.md excludes #121) is inherited.
+ * The serialized `--settings` policy for an agent of `role`. Executors, evaluators,
+ * and investigators get the base {@link EXECUTOR_PERMISSIONS}; the **orchestrator**
+ * additionally may `git push` and run `gh` so it can integrate a delegate's work by
+ * pushing the branch and opening a PR (#137) — it still can't force-push or
+ * hard-reset (the architect reviews and merges; that merge is the ratification, #71).
+ * Everything else (the `Agent` deny #131, auto-memory off #132, CLAUDE.md excludes
+ * #121) is inherited. The investigator's read-only constraint is enforced by its role
+ * instructions (#166), matching the evaluator's treatment.
  */
 export function permissionPolicyFor(role: string): string {
   if (role !== 'orchestrator') return EXECUTOR_PERMISSIONS;

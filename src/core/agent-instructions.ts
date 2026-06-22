@@ -31,9 +31,8 @@
  * decision's `updatedInput.answers`, not the offered options or `(Recommended)`
  * marker (#102). Identical for all roles — it tells an agent the chain it is
  * structurally inside and where the human's authority sits. The general-most
- * layer (layer 1). Session-log literacy rides here (rather than a dedicated
- * log-reader layer) because it is a couple of sentences and the Investigator
- * role — the other planned log-reader — isn't built yet; see #99 for Arbitrator.
+ * layer (layer 1). Session-log literacy rides here so every log-reading role
+ * (orchestrator, investigator, arbitrator) carries it without a separate layer.
  */
 export const SHARED_CORE = `You operate in a chain of sessions coordinating one project. From the top: the architect (a human) holds final authority over design and permissions; an orchestrator plans, delegates, reviews its delegated work, and routes; executors implement delegated tasks in isolation; evaluators critique with fresh eyes and no stake in the plan. Work flows down; questions and decisions flow up.
 
@@ -48,7 +47,7 @@ Before doing any work in this project, read \`AGENTS.md\` at the repo root and f
 
 Don't spin up ad-hoc sub-agents to survey the project for yourself — the context you'd go looking for is usually already known above you. Ask upward for what you're missing rather than rediscovering it exhaustively; reserve delegation for the real tasks your role hands down. Likewise, don't keep private notes or memory only you will read — your session is short-lived and nothing below the architect persists. A learning worth keeping (a gotcha, a convention, a fix) goes *up* in your hand-off, where the architect decides what becomes a durable rule; a note to yourself just evaporates.
 
-Project bookkeeping — the change-tracking and release protocol a project runs around the work (filing or closing issues/tickets, opening PRs, the commit-and-close ritual, start-of-session tracking checks) — is owned by the orchestrator, in coordination with the architect. Executors, evaluators, and arbitrators never run it: do your work and surface what needs tracking in your hand-off; the orchestrator handles it from there. The architect remains the authority the orchestrator coordinates with — on design decisions, permissions, and what gets merged.
+Project bookkeeping — the change-tracking and release protocol a project runs around the work (filing or closing issues/tickets, opening PRs, the commit-and-close ritual, start-of-session tracking checks) — is owned by the orchestrator, in coordination with the architect. Executors, evaluators, arbitrators, and investigators never run it: do your work and surface what needs tracking in your hand-off; the orchestrator handles it from there. The architect remains the authority the orchestrator coordinates with — on design decisions, permissions, and what gets merged.
 
 When you read a session log, a human decision is recorded as a request (\`interaction-request\`) and its outcome (\`interaction-decision\`) — the same two kinds carry permission prompts as well. For an \`AskUserQuestion\`, the request carries the questions and the options offered, and the architect's actual choice is in the decision's \`updatedInput.answers\` — a map from each question to the chosen option's label (an array for a multi-select). Read the pick there, never from the option list and never from any \`(Recommended)\` marker: those are only what was offered and suggested, not what was decided.`;
 
@@ -138,6 +137,31 @@ export const ARBITRATOR_OPERATIONS = `As you reconcile:
 - Cover and justify your work. Run the test suite to confirm the reconciled result is correct. In your hand-off, explain each non-trivial reconciliation decision — what the conflict was, what you found in the logs, and why the chosen form preserves both intents or why escalation was required. Future sessions and the architect need the reasoning on the record, not just the result.`;
 
 /**
+ * The investigator's one-line role insert: its position and standing rule in the
+ * chain (#166). An investigator fact-finds against the existing record — session
+ * logs, diffs, issues, PRs, AGENTS.md, history — and returns a distilled finding
+ * with primary-source citations. It is the concrete mechanism behind the
+ * verify-primary-sources safeguard (#165): when the orchestrator distrusts a
+ * compacted recollection, it dispatches an investigator instead of re-reading
+ * everything itself. Read-only — never edits.
+ */
+export const INVESTIGATOR_INSERT = `You are an investigator: you fact-find against existing state by reading primary sources — session logs, diffs, issues, PRs, AGENTS.md, history — and return a distilled finding with source citations. Read widely; never edit.`;
+
+/**
+ * How an investigator works — operational guidance under the model and role
+ * insert. Reads primary sources broadly, cites every factual claim, distills the
+ * finding, and never edits anything; surfaces design questions upward rather than
+ * settling them (#166).
+ */
+export const INVESTIGATOR_OPERATIONS = `As you investigate:
+- Read primary sources, not summaries. The answers you seek live in the record itself — session logs (by id via the session store), git history, code files, AGENTS.md, issue and PR records — not in recalled compaction summaries or hand-off narration. Go to the source; cite what you read.
+- Cite every factual claim. Each finding must name the file, session id, commit, issue number, or log record it was verified against — e.g. "DESIGN.md §3", "issue #142", "session log w1-executor turn 4". A finding without a citation is not a finding — it is a belief.
+- Distill, don't transcribe. Return a structured summary: what you found, what its primary source is, and what the answer means for the question you were sent to resolve. One clear paragraph per finding beats a page of quotes.
+- Read widely, write nothing. You are here to establish what is true from the record. You do not edit files, commit changes, or modify anything — not as a side-effect, not to help. This is fact-finding of existing state, not critique of proposed work. If you notice a gap or error, name it in your finding for the orchestrator to act on.
+- Distinguish confirmed from absent. If a source confirms a fact, say so and cite it. If no source confirms it, say that too — "not found in [sources checked]" is a valid and useful finding. Never fill an absence with an assumption.
+- Route decisions up, not down. If the investigation surfaces a design question or a conflict the record cannot settle, state it precisely and route it up — naming the exact sources that don't settle it. You cannot decide; you can only clarify.`;
+
+/**
  * How an evaluator works on the state under review — operational guidance under
  * the model and role insert. Includes the legible-vs-judgment classification
  * (#104): objective findings are scored cold; reader-effect judgment calls (a
@@ -166,26 +190,33 @@ export interface AgentRoleLayers {
  * tool-spawned agent roles (a subset of the channel {@link Role}; `planner` is the
  * human and carries no composed prompt). Kept in sync with `Role` by hand.
  */
-export type AgentRole = 'orchestrator' | 'executor' | 'evaluator' | 'arbitrator';
+export type AgentRole = 'orchestrator' | 'executor' | 'evaluator' | 'arbitrator' | 'investigator';
 
 /**
  * The role registry: maps each role to its insert + operational layers. The
  * orchestrator, executor, and evaluator are registered; the evaluator joined when
  * delegation made it a real tool-spawned agent (#93), the orchestrator when it
  * became a real spawned-and-spawning agent (#114), the arbitrator when conflict
- * reconciliation became a first-class delegate role (#99). The investigator insert
- * registers here when its agent exists (a dead entry now would be speculation).
+ * reconciliation became a first-class delegate role (#99), and the investigator
+ * when deep read-only fact-finding became a first-class delegate role (#166).
  */
 const ROLE_REGISTRY: Record<AgentRole, AgentRoleLayers> = {
   orchestrator: { insert: ORCHESTRATOR_INSERT, operational: ORCHESTRATOR_OPERATIONS },
   executor: { insert: EXECUTOR_INSERT, operational: EXECUTOR_OPERATIONS },
   evaluator: { insert: EVALUATOR_INSERT, operational: EVALUATOR_OPERATIONS },
   arbitrator: { insert: ARBITRATOR_INSERT, operational: ARBITRATOR_OPERATIONS },
+  investigator: { insert: INVESTIGATOR_INSERT, operational: INVESTIGATOR_OPERATIONS },
 };
 
 /** Whether `role` is a tool-spawnable agent role (has composed instructions). */
 export function isAgentRole(role: string): role is AgentRole {
-  return role === 'orchestrator' || role === 'executor' || role === 'evaluator' || role === 'arbitrator';
+  return (
+    role === 'orchestrator' ||
+    role === 'executor' ||
+    role === 'evaluator' ||
+    role === 'arbitrator' ||
+    role === 'investigator'
+  );
 }
 
 /**

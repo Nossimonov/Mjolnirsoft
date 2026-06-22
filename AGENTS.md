@@ -73,3 +73,4 @@ Each spawned role has a norms file with project-specific guidance. Find your rol
 | Orchestrator | [`docs/agents/orchestrator.md`](docs/agents/orchestrator.md) | Branch/PR conventions; bookkeeping protocol: issue discipline, commit-phase walk, GitHub conventions, design documentation, capturing deferred scope |
 | Executor | [`docs/agents/executor.md`](docs/agents/executor.md) | Code-change norms: no speculative design in code artifacts |
 | Evaluator | *(no project-specific norms yet — the extension's evaluator role layer is sufficient)* | — |
+| Investigator | [`docs/agents/investigator.md`](docs/agents/investigator.md) | Source-citation discipline; read-only constraint; what counts as a valid cited finding |

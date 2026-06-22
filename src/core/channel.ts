@@ -8,19 +8,21 @@
 
 /**
  * The role a session plays in coordination. `planner` is the authoritative
- * human (architect seat); `orchestrator`, `executor`, `evaluator`, and
- * `arbitrator` are the tool-spawned agent roles. `orchestrator` plans and
- * delegates a task to an executor and relays its hand-off (#114); `evaluator`
- * joins via delegation (#93) — a spawner delegates a critique to an evaluator
- * on its own sub-channel; `arbitrator` reconciles two conflicting branches into
- * a clean merge on an isolated worktree (#99). Each is a channel role carried
- * in the message so attribution can mark a report: the architect (`planner`) is
- * authoritative, an `orchestrator` reads as the (non-authoritative) delegating
- * supervisor, and every other agent role as a plain (non-authoritative) agent
- * (#86). The agent roles that carry composed instructions are mirrored by
- * `AgentRole` in `agent-instructions.ts`.
+ * human (architect seat); `orchestrator`, `executor`, `evaluator`,
+ * `arbitrator`, and `investigator` are the tool-spawned agent roles.
+ * `orchestrator` plans and delegates a task to an executor and relays its
+ * hand-off (#114); `evaluator` joins via delegation (#93) — a spawner
+ * delegates a critique to an evaluator on its own sub-channel; `arbitrator`
+ * reconciles two conflicting branches into a clean merge on an isolated
+ * worktree (#99); `investigator` fact-finds against primary sources and
+ * returns a distilled cited finding (#166). Each is a channel role carried
+ * in the message so attribution can mark a report: the architect (`planner`)
+ * is authoritative, an `orchestrator` reads as the (non-authoritative)
+ * delegating supervisor, and every other agent role as a plain
+ * (non-authoritative) agent (#86). The agent roles that carry composed
+ * instructions are mirrored by `AgentRole` in `agent-instructions.ts`.
  */
-export type Role = 'planner' | 'orchestrator' | 'executor' | 'evaluator' | 'arbitrator';
+export type Role = 'planner' | 'orchestrator' | 'executor' | 'evaluator' | 'arbitrator' | 'investigator';
 
 /**
  * A message exchanged over the channel. Intentionally minimal: `type` is a
