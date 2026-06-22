@@ -572,6 +572,8 @@ export interface ClaudeCodeResponderOptions {
   readonly model?: string;
   /** Override how Claude Code is run (tests inject a fake; default spawns the CLI). */
   readonly run?: RunClaudeCode;
+  /** Delay used between transient-overload retries (#141); injected as a no-op in tests. Default: real `setTimeout`. */
+  readonly sleep?: (ms: number) => Promise<void>;
   /**
    * Live seam (#109/#110): forwarded to each run as its `onReasoningChange`, so the
    * host receives block-level {@link ReasoningDigest} snapshots as the executor
@@ -619,6 +621,21 @@ function isNoConversation(error: unknown): boolean {
   return /no conversation found/i.test(String(error));
 }
 
+/** Whether a failed `claude` run is a *transient* server overload worth retrying (#141). */
+function isTransient(error: unknown): boolean {
+  return /\b(429|503|529)\b|overloaded|rate limit/i.test(String(error));
+}
+
+/** Whether a `--session-id` create collided with an id `claude` already registered (#90/#141). */
+function isAlreadyInUse(error: unknown): boolean {
+  return /already in use/i.test(String(error));
+}
+
+/** Per-turn retry budget covering transient overloads + session-id strategy switches (#141). */
+const MAX_TURN_ATTEMPTS = 6;
+/** Exponential backoff (capped) before retrying a transient overload. */
+const transientBackoffMs = (attempt: number): number => Math.min(1000 * 2 ** attempt, 30_000);
+
 export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): Respond {
   const {
     workdir,
@@ -629,21 +646,19 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     settings,
     model,
     run = runClaudeCodeCli,
+    sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
     onReasoningChange,
     onUsage,
     resume = false,
   } = options;
-  // The pinned Claude session: the first turn creates it (`--session-id`), later
-  // turns resume it (`--resume`). `sessionId` is mutable because a turn that fails
-  // *before* any session is established may still have made `claude` register the
-  // id (an auth failure does), so a retry that re-creates the same id would hit
-  // "Session ID … already in use" — rotate to a fresh id so the retry creates
-  // cleanly. Once a session is established, the id is kept so a later-turn failure
-  // can resume without losing the conversation (#90).
-  let sessionId = claudeSessionId;
-  // `started` gates `--session-id` (create, first turn) vs `--resume` (later turns).
-  // A re-attached session (#126) starts already-`started`, so its first turn resumes
-  // the conversation the reload left behind rather than colliding on create.
+  // The pinned Claude session id is stable for this responder's life (#126): the first
+  // turn creates it (`--session-id`), later turns resume it (`--resume`). It is never
+  // rotated — a turn that hits a transient overload or a session-id collision recovers
+  // *within* the turn (retry / switch create↔resume, in the loop below) rather than
+  // abandoning the conversation for a fresh id (#90/#141).
+  const sessionId = claudeSessionId;
+  // `started` gates create vs resume across turns: a re-attached session (#126) starts
+  // already-`started` so its first turn resumes; a fresh one creates, then resumes.
   let started = resume;
   return async (message) => {
     // Only conversation reaches here: infrastructure (permission/delegation control,
@@ -675,23 +690,38 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
           digest = d;
         },
       });
-    try {
-      result = (await runTurn(started)).trim();
-    } catch (error) {
-      if (started && isNoConversation(error)) {
-        // Re-attaching a session whose conversation doesn't exist — an old session
-        // from before stable ids, or one interrupted before its first turn ever ran —
-        // so there's nothing to `--resume`. Create it fresh on this same worktree and
-        // retry the turn so it isn't lost: context from before the reload is gone, but
-        // the session continues instead of dead-ending on every turn (#126).
-        started = false;
-        result = (await runTurn(false)).trim();
-      } else {
-        // Failed before establishing a session: the id may already be claimed by
-        // `claude`, so rotate it so the retry creates fresh instead of colliding
-        // ("Session ID … already in use"). An established session keeps its id (#90).
-        if (!started) sessionId = randomUUID();
-        throw error;
+    // Run the turn, recovering in place rather than failing it (#141). `resuming`
+    // tracks whether this attempt resumes (`--resume`) or creates (`--session-id`);
+    // it starts from the cross-turn `started` state and may flip during recovery.
+    // Re-running always re-sends the same `prompt`, so the task is never lost.
+    let resuming = started;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        result = (await runTurn(resuming)).trim();
+        break;
+      } catch (error) {
+        if (attempt >= MAX_TURN_ATTEMPTS) throw error; // budget spent — give up; the id is intact for a later retry
+        if (isTransient(error)) {
+          // A transient server overload (529/503/429): ride it out with backoff rather
+          // than failing the turn. After a create attempt the id may now be registered,
+          // so switch to resume on the retry to avoid colliding with it.
+          if (!resuming) resuming = true;
+          await sleep(transientBackoffMs(attempt));
+          continue;
+        }
+        if (resuming && isNoConversation(error)) {
+          // Nothing to resume — an old session from before stable ids, or one
+          // interrupted before its first turn — so create it fresh and retry (#126).
+          resuming = false;
+          continue;
+        }
+        if (!resuming && isAlreadyInUse(error)) {
+          // A create collided with an id `claude` already registered (e.g. a prior
+          // failed attempt) — resume that session instead of failing (#90, generalized).
+          resuming = true;
+          continue;
+        }
+        throw error; // not retryable (e.g. an auth failure — surfaced for the view's #90 re-login)
       }
     }
     started = true;

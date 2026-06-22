@@ -321,20 +321,55 @@ describe('createClaudeCodeResponder', () => {
     expect(run.mock.calls[2][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: true });
   });
 
-  it('rotates the session id after a failed first turn so a retry creates cleanly, not "already in use" (#90)', async () => {
+  it('keeps the same session id after a non-retryable first-turn failure (no rotation) (#90/#141)', async () => {
     const run = vi
       .fn()
       .mockRejectedValueOnce(new Error('claude failed (exit 1): Not logged in · Please run /login'))
-      .mockResolvedValueOnce('ok');
+      .mockResolvedValue('ok');
     const respond = createClaudeCodeResponder({ workdir: '/w', claudeSessionId: 'fixed-uuid', run });
 
-    await expect(respond(task)).rejects.toThrow(); // first turn fails (logged out)
+    await expect(respond(task)).rejects.toThrow(); // first turn fails (logged out) — surfaced for the #90 re-login card
     await respond(task); // retry, after the user logs in
 
-    // The retry must still *create* (no session was established), but with a
-    // fresh id — reusing the failed id would collide with claude's registration.
-    expect(run.mock.calls[1][1].resume).toBe(false);
-    expect(run.mock.calls[1][1].sessionId).not.toBe(run.mock.calls[0][1].sessionId);
+    // The id is never rotated — a collision on retry is handled by resuming, not by
+    // abandoning the conversation for a fresh id (see the next test).
+    expect(run.mock.calls[1][1].sessionId).toBe('fixed-uuid');
+    expect(run.mock.calls[0][1].sessionId).toBe('fixed-uuid');
+  });
+
+  it('rides out a transient overload (529) within the turn instead of failing it (#141)', async () => {
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('claude failed (exit 1): API Error: 529 Overloaded. server-side'))
+      .mockRejectedValueOnce(new Error('claude failed (exit 1): API Error: 529 Overloaded. server-side'))
+      .mockResolvedValue('done');
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'fixed-uuid',
+      run,
+      sleep: () => Promise.resolve(), // no real backoff in the test
+    });
+
+    // The turn doesn't dead-end on the overload — it retries and completes the task.
+    await expect(respond(task)).resolves.toBeDefined();
+    expect(run).toHaveBeenCalledTimes(3);
+    // Same session id throughout (never rotated); after the create attempt it switches
+    // to resume, so a re-create can't collide with the id claude may have registered.
+    expect(run.mock.calls.map((c) => c[1].sessionId)).toEqual(['fixed-uuid', 'fixed-uuid', 'fixed-uuid']);
+    expect(run.mock.calls[0][1].resume).toBe(false);
+    expect(run.mock.calls[1][1].resume).toBe(true);
+  });
+
+  it('resumes an existing session when a create collides with an already-registered id (#90/#141)', async () => {
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('claude failed (exit 1): Session ID fixed-uuid is already in use'))
+      .mockResolvedValue('ok');
+    const respond = createClaudeCodeResponder({ workdir: '/w', claudeSessionId: 'fixed-uuid', run });
+
+    await expect(respond(task)).resolves.toBeDefined();
+    expect(run.mock.calls[0][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: false }); // tried to create
+    expect(run.mock.calls[1][1]).toMatchObject({ sessionId: 'fixed-uuid', resume: true }); // …collided, so resumed it
   });
 
   it('keeps the session id after an established session, resuming on a later failure (#90)', async () => {
