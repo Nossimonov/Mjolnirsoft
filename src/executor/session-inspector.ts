@@ -8,8 +8,22 @@ import { COMPACTION_GENERATION, type CompactionGenerationPayload } from '../core
 export interface SessionMetadata {
   /** The agent role, read from the session's own agent seat. Absent if not yet started. */
   readonly role?: AgentRole;
-  /** Accumulated token usage across all turns (including delegated sub-agents). */
-  readonly usage: Usage;
+  /**
+   * All-time accumulated token usage across every compaction generation (#116/#9).
+   * Use this to seed the header "cost so far" meter so the tally never resets on
+   * compaction.
+   */
+  readonly lifetimeUsage: Usage;
+  /**
+   * The raw token usage from the **most recent turn in the current compaction
+   * generation** (#9). The sum of `inputTokens + cacheReadTokens +
+   * cacheCreationTokens` gives the context-window occupancy for that turn — a
+   * per-turn snapshot, not a running total. `undefined` when the current generation
+   * has no completed turns yet (fresh start or immediately post-compaction).
+   * Used to seed the context-note snapshot on a VS Code reload so the first
+   * post-reload turn shows a meaningful context size.
+   */
+  readonly lastTurnUsage: Usage | undefined;
   /**
    * The current compaction generation (#165). 0 = the original pre-compaction session
    * (uses `claudeSessionIdFor(sessionId)`). N > 0 = the Nth compacted conversation
@@ -29,14 +43,15 @@ export interface SessionMetadata {
  */
 export function inspectSession(logPath: string, sessionId: string): SessionMetadata {
   const agentSeat = `${sessionId}-executor`;
-  let usage = ZERO_USAGE;
+  let lifetimeUsage = ZERO_USAGE;           // all-time sum; never resets
+  let lastTurnUsage: Usage | undefined;     // last turn in current generation; resets at compaction
   let role: AgentRole | undefined;
   let generation = 0;
   let lines: string[];
   try {
     lines = readFileSync(logPath, 'utf8').split('\n');
   } catch {
-    return { usage, generation };
+    return { lifetimeUsage, lastTurnUsage, generation };
   }
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -47,15 +62,25 @@ export function inspectSession(logPath: string, sessionId: string): SessionMetad
       continue;
     }
     if (msg.type === USAGE_MESSAGE) {
-      usage = addUsage(usage, msg.payload as Usage);
-    } else if (!role && msg.from === agentSeat && isAgentRole(msg.role)) {
+      const delta = msg.payload as Usage;
+      lifetimeUsage = addUsage(lifetimeUsage, delta);
+      lastTurnUsage = delta; // keep only the most recent (#9: snapshot, not cumulative)
+    }
+    // Role and compaction-generation checks are independent (not else-if) so a message
+    // that matches both by coincidence — e.g. a COMPACTION_GENERATION sent from the
+    // executor seat — is dispatched to each branch that applies, not just the first.
+    if (!role && msg.from === agentSeat && isAgentRole(msg.role)) {
       role = msg.role;
-    } else if (msg.type === COMPACTION_GENERATION) {
+    }
+    if (msg.type === COMPACTION_GENERATION) {
       const payload = msg.payload as CompactionGenerationPayload | undefined;
-      if (typeof payload?.generation === 'number') generation = payload.generation;
+      if (typeof payload?.generation === 'number') {
+        generation = payload.generation;
+        lastTurnUsage = undefined; // new conversation; no prior turns in this generation (#9)
+      }
     }
   }
-  return { role, usage, generation };
+  return { role, lifetimeUsage, lastTurnUsage, generation };
 }
 
 /**

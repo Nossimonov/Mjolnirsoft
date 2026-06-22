@@ -271,7 +271,19 @@ function provisionSession(args: {
   }
   // Seed the meter with this session's own usage so far, so a resumed header continues
   // its tally instead of resetting — the durable per-turn log holds it (#116/#126).
-  if (resuming) meter.add(inspectSession(store.logPath(sessionId), sessionId).usage);
+  // Use lifetimeUsage (all-time total) for the header so the tally never resets on
+  // compaction (#9).
+  const seedUsage = resuming ? inspectSession(store.logPath(sessionId), sessionId) : undefined;
+  if (seedUsage) meter.add(seedUsage.lifetimeUsage);
+  // Context-size snapshot for the orchestrator (#9): the raw prompt-side token count
+  // from the most recently completed turn (inputTokens + cacheReadTokens +
+  // cacheCreationTokens). Seeded from the log on reload so the first post-reload turn
+  // shows a meaningful figure rather than 0; undefined/zero for a fresh start or
+  // immediately after a compaction (new blank conversation, nothing in context yet).
+  const seedLast = isOrchestrator ? seedUsage?.lastTurnUsage : undefined;
+  let contextSnapshot = seedLast
+    ? seedLast.inputTokens + seedLast.cacheReadTokens + seedLast.cacheCreationTokens
+    : 0;
 
   // Once the worktree exists, a later failure must not leave it (or a written MCP
   // config) orphaned — track what's been allocated and unwind on a partial failure.
@@ -311,25 +323,28 @@ function provisionSession(args: {
     usageSeat = channel.join(`${sessionId}-usage`, role, () => {});
     const recordTurnUsage = (turn: Usage): void => {
       meter.add(turn);
+      // Update the context snapshot: raw prompt-side tokens from this turn = how much
+      // of the context window Claude just consumed. Next turn reads this via getContextNote.
+      contextSnapshot = turn.inputTokens + turn.cacheReadTokens + turn.cacheCreationTokens;
       usageSeat?.send({ type: USAGE_MESSAGE, payload: turn });
     };
 
-    // Context-size note injected into each orchestrator turn (#165): the weighted-token
-    // total from the meter is surfaced so the orchestrator can self-judge whether it has
-    // passed the compaction threshold and act on the instruction clause without needing
-    // the host to decide for it. Read the threshold from the project config at provision
-    // time (config doesn't change while the session runs).
+    // Context-size note injected into each orchestrator turn (#165): the prompt-side
+    // raw token count from the most recently completed turn tells the orchestrator how
+    // much of the context window is currently occupied, so it can self-judge whether
+    // to compact (#9). Raw tokens (not weighted) are the right unit — the context
+    // window limit is in raw tokens (e.g. 200K for Sonnet), not weighted-cost tokens.
     const compactionThreshold = isOrchestrator
       ? loadProjectConfig(join(repoDir, 'mjolnir.config.json')).compaction.thresholdWeightedTokens
       : undefined;
     const getContextNote = isOrchestrator && compactionThreshold !== undefined
       ? (): string => {
-          const wt = weightedUsage(meter.total());
-          const aboveThreshold = wt > compactionThreshold;
+          const tokens = contextSnapshot; // raw prompt tokens = current context window occupancy
+          const aboveThreshold = tokens > compactionThreshold;
           const verdict = aboveThreshold
             ? `⚠ PAST THRESHOLD — after integrating the current task, write a self-hand-off and call mcp__compact__request.`
             : `Below threshold — continue.`;
-          return `[Context size: ${formatTokens(wt)} weighted tokens (threshold ${formatTokens(compactionThreshold)} wt). ${verdict}]`;
+          return `[Context size: ${formatTokens(tokens)} tokens (threshold ${formatTokens(compactionThreshold)} tokens). ${verdict}]`;
         }
       : undefined;
 
