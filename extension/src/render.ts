@@ -1,6 +1,6 @@
 import MarkdownIt from 'markdown-it';
 import type { Message } from '../../src/core/channel.ts';
-import type { InteractionRequest } from '../../src/core/interaction.ts';
+import { INTERACTION_REQUEST, type InteractionRequest } from '../../src/core/interaction.ts';
 import { isAuthError } from '../../src/executor/auth-error.ts';
 import { REASONING_DIGEST, type ReasoningDigest, type DigestEntry } from '../../src/executor/reasoning-digest.ts';
 
@@ -84,6 +84,9 @@ export function renderMessage(message: Message, model?: string): string {
   // live trail — rendered as its own collapsed, expandable element, available on
   // replay and to a later log-reader, distinct from the clean result below it.
   if (message.type === REASONING_DIGEST) return renderReasoningDigest(message);
+  // An interaction-request replayed from the session log (#161): route it through
+  // the card renderer so it renders identically to the live path, not as raw JSON.
+  if (message.type === INTERACTION_REQUEST) return renderInteractionRequest(message.payload as InteractionRequest);
   const body =
     typeof message.payload === 'string'
       ? message.payload
