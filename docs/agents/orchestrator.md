@@ -171,6 +171,24 @@ The project keeps a single descriptive design record at `docs/DESIGN.md`. It doc
 
 ---
 
+## Rebuilding the Extension to Test Changes
+
+**When.** After a change to the extension's TypeScript code or agent instructions has landed locally — merged to local main, or on a branch you're testing — and you need the running VS Code instance to reflect it. The extension host loads `extension/dist/extension.js` (a per-machine gitignored bundle); neither a source edit nor a branch switch updates that file automatically.
+
+**How.**
+
+```bash
+./rebuild-extension.sh
+```
+
+Then ask the architect to reload the VS Code window (Command Palette → **Developer: Reload Window**). The reload cycles the extension host — and the orchestrator session with it; the session resumes automatically via the deterministic-id mechanism (#126).
+
+Two things to keep in mind:
+- The rebuild takes effect for **newly spawned sessions only**. Sessions already running at reload time pick up new code and instructions only when they are (re)launched after the reload.
+- The script resolves node via `NODE_BIN` in `.local.env`, then PATH, then the common Windows install at `/c/Program Files/nodejs/node.exe`. If none of those work it exits with an actionable error pointing to `.local.env`.
+
+---
+
 ## Capturing Deferred Scope
 
 When you trim an issue's acceptance criteria — moving work out of scope before closing — the deferred functionality must land in **tracked artifacts before the issue closes**. A "Removed from scope" note in a closed issue body does not count: closed issues don't surface in `gh issue list` or session-start checks, so the deferral evaporates.
