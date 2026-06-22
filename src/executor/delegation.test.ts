@@ -23,8 +23,11 @@ const resultDelegate: DelegationDeps['createDelegate'] = (role, id, sub) => ({
  * in-memory sub-channel per delegate that logs its full traffic — the way a real
  * deployment has the spawner on its session channel and each delegate on its own
  * session log, but synchronous and transport-free.
+ *
+ * `generateToken` defaults to a per-wire sequential generator so ids are
+ * deterministic and predictable across each test (tok00001, tok00002, …).
  */
-function wire(createDelegate?: DelegationDeps['createDelegate']) {
+function wire(createDelegate?: DelegationDeps['createDelegate'], generateToken?: () => string) {
   const spawnerChannel = new InMemoryChannel();
   const orchestratorInbox: Message[] = [];
   spawnerChannel.join('orchestrator', 'planner', (m) => orchestratorInbox.push(m));
@@ -42,12 +45,14 @@ function wire(createDelegate?: DelegationDeps['createDelegate']) {
     return sub;
   };
 
+  let n = 0;
   const manager = createDelegationManager({
     spawnerId: 'spawner',
     spawnerRole: 'executor',
     spawnerChannel,
     openSubChannel,
     createDelegate,
+    generateToken: generateToken ?? (() => `tok${String(++n).padStart(5, '0')}`),
   });
 
   return { manager, orchestratorInbox, subChannels, subLogs };
@@ -60,7 +65,7 @@ describe('createDelegationManager', () => {
     const id = manager.spawn('executor', { type: 'text', payload: 'review the diff' });
 
     // The id is the derived sub-channel id, returned synchronously...
-    expect(id).toBe('spawner-executor-1');
+    expect(id).toBe('spawner-executor-1-tok00001');
     // ...before the delegate has replied (spawn does not await the round-trip).
     expect(orchestratorInbox).toEqual([]);
 
@@ -77,11 +82,11 @@ describe('createDelegationManager', () => {
     await flush();
 
     expect(orchestratorInbox).toEqual([
-      { from: 'spawner-executor-1', role: 'executor', type: 'result', payload: 'received: do X' },
+      { from: 'spawner-executor-1-tok00001', role: 'executor', type: 'result', payload: 'received: do X' },
     ]);
     // The bridged report carries the delegate's id+role, so #86 attribution marks
     // it a (non-authoritative) agent — never indistinguishable from the architect.
-    expect(senderAttribution(orchestratorInbox[0])).toBe('[Message from agent (id: spawner-executor-1)]');
+    expect(senderAttribution(orchestratorInbox[0])).toBe('[Message from agent (id: spawner-executor-1-tok00001)]');
   });
 
   it('keeps the delegate\'s full exchange in its own session log (AC4)', async () => {
@@ -151,10 +156,10 @@ describe('createDelegationManager', () => {
     const id2 = manager.spawn('executor', { type: 'text', payload: 'second' });
     await flush();
 
-    expect([id1, id2]).toEqual(['spawner-executor-1', 'spawner-executor-2']);
+    expect([id1, id2]).toEqual(['spawner-executor-1-tok00001', 'spawner-executor-2-tok00002']);
     expect(orchestratorInbox).toEqual([
-      { from: 'spawner-executor-1', role: 'executor', type: 'result', payload: 'received: first' },
-      { from: 'spawner-executor-2', role: 'executor', type: 'result', payload: 'received: second' },
+      { from: id1, role: 'executor', type: 'result', payload: 'received: first' },
+      { from: id2, role: 'executor', type: 'result', payload: 'received: second' },
     ]);
   });
 
@@ -176,10 +181,44 @@ describe('createDelegationManager', () => {
     manager.spawn('executor', { type: 'text', payload: 'go' });
     await flush();
 
-    expect(seen).toEqual([{ role: 'executor', id: 'spawner-executor-1' }]);
+    expect(seen).toEqual([{ role: 'executor', id: 'spawner-executor-1-tok00001' }]);
     expect(orchestratorInbox).toEqual([
-      { from: 'spawner-executor-1', role: 'executor', type: 'result', payload: 'handled: go' },
+      { from: 'spawner-executor-1-tok00001', role: 'executor', type: 'result', payload: 'handled: go' },
     ]);
+  });
+
+  it('generates a distinct id for each spawn — two delegates of the same role never share an id', () => {
+    // Each call to generateToken returns a different value, so even the same role
+    // spawned twice cannot collide. Uniqueness comes from the token, not the counter.
+    const tokens = ['aaaa0001', 'bbbb0002'];
+    let call = 0;
+    const { manager } = wire(undefined, () => tokens[call++]);
+
+    const id1 = manager.spawn('executor', { type: 'text', payload: 'first' });
+    const id2 = manager.spawn('executor', { type: 'text', payload: 'second' });
+
+    expect(id1).not.toBe(id2);
+    expect(id1).toContain('aaaa0001');
+    expect(id2).toContain('bbbb0002');
+  });
+
+  it('stays unique across a manager restart (simulated reload): a fresh counter never reproduces a prior id', () => {
+    // A window reload destroys the extension host and creates a new manager, so the
+    // in-memory sequence resets to 0. The token is the only uniqueness guarantee.
+    const tokens = ['cccc0001', 'dddd0002'];
+    let call = 0;
+    const generateToken = () => tokens[call++];
+
+    // First session — spawns 'spawner-executor-1-cccc0001'.
+    const { manager: m1 } = wire(undefined, generateToken);
+    const id1 = m1.spawn('executor', { type: 'text', payload: 'before reload' });
+
+    // Second session (simulated reload) — sequence also starts at 1, but the token differs.
+    const { manager: m2 } = wire(undefined, generateToken);
+    const id2 = m2.spawn('executor', { type: 'text', payload: 'after reload' });
+
+    expect(id2).not.toBe(id1); // no collision despite sequence reset
+    expect(id2).toContain('dddd0002');
   });
 
   it('bridges from a distinct report seat when the delegate names one (#114 full-executor shape)', async () => {

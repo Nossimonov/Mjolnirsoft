@@ -20,6 +20,8 @@ interface WireOptions {
   readonly makeResponder?: (role: AgentRole, id: string) => Respond;
   /** Override how a full executor delegate (#114) is provisioned on its sub-channel. */
   readonly provisionExecutorDelegate?: DelegationHostDeps['provisionExecutorDelegate'];
+  /** Token generator forwarded to the manager; defaults to a per-wire sequential generator for deterministic ids. */
+  readonly generateToken?: () => string;
 }
 
 /**
@@ -32,6 +34,8 @@ interface WireOptions {
  */
 function wire(options: WireOptions = {}) {
   const spawnerId = options.spawnerId ?? 'w1-executor';
+  let n = 0;
+  const generateToken = options.generateToken ?? (() => `tok${String(++n).padStart(5, '0')}`);
   const spawnerChannel = new InMemoryChannel();
 
   // The spawner's MCP-server side: posts spawn/shutdown requests over the bridge.
@@ -102,6 +106,7 @@ function wire(options: WireOptions = {}) {
     openSubChannel,
     createResponder,
     provisionExecutorDelegate,
+    generateToken,
   });
 
   return {
@@ -125,7 +130,7 @@ describe('createDelegationHost (#93)', () => {
 
     // The host derived the delegate id off the spawner and built its responder
     // for the validated agent role.
-    expect(id).toBe('w1-executor-evaluator-1');
+    expect(id).toBe('w1-executor-evaluator-1-tok00001');
     expect(seen).toEqual([{ role: 'evaluator', id }]);
 
     await flush();
@@ -276,7 +281,7 @@ describe('createDelegationHost — executor-delegate mode (#114)', () => {
     const { delegateId: id } = await bridge.spawn('executor', 'go');
     await flush();
 
-    expect(id).toBe('orch-executor-1');
+    expect(id).toBe('orch-executor-1-tok00001');
     expect(subLogs.get(id!)?.[0]).toMatchObject({ from: 'orch', role: 'orchestrator', payload: 'go' });
   });
 
