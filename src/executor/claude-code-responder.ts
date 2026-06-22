@@ -354,6 +354,13 @@ export function permissionPolicyFor(role: string): string {
     ...base,
     permissions: {
       ...base.permissions,
+      allow: [
+        ...base.permissions.allow,
+        // The compaction tool (#165): the orchestrator requests a context rotation at task
+        // boundaries when its weighted-token total exceeds the configured threshold.
+        // Pre-allowed so the call never dead-ends on a permission prompt.
+        'mcp__compact__request',
+      ],
       // Lift the blanket git-push deny (so a normal push is allowed) but keep
       // force-push off-limits — the orchestrator proposes via a PR, never rewrites history.
       deny: [
@@ -613,6 +620,14 @@ export interface ClaudeCodeResponderOptions {
    * id matches the conversation left behind.
    */
   readonly resume?: boolean;
+  /**
+   * Optional callback called before each turn to supply a context note injected
+   * between the sender attribution and the message body (#165). Used by the
+   * orchestrator to surface its current weighted-token total and whether it has
+   * passed the compaction threshold, so the threshold clause in its instructions
+   * is actionable ("self-judged" compaction). Omit for sessions that don't need it.
+   */
+  readonly getContextNote?: () => string;
 }
 
 /**
@@ -672,6 +687,7 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     onReasoningChange,
     onUsage,
     resume = false,
+    getContextNote,
   } = options;
   // The pinned Claude session id is stable for this responder's life (#126): the first
   // turn creates it (`--session-id`), later turns resume it (`--resume`). It is never
@@ -691,7 +707,12 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     const body = typeof message.payload === 'string' ? message.payload : JSON.stringify(message.payload);
     // Prefix the sender's identity + role so the agent reads who it's hearing
     // from — the authoritative architect vs. a peer/subordinate agent (#86).
-    const prompt = `${senderAttribution(message)}\n\n${body}`;
+    // The optional context note (#165) is injected between attribution and body
+    // so the orchestrator can perceive its running context size mid-conversation.
+    const contextNote = getContextNote?.();
+    const prompt = contextNote
+      ? `${senderAttribution(message)}\n\n${contextNote}\n\n${body}`
+      : `${senderAttribution(message)}\n\n${body}`;
     let result: string;
     // The turn's assembled reasoning trail (#110), captured from the run's stream;
     // posted to the channel alongside the result so it survives reload/replay.

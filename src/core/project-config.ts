@@ -10,13 +10,36 @@ export interface StorageConfig {
   readonly backend: string;
 }
 
+/**
+ * Compaction settings for the orchestrator (#165). After integrating a task the
+ * orchestrator checks its accumulated weighted-token total; if it exceeds the
+ * threshold it writes a self-hand-off and requests a context rotation.
+ */
+export interface CompactionConfig {
+  /**
+   * Accumulated weighted-token threshold above which the orchestrator is invited
+   * to compact its context after a task boundary. Weighted cost: output × 5,
+   * cache-read × 0.1, cache-creation × 1.25, input × 1. A lower value triggers
+   * more frequent compaction (smaller context, cheaper cache misses); a higher
+   * value allows longer sessions before rotating.
+   *
+   * Default: 500_000 weighted tokens — roughly a medium-heavy orchestrator session.
+   * The architect tunes this in mjolnir.config.json ("compaction.thresholdWeightedTokens").
+   */
+  readonly thresholdWeightedTokens: number;
+}
+
 /** The committed, machine-readable project strategy (see `mjolnir.config.json`). */
 export interface ProjectConfig {
   readonly storage: StorageConfig;
+  readonly compaction: CompactionConfig;
 }
 
 /** Default when no committed config is present: the dependency-free local backend. */
-export const DEFAULT_PROJECT_CONFIG: ProjectConfig = { storage: { backend: 'local' } };
+export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
+  storage: { backend: 'local' },
+  compaction: { thresholdWeightedTokens: 500_000 },
+};
 
 /**
  * Load the committed project strategy from `mjolnir.config.json` (repo root by
@@ -41,7 +64,7 @@ export function loadProjectConfig(path = resolve(process.cwd(), 'mjolnir.config.
   if (!isJsonObject(parsed)) {
     throw new Error(`invalid mjolnir.config.json: expected an object, got ${describeJson(parsed)}`);
   }
-  const { storage } = parsed;
+  const { storage, compaction } = parsed;
   if (storage !== undefined && !isJsonObject(storage)) {
     throw new Error(`invalid mjolnir.config.json: "storage" must be an object, got ${describeJson(storage)}`);
   }
@@ -49,7 +72,17 @@ export function loadProjectConfig(path = resolve(process.cwd(), 'mjolnir.config.
   if (typeof backend !== 'string') {
     throw new Error(`invalid mjolnir.config.json: storage.backend must be a string, got ${describeJson(backend)}`);
   }
-  return { storage: { backend } };
+  if (compaction !== undefined && !isJsonObject(compaction)) {
+    throw new Error(`invalid mjolnir.config.json: "compaction" must be an object, got ${describeJson(compaction)}`);
+  }
+  const thresholdWeightedTokens =
+    compaction?.thresholdWeightedTokens ?? DEFAULT_PROJECT_CONFIG.compaction.thresholdWeightedTokens;
+  if (typeof thresholdWeightedTokens !== 'number') {
+    throw new Error(
+      `invalid mjolnir.config.json: compaction.thresholdWeightedTokens must be a number, got ${describeJson(thresholdWeightedTokens)}`,
+    );
+  }
+  return { storage: { backend }, compaction: { thresholdWeightedTokens } };
 }
 
 /** A non-null, non-array object — the only valid shape for the config and its `storage`. */

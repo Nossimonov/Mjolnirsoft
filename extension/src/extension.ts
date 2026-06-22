@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
-import { writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Channel, Participant, Message } from '../../src/core/channel.ts';
 import { SessionStore } from '../../src/core/session-store.ts';
 import { WorktreeManager, currentRemoteBase } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
+import { loadProjectConfig } from '../../src/core/project-config.ts';
 import { runExecutor } from '../../src/executor/executor-runtime.ts';
 import { createClaudeCodeResponder, resolveClaudeBin, addUsage, ZERO_USAGE, USAGE_MESSAGE, claudeSessionIdFor, permissionPolicyFor, weightedUsage, type Usage } from '../../src/executor/claude-code-responder.ts';
 import { createReasoningStream, type ReasoningStream } from '../../src/executor/reasoning-stream.ts';
@@ -20,6 +21,14 @@ import {
   type InteractionRequest,
 } from '../../src/core/interaction.ts';
 import { DELEGATION_REQUEST, DELEGATION_RESPONSE } from '../../src/core/delegation-protocol.ts';
+import {
+  COMPACTION_REQUEST,
+  COMPACTION_RESPONSE,
+  COMPACTION_GENERATION,
+  type CompactionRequest,
+  type CompactionResponse,
+} from '../../src/core/compaction-protocol.ts';
+import { inspectSession, orchestratorSessionKey } from '../../src/executor/session-inspector.ts';
 import { REASONING_DIGEST } from '../../src/executor/reasoning-digest.ts';
 import { renderMessage, renderInteractionRequest, renderReasoningDigestLive } from './render.ts';
 
@@ -57,36 +66,8 @@ function formatUsage(u: Usage): string {
   return `${formatTokens(total)} tok · ${formatTokens(weightedUsage(u))} wt · ${formatTokens(u.outputTokens)} out`;
 }
 
-/**
- * Recover from a session's durable log what the in-host registry lost on a reload
- * (#126): the agent's **role** (so a resume re-provisions it as the right kind of
- * agent) and its **own usage so far** (so the resumed meter continues, #116). One
- * pass over the JSONL. The role is read from the session's own agent seat
- * (`${id}-executor`), not a bridged delegate's turns. Missing/unreadable → empty.
- */
-function inspectSession(logPath: string, sessionId: string): { role?: AgentRole; usage: Usage } {
-  const agentSeat = `${sessionId}-executor`;
-  let usage = ZERO_USAGE;
-  let role: AgentRole | undefined;
-  let lines: string[];
-  try {
-    lines = readFileSync(logPath, 'utf8').split('\n');
-  } catch {
-    return { usage };
-  }
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    let msg: Message;
-    try {
-      msg = JSON.parse(line) as Message;
-    } catch {
-      continue;
-    }
-    if (msg.type === USAGE_MESSAGE) usage = addUsage(usage, msg.payload as Usage);
-    else if (!role && msg.from === agentSeat && isAgentRole(msg.role)) role = msg.role;
-  }
-  return { role, usage };
-}
+// inspectSession is imported from src/executor/session-inspector.ts (#165/#126):
+// reads role, usage, and compaction generation from the session JSONL in one pass.
 
 /**
  * What a live, in-host session exposes for *attach-on-demand* (#114). A session
@@ -249,7 +230,6 @@ function provisionSession(args: {
   const repoDir = folder.uri.fsPath;
   const model = modelForRole(role); // the per-role model this agent runs on (#119)
   const meter = createUsageMeter(args.onUsage); // accumulate token usage; bubble to the spawner (#116)
-  const claudeSessionId = claudeSessionIdFor(sessionId); // stable, so a reload can --resume (#126)
 
   // Where the agent works. An executor (and any worktree role) gets an isolated git
   // worktree so it edits the repo without touching the developer's working tree; the
@@ -260,12 +240,21 @@ function provisionSession(args: {
   const isOrchestrator = role === 'orchestrator';
   let workspace: { path: string; branch?: string; commit(message: string): boolean; remove(): void };
   let resuming: boolean;
+  // The stable claude session id (#126): for the orchestrator this is generation-indexed
+  // (#165) so each compaction rotation starts a fresh claude conversation (blank context)
+  // while the Mjolnir session log remains continuous. Generation 0 uses the plain id for
+  // backward compatibility with pre-compaction sessions.
+  let claudeSessionId: string;
   if (isOrchestrator) {
     // The singleton orchestrator always continues its one conversation: resume its
     // pinned claude session (the #126 not-found fallback covers the very first launch).
     // No worktree to create, capture, or remove; it works out of the main repo.
     resuming = true;
     workspace = { path: repoDir, commit: () => false, remove: () => {} };
+    // Derive the session id from the current compaction generation (#165). Generation 0
+    // is backward-compatible; generation N uses a suffix so the new conversation is blank.
+    const { generation } = inspectSession(store.logPath(sessionId), sessionId);
+    claudeSessionId = claudeSessionIdFor(orchestratorSessionKey(sessionId, generation));
   } else {
     // If a worktree already exists for this id, the session was interrupted by a reload
     // (a clean close removes it), so **reattach** + resume its conversation rather than
@@ -278,6 +267,7 @@ function provisionSession(args: {
     workspace = resuming
       ? worktrees.open(sessionId)
       : new WorktreeManager({ repoDir, base: currentRemoteBase(repoDir) }).create(sessionId);
+    claudeSessionId = claudeSessionIdFor(sessionId); // stable, so a reload can --resume (#126)
   }
   // Seed the meter with this session's own usage so far, so a resumed header continues
   // its tally instead of resetting — the durable per-turn log holds it (#116/#126).
@@ -293,6 +283,8 @@ function provisionSession(args: {
     // server for spawning delegates (#93) — each bridging over this session's channel.
     const permParticipantId = `${sessionId}-perms`;
     const delegateParticipantId = `${sessionId}-delegate`;
+    // The compaction MCP server is wired only for the orchestrator (#165).
+    const compactParticipantId = isOrchestrator ? `${sessionId}-compact` : undefined;
     mcpConfigPath = writeExecutorMcpConfig(
       context,
       store.logPath(sessionId),
@@ -300,6 +292,7 @@ function provisionSession(args: {
       delegateParticipantId,
       repoDir,
       workspace.path,
+      compactParticipantId,
     );
 
     // The live, ephemeral path for the agent's reasoning (#108): the responder pushes
@@ -321,6 +314,25 @@ function provisionSession(args: {
       usageSeat?.send({ type: USAGE_MESSAGE, payload: turn });
     };
 
+    // Context-size note injected into each orchestrator turn (#165): the weighted-token
+    // total from the meter is surfaced so the orchestrator can self-judge whether it has
+    // passed the compaction threshold and act on the instruction clause without needing
+    // the host to decide for it. Read the threshold from the project config at provision
+    // time (config doesn't change while the session runs).
+    const compactionThreshold = isOrchestrator
+      ? loadProjectConfig(join(repoDir, 'mjolnir.config.json')).compaction.thresholdWeightedTokens
+      : undefined;
+    const getContextNote = isOrchestrator && compactionThreshold !== undefined
+      ? (): string => {
+          const wt = weightedUsage(meter.total());
+          const aboveThreshold = wt > compactionThreshold;
+          const verdict = aboveThreshold
+            ? `⚠ PAST THRESHOLD — after integrating the current task, write a self-hand-off and call mcp__compact__request.`
+            : `Below threshold — continue.`;
+          return `[Context size: ${formatTokens(wt)} weighted tokens (threshold ${formatTokens(compactionThreshold)} wt). ${verdict}]`;
+        }
+      : undefined;
+
     // Run the agent in-process: it joins the session in its role and answers each
     // message by running a headless Claude Code agent with the worktree as workspace.
     const agentId = `${sessionId}-executor`;
@@ -330,7 +342,7 @@ function provisionSession(args: {
       createClaudeCodeResponder({
         workdir: workspace.path,
         appendSystemPrompt: composeAgentInstructions(role),
-        claudeSessionId, // stable id (#126): a brand-new session creates it; a resume resumes it
+        claudeSessionId, // stable id (#126/#165): generation-indexed for the orchestrator
         resume: resuming, // first turn --resume the interrupted conversation rather than create (#126)
         permissionPromptTool: PERMISSION_PROMPT_TOOL,
         mcpConfigPath,
@@ -338,6 +350,7 @@ function provisionSession(args: {
         model,
         onReasoningChange: reasoning.emit,
         onUsage: recordTurnUsage, // accumulate the running total *and* log this turn (#116)
+        getContextNote, // inject context-size note for the orchestrator (#165)
       }),
       role,
     );
@@ -418,12 +431,17 @@ function provisionSession(args: {
  * it — resuming its one conversation when it has run before. It works out of the main
  * repo with no worktree, so there's no "ended vs interrupted" distinction: re-opening
  * always continues it (the `resumed` flag here only picks the wording).
+ *
+ * After a compaction restart (#165), `compactionHandoff` carries the self-hand-off text
+ * that the previous orchestrator wrote; it's posted as the new session's first message
+ * so the fresh context picks up without loss.
  */
 function openOrchestrator(
   context: vscode.ExtensionContext,
   folder: vscode.WorkspaceFolder,
   store: SessionStore,
   liveSessions: LiveSessions,
+  compactionHandoff?: string,
 ): void {
   const live = liveSessions.get(ORCHESTRATOR_ID);
   if (live) {
@@ -437,7 +455,16 @@ function openOrchestrator(
     });
     return;
   }
-  launchSession(context, folder, store, ORCHESTRATOR_ID, 'orchestrator', liveSessions, store.list().includes(ORCHESTRATOR_ID));
+  launchSession(
+    context,
+    folder,
+    store,
+    ORCHESTRATOR_ID,
+    'orchestrator',
+    liveSessions,
+    store.list().includes(ORCHESTRATOR_ID),
+    compactionHandoff,
+  );
 }
 
 /**
@@ -476,6 +503,10 @@ async function startSession(
  * commands and the front door's **resume** path (#126): `provisionSession` reattaches
  * to an existing worktree (resuming the interrupted conversation) when one is present,
  * or creates a fresh one — so this same wiring serves both "start" and "resume".
+ *
+ * For the orchestrator after a compaction restart (#165), `compactionHandoff` is the
+ * self-hand-off the previous orchestrator wrote. It's posted as the first channel
+ * message so the fresh claude session's first turn answers it.
  */
 function launchSession(
   context: vscode.ExtensionContext,
@@ -485,6 +516,7 @@ function launchSession(
   role: AgentRole,
   liveSessions: LiveSessions,
   resumed: boolean,
+  compactionHandoff?: string,
 ): void {
   // The in-process agent shells out to `claude`; load machine-specific config
   // (CLAUDE_BIN) so it's found even when the extension host's PATH lacks it.
@@ -504,6 +536,83 @@ function launchSession(
     return;
   }
 
+  // If this is a compaction restart (#165), post the self-hand-off as the first message
+  // so the fresh orchestrator session's first turn answers it. The `planner` role marks
+  // it as an authoritative instruction (it is — the previous orchestrator wrote it).
+  // Post before the panel opens so it replays for the new panel immediately.
+  if (compactionHandoff) {
+    const handoffSeat = channel.join(`${sessionId}-compaction-handoff`, 'planner', () => {});
+    handoffSeat.send({ type: 'text', payload: compactionHandoff });
+    handoffSeat.close();
+  }
+
+  // Compaction host (#165, orchestrator only): listens for COMPACTION_REQUEST from the
+  // orchestrator's compaction MCP server, acknowledges it, then waits for the turn's
+  // result message to confirm the turn is complete before performing the restart. This
+  // fires only at task boundaries (the instruction layer enforces no live delegates).
+  let compactionPending = false;
+  let compactionObserver: Participant | undefined;
+  let compacted = false; // set when compaction takes over lifecycle; suppresses onDispose cleanup
+  const isOrchestrator = role === 'orchestrator';
+
+  const compactionHost = isOrchestrator
+    ? channel.join(`${sessionId}-compact-host`, 'planner', (message: Message) => {
+        if (message.type !== COMPACTION_REQUEST || compactionPending) return;
+        const request = message.payload as CompactionRequest;
+        if (!request?.handoff?.trim()) {
+          const response: CompactionResponse = { requestId: request.requestId, error: 'empty handoff' };
+          compactionHost?.send({ type: COMPACTION_RESPONSE, payload: response });
+          return;
+        }
+        compactionPending = true;
+        // Acknowledge immediately so the MCP tool returns and the turn can complete.
+        const response: CompactionResponse = { requestId: request.requestId };
+        compactionHost?.send({ type: COMPACTION_RESPONSE, payload: response });
+
+        // Watch for the agent's result message — that marks turn completion. Only then
+        // do we perform the restart, so the orchestrator's reply is in the log first.
+        compactionObserver = channel.join(`${sessionId}-compact-observer`, 'planner', (msg: Message) => {
+          if (msg.from !== provisioned.agentId || msg.type !== 'result') return;
+          compactionObserver?.close();
+          compactionObserver = undefined;
+          void performCompaction(request.handoff);
+        });
+      })
+    : undefined;
+
+  // Tear down the current orchestrator session and relaunch from the hand-off (#165).
+  // Called after the compacted turn's result arrives on the channel.
+  async function performCompaction(handoff: string): Promise<void> {
+    // 1. Read the current generation and compute the next one.
+    const { generation } = inspectSession(store.logPath(sessionId), sessionId);
+    const nextGeneration = generation + 1;
+
+    // 2. Persist the new generation to the JSONL before closing (so inspectSession
+    //    recovers it on a subsequent window reload).
+    compactionHost?.send({
+      type: COMPACTION_GENERATION,
+      payload: { generation: nextGeneration },
+    });
+
+    // 3. Close the compaction host seat (no more requests on the old session).
+    compactionHost?.close();
+
+    // 4. Mark as compacted so onDispose doesn't double-close.
+    compacted = true;
+
+    // 5. Tear down the old agent and MCP config (workspace.remove() is a no-op for
+    //    the orchestrator; the channel stays open until we explicitly close it below).
+    provisioned.close();
+
+    // 6. Close the command-level channel. The panel's own channel handle stays open
+    //    (closed by the panel's onDidDispose), so it continues to display history.
+    channel.close();
+
+    // 7. Relaunch: open a fresh orchestrator session on the next generation's claude
+    //    session id, sending the hand-off as its first turn.
+    openOrchestrator(context, folder, store, liveSessions, handoff);
+  }
+
   openSessionPanel(context, store, sessionId, folder.uri.fsPath, liveSessions, {
     executorAttached: true,
     executorId: provisioned.agentId,
@@ -512,6 +621,9 @@ function launchSession(
     model: provisioned.model,
     meter: provisioned.meter,
     onDispose: () => {
+      if (compacted) return; // compaction already cleaned up; don't double-close
+      compactionObserver?.close();
+      compactionHost?.close();
       const captured = provisioned.close();
       channel.close();
       // The orchestrator has no branch (it works out of the main repo, #123), so only
@@ -678,6 +790,14 @@ function openSessionPanel(
     // they don't render as noisy turns or toggle the working indicator; the
     // delegate's *report* arrives as an ordinary message and renders normally.
     if (message.type === DELEGATION_REQUEST || message.type === DELEGATION_RESPONSE) return;
+    // Compaction control messages (#165) are plumbing — the request/response between
+    // the compaction MCP server and the in-host compaction listener. The generation
+    // bookmark is a JSONL bookkeeping entry. None render as conversation turns.
+    if (
+      message.type === COMPACTION_REQUEST ||
+      message.type === COMPACTION_RESPONSE ||
+      message.type === COMPACTION_GENERATION
+    ) return;
     // A persisted per-turn token tally (#116). For a live session the meter already
     // drives the header (and counts these turns plus rolled-up sub-agents), so skip
     // them to avoid clobbering it with a single turn's delta. For a replayed/ended
@@ -966,9 +1086,9 @@ function renderHtml(
 }
 
 /**
- * Write a per-session MCP config wiring Claude to *both* bundled servers an
- * executor needs, and return its path. One config file declares two servers, so
- * a single `--mcp-config` carries both (Claude merges all servers from the file):
+ * Write a per-session MCP config wiring Claude to the bundled servers an executor
+ * needs, and return its path. One config file declares all servers, so a single
+ * `--mcp-config` carries them all (Claude merges all servers from the file):
  *
  *  - `perm` (#66) — backs `--permission-prompt-tool mcp__perm__approve`: bridges a
  *    gated tool use to the session channel for the human, and consults the
@@ -977,8 +1097,11 @@ function renderHtml(
  *  - `delegate` (#93) — exposes `mcp__delegate__spawn`/`mcp__delegate__shutdown`:
  *    bridges a delegation request to the in-host delegation manager over the same
  *    session channel.
+ *  - `compact` (#165, orchestrator only) — exposes `mcp__compact__request`: bridges
+ *    a compaction request to the in-host compaction listener over the session channel.
+ *    Wired only when `compactParticipantId` is provided (orchestrator sessions).
  *
- * Both servers are launched with the extension host's own Node (Electron run as
+ * All servers are launched with the extension host's own Node (Electron run as
  * Node, so no separate Node on PATH is needed) and bridge over the same session
  * log under their own distinct channel ids. Returns the temp path; the caller
  * deletes it on close.
@@ -990,34 +1113,45 @@ function writeExecutorMcpConfig(
   delegateParticipantId: string,
   projectDir: string,
   worktreePath: string,
+  compactParticipantId?: string,
 ): string {
   const dist = (name: string) => vscode.Uri.joinPath(context.extensionUri, 'dist', name).fsPath;
-  const config = {
-    mcpServers: {
-      perm: {
-        command: process.execPath,
-        args: [dist('permission-mcp-server.js')],
-        env: {
-          ELECTRON_RUN_AS_NODE: '1',
-          MJOLNIR_SESSION_LOG: sessionLogPath,
-          MJOLNIR_PERM_ID: permParticipantId,
-          MJOLNIR_PROJECT_DIR: projectDir,
-          MJOLNIR_WORKTREE_DIR: worktreePath,
-        },
+  type McpServers = Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+  const mcpServers: McpServers = {
+    perm: {
+      command: process.execPath,
+      args: [dist('permission-mcp-server.js')],
+      env: {
+        ELECTRON_RUN_AS_NODE: '1',
+        MJOLNIR_SESSION_LOG: sessionLogPath,
+        MJOLNIR_PERM_ID: permParticipantId,
+        MJOLNIR_PROJECT_DIR: projectDir,
+        MJOLNIR_WORKTREE_DIR: worktreePath,
       },
-      delegate: {
-        command: process.execPath,
-        args: [dist('delegation-mcp-server.js')],
-        env: {
-          ELECTRON_RUN_AS_NODE: '1',
-          MJOLNIR_SESSION_LOG: sessionLogPath,
-          MJOLNIR_DELEGATE_ID: delegateParticipantId,
-        },
+    },
+    delegate: {
+      command: process.execPath,
+      args: [dist('delegation-mcp-server.js')],
+      env: {
+        ELECTRON_RUN_AS_NODE: '1',
+        MJOLNIR_SESSION_LOG: sessionLogPath,
+        MJOLNIR_DELEGATE_ID: delegateParticipantId,
       },
     },
   };
+  if (compactParticipantId) {
+    mcpServers['compact'] = {
+      command: process.execPath,
+      args: [dist('compaction-mcp-server.js')],
+      env: {
+        ELECTRON_RUN_AS_NODE: '1',
+        MJOLNIR_SESSION_LOG: sessionLogPath,
+        MJOLNIR_COMPACT_ID: compactParticipantId,
+      },
+    };
+  }
   const configPath = join(tmpdir(), `mjolnir-mcp-${permParticipantId}-${Date.now()}.json`);
-  writeFileSync(configPath, JSON.stringify(config));
+  writeFileSync(configPath, JSON.stringify({ mcpServers }));
   return configPath;
 }
 
