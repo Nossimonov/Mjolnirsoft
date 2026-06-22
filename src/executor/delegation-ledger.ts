@@ -21,7 +21,18 @@ import {
   type DelegationRequest,
   type DelegationResponse,
 } from '../core/delegation-protocol.ts';
-import { deliversToAgent } from './executor-runtime.ts';
+
+/**
+ * The message types the ledger treats as bridged delegate reports.
+ *
+ * Intentionally separate from `AGENT_PROMPT_TYPES` in `executor-runtime.ts`
+ * (which governs agent-turn routing). The two sets happen to coincide today,
+ * but "what delivers an agent turn" and "what the ledger records as a report"
+ * are distinct concerns: a future routing change must not silently alter the
+ * historical record, and vice versa. A test (`delegation-ledger.test.ts`) asserts
+ * they are equal, so any divergence is a deliberate, test-flagged decision.
+ */
+export const LEDGER_REPORT_TYPES: ReadonlySet<string> = new Set(['text', 'result', 'error']);
 
 /** A single bridged report — the result, text, or error a delegate sent back. */
 export interface DelegationReport {
@@ -37,6 +48,11 @@ export interface DelegationEntry {
   readonly role: string;
   /** The original hand-off task text sent to the delegate. */
   readonly task: string;
+  /**
+   * Follow-up messages successfully delivered to the delegate via `send`, in
+   * order of delivery. Empty if no follow-ups were sent.
+   */
+  readonly followUps: readonly string[];
   /** Bridged-back reports from the delegate, in order of arrival. */
   readonly reports: readonly DelegationReport[];
   /** True while the delegate is live; false after a successful shutdown. */
@@ -71,10 +87,12 @@ export function projectDelegationLedger(logPath: string): DelegationEntry[] {
   const pendingSpawns = new Map<string, { role: string; task: string }>();
   // Pending shutdown requests awaiting their response: requestId → delegateId
   const pendingShutdowns = new Map<string, string>();
+  // Pending message requests awaiting their response: requestId → { delegateId, text }
+  const pendingMessages = new Map<string, { delegateId: string; text: string }>();
   // Mutable builders keyed by delegateId; finalised into DelegationEntry at the end.
   const builders = new Map<
     string,
-    { delegateId: string; role: string; task: string; reports: DelegationReport[]; active: boolean }
+    { delegateId: string; role: string; task: string; followUps: string[]; reports: DelegationReport[]; active: boolean }
   >();
 
   for (const msg of messages) {
@@ -83,6 +101,8 @@ export function projectDelegationLedger(logPath: string): DelegationEntry[] {
       if (!req || typeof req.requestId !== 'string') continue;
       if (req.action === 'spawn') {
         pendingSpawns.set(req.requestId, { role: req.role ?? '', task: req.task ?? '' });
+      } else if (req.action === 'message' && req.delegateId) {
+        pendingMessages.set(req.requestId, { delegateId: req.delegateId, text: req.task ?? '' });
       } else if (req.action === 'shutdown' && req.delegateId) {
         pendingShutdowns.set(req.requestId, req.delegateId);
       }
@@ -100,9 +120,18 @@ export function projectDelegationLedger(logPath: string): DelegationEntry[] {
           delegateId: res.delegateId,
           role: spawn.role,
           task: spawn.task,
+          followUps: [],
           reports: [],
           active: true,
         });
+        continue;
+      }
+
+      const pendingMsg = pendingMessages.get(res.requestId);
+      if (pendingMsg && !res.error) {
+        pendingMessages.delete(res.requestId);
+        const b = builders.get(pendingMsg.delegateId);
+        if (b) b.followUps.push(pendingMsg.text);
         continue;
       }
 
@@ -115,10 +144,11 @@ export function projectDelegationLedger(logPath: string): DelegationEntry[] {
       continue;
     }
 
-    // Any other message from a known delegate that passes the agent-prompt filter
-    // is a bridged report (the same gate the delegation manager uses, #116).
+    // Any other message from a known delegate whose type is in LEDGER_REPORT_TYPES
+    // is a bridged report. LEDGER_REPORT_TYPES is the ledger's own constant —
+    // intentionally separate from the agent-routing allowlist in executor-runtime.ts.
     const b = builders.get(msg.from);
-    if (b && deliversToAgent(msg)) {
+    if (b && LEDGER_REPORT_TYPES.has(msg.type)) {
       b.reports.push({ type: msg.type, payload: msg.payload });
     }
   }
@@ -127,6 +157,7 @@ export function projectDelegationLedger(logPath: string): DelegationEntry[] {
     delegateId: b.delegateId,
     role: b.role,
     task: b.task,
+    followUps: b.followUps,
     reports: b.reports,
     active: b.active,
   }));

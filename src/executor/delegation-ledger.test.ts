@@ -6,8 +6,10 @@ import {
   projectDelegationLedger,
   findByDelegateId,
   findByTaskKey,
+  LEDGER_REPORT_TYPES,
   type DelegationEntry,
 } from './delegation-ledger.ts';
+import { AGENT_PROMPT_TYPES } from './executor-runtime.ts';
 import { DELEGATION_REQUEST, DELEGATION_RESPONSE } from '../core/delegation-protocol.ts';
 import type { Message } from '../core/channel.ts';
 
@@ -24,6 +26,22 @@ const spawnRequest = (requestId: string, role: string, task: string): Message =>
 
 /** The host's successful spawn response. */
 const spawnResponse = (requestId: string, delegateId: string): Message => ({
+  from: 'orch-delegation-host',
+  role: 'planner',
+  type: DELEGATION_RESPONSE,
+  payload: { requestId, delegateId },
+});
+
+/** A delegation-request follow-up message to a live delegate. */
+const messageRequest = (requestId: string, delegateId: string, text: string): Message => ({
+  from: 'orch-delegate',
+  role: 'executor',
+  type: DELEGATION_REQUEST,
+  payload: { requestId, action: 'message', delegateId, task: text },
+});
+
+/** The host's successful message-delivery response. */
+const messageResponse = (requestId: string, delegateId: string): Message => ({
   from: 'orch-delegation-host',
   role: 'planner',
   type: DELEGATION_RESPONSE,
@@ -92,6 +110,7 @@ describe('delegation-ledger (#168)', () => {
       delegateId: 'orch-evaluator-1-abc',
       role: 'evaluator',
       task: 'review the diff for issue #168',
+      followUps: [],
       reports: [],
       active: true,
     });
@@ -127,11 +146,11 @@ describe('delegation-ledger (#168)', () => {
     expect(entries[0].task).toBe('review the diff'); // hand-off still accessible
   });
 
-  it('ignores infrastructure messages (non-AGENT_PROMPT_TYPES) as reports', () => {
+  it('ignores infrastructure messages (non-LEDGER_REPORT_TYPES) as reports', () => {
     const infraMsg: Message = {
       from: 'orch-evaluator-1-abc',
       role: 'evaluator',
-      type: 'usage',     // infrastructure type — not in the agent-prompt allowlist
+      type: 'usage',     // infrastructure type — not in LEDGER_REPORT_TYPES
       payload: { inputTokens: 100 },
     };
     writeFileSync(
@@ -200,6 +219,85 @@ describe('delegation-ledger (#168)', () => {
     expect(entries[1].delegateId).toBe('orch-executor-2-xyz');
     expect(entries[0].reports[0].payload).toBe('critique A');
     expect(entries[1].reports[0].payload).toBe('done');
+  });
+
+  describe('follow-up message capture', () => {
+    it('records a successfully delivered follow-up in followUps, in order', () => {
+      writeFileSync(
+        logPath,
+        line(spawnRequest('req-1', 'evaluator', 'review the diff')) +
+          line(spawnResponse('req-1', 'orch-evaluator-1-abc')) +
+          line(messageRequest('req-2', 'orch-evaluator-1-abc', 'run the suite with PATH=/c/Program Files/nodejs')) +
+          line(messageResponse('req-2', 'orch-evaluator-1-abc')) +
+          line(messageRequest('req-3', 'orch-evaluator-1-abc', 'also check the test for #168')) +
+          line(messageResponse('req-3', 'orch-evaluator-1-abc')),
+      );
+
+      const entries = projectDelegationLedger(logPath);
+
+      expect(entries[0].followUps).toEqual([
+        'run the suite with PATH=/c/Program Files/nodejs',
+        'also check the test for #168',
+      ]);
+    });
+
+    it('does NOT record a follow-up whose response carried an error (undelivered message)', () => {
+      const errResponse: Message = {
+        from: 'orch-delegation-host',
+        role: 'planner',
+        type: DELEGATION_RESPONSE,
+        payload: { requestId: 'req-2', error: 'no live delegate: orch-evaluator-1-abc' },
+      };
+      writeFileSync(
+        logPath,
+        line(spawnRequest('req-1', 'evaluator', 'review')) +
+          line(spawnResponse('req-1', 'orch-evaluator-1-abc')) +
+          line(messageRequest('req-2', 'orch-evaluator-1-abc', 'this never arrived')) +
+          line(errResponse),
+      );
+
+      const entries = projectDelegationLedger(logPath);
+
+      expect(entries[0].followUps).toEqual([]);
+    });
+
+    it('keeps followUps per-delegate when multiple delegates are live', () => {
+      writeFileSync(
+        logPath,
+        line(spawnRequest('req-1', 'evaluator', 'task A')) +
+          line(spawnResponse('req-1', 'delegate-A')) +
+          line(spawnRequest('req-2', 'executor', 'task B')) +
+          line(spawnResponse('req-2', 'delegate-B')) +
+          line(messageRequest('req-3', 'delegate-A', 'follow-up for A')) +
+          line(messageResponse('req-3', 'delegate-A')) +
+          line(messageRequest('req-4', 'delegate-B', 'follow-up for B')) +
+          line(messageResponse('req-4', 'delegate-B')),
+      );
+
+      const entries = projectDelegationLedger(logPath);
+      const a = findByDelegateId(entries, 'delegate-A')!;
+      const b = findByDelegateId(entries, 'delegate-B')!;
+
+      expect(a.followUps).toEqual(['follow-up for A']);
+      expect(b.followUps).toEqual(['follow-up for B']);
+    });
+
+    it('follow-ups are still present after reload (derived from disk, not in-memory state)', () => {
+      writeFileSync(
+        logPath,
+        line(spawnRequest('req-1', 'evaluator', 'review')) +
+          line(spawnResponse('req-1', 'orch-evaluator-1-abc')) +
+          line(messageRequest('req-2', 'orch-evaluator-1-abc', 'operational enablement')) +
+          line(messageResponse('req-2', 'orch-evaluator-1-abc')),
+      );
+
+      // First projection.
+      projectDelegationLedger(logPath);
+
+      // Second projection — simulates reload with no in-memory state.
+      const afterReload = projectDelegationLedger(logPath);
+      expect(afterReload[0].followUps).toEqual(['operational enablement']);
+    });
   });
 
   describe('findByDelegateId', () => {
@@ -313,6 +411,46 @@ describe('delegation-ledger (#168)', () => {
 
       // The projected task is exactly what was in the payload — no transformation.
       expect(entries[0].task).toBe('the exact task text from the channel');
+    });
+  });
+
+  describe('LEDGER_REPORT_TYPES — own constant, intentionally separate from agent routing', () => {
+    it('LEDGER_REPORT_TYPES contains the same members as AGENT_PROMPT_TYPES today', () => {
+      // This test is a deliberate parity check. The two sets start equal and are
+      // kept intentionally separate (see delegation-ledger.ts). If they ever
+      // diverge, this test fails — signalling a conscious decision is needed, not
+      // a silent drift. To make them diverge intentionally: update this test too.
+      expect([...LEDGER_REPORT_TYPES].sort()).toEqual([...AGENT_PROMPT_TYPES].sort());
+    });
+
+    it('LEDGER_REPORT_TYPES is the gate used for report projection (not executor-runtime)', () => {
+      // A message type in LEDGER_REPORT_TYPES from a known delegate becomes a report.
+      // A type NOT in LEDGER_REPORT_TYPES does not, even if it were added to agent routing.
+      const textMsg: Message = {
+        from: 'orch-evaluator-1-abc',
+        role: 'evaluator',
+        type: 'text',   // in LEDGER_REPORT_TYPES
+        payload: 'an interim update',
+      };
+      const unknownMsg: Message = {
+        from: 'orch-evaluator-1-abc',
+        role: 'evaluator',
+        type: 'question',   // hypothetical future routing type — NOT in LEDGER_REPORT_TYPES
+        payload: 'what should I do?',
+      };
+      writeFileSync(
+        logPath,
+        line(spawnRequest('req-1', 'evaluator', 'review')) +
+          line(spawnResponse('req-1', 'orch-evaluator-1-abc')) +
+          line(textMsg) +
+          line(unknownMsg),
+      );
+
+      const entries = projectDelegationLedger(logPath);
+
+      // Only 'text' is recorded; 'question' is not.
+      expect(entries[0].reports).toHaveLength(1);
+      expect(entries[0].reports[0].type).toBe('text');
     });
   });
 });
