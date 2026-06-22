@@ -30,6 +30,7 @@ import {
   type CompactionResponse,
 } from '../../src/core/compaction-protocol.ts';
 import { inspectSession, orchestratorSessionKey } from '../../src/executor/session-inspector.ts';
+import { projectDelegationLedger } from '../../src/executor/delegation-ledger.ts';
 import { REASONING_DIGEST } from '../../src/executor/reasoning-digest.ts';
 import { renderMessage, renderInteractionRequest, renderReasoningDigestLive } from './render.ts';
 
@@ -154,8 +155,24 @@ export function activate(context: vscode.ExtensionContext): void {
         continue;
       }
       if (wt?.exists(sessionId)) {
-        const { role } = inspectSession(restoreStore.logPath(sessionId), sessionId);
-        launchSession(context, startupFolder, restoreStore, sessionId, role ?? 'executor', liveSessions, true, undefined, panelTracker);
+        // Check whether the orchestrator's rewire loop already provisioned this
+        // delegate — if so, attach to the live session rather than double-launching (#128).
+        const live = liveSessions.get(sessionId);
+        if (live) {
+          openSessionPanel(context, restoreStore, sessionId, repoDir, liveSessions, {
+            executorAttached: true,
+            executorId: live.agentId,
+            reasoning: live.reasoning,
+            agentLabel: live.role,
+            model: live.model,
+            meter: live.meter,
+            onOpen: () => panelTracker.track(sessionId),
+            onDispose: () => panelTracker.untrack(sessionId),
+          });
+        } else {
+          const { role } = inspectSession(restoreStore.logPath(sessionId), sessionId);
+          launchSession(context, startupFolder, restoreStore, sessionId, role ?? 'executor', liveSessions, true, undefined, panelTracker);
+        }
       } else {
         // Ended cleanly (or no git repo) — restore as a viewer-only replay (already tracked).
         openSessionPanel(context, restoreStore, sessionId, repoDir, liveSessions, {
@@ -174,7 +191,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // take the newcomer straight into starting an executor.
     const sessions = store.list();
     if (sessions.length === 0) {
-      await startSession(context, folder, store, 'executor', liveSessions);
+      await startSession(context, folder, store, 'executor', liveSessions, panelTracker);
       return;
     }
     const pick = await vscode.window.showQuickPick([START_NEW_SESSION, ...sessions], {
@@ -469,28 +486,21 @@ function provisionSession(args: {
     });
 
     // Re-establish bridges for isolated-worktree delegates that survived a reload
-    // (#128). Only applies when the orchestrator resumes: its delegates' IDs are
-    // prefixed by the orchestrator's agent id, and only those with a still-present
-    // worktree were interrupted (a clean close removes the worktree). Critique roles
-    // (evaluator, investigator) have no persistent worktree, so they never appear here.
-    //
-    // Only direct children are wired: the suffix after the prefix has exactly 2
-    // dashes (role-sequence-token). A deeper descendant (a delegate's own sub-
-    // delegate) would have more dashes; it is instead wired by the resumed executor
-    // delegate's own delegation host when that delegate's provisionSession fires.
-    // Role names contain no dashes, and the token has dashes stripped (#128).
+    // (#128). Only applies when the orchestrator resumes. The delegation ledger
+    // returns exactly the orchestrator's own direct delegates (not grandchildren) by
+    // reading the actual delegation protocol messages from the orchestrator's log —
+    // semantically correct and no fragile string matching. A delegate with
+    // `active: false` was explicitly shut down; one whose worktree is gone ended
+    // cleanly (e.g. panel closed) — both are skipped. Critique roles have no
+    // persistent worktree and never appear in ISOLATED_WORKTREE_ROLES, so
+    // `rewireDelegate` silently skips them if they somehow appear.
     if (isOrchestrator && resuming) {
-      const delegatePrefix = `${agentId}-`;
       const wt = new WorktreeManager({ repoDir });
-      for (const delegateId of store.list()) {
-        if (!delegateId.startsWith(delegatePrefix)) continue;
-        const suffix = delegateId.slice(delegatePrefix.length);
-        if ((suffix.match(/-/g) ?? []).length !== 2) continue; // not a direct child
-        if (!wt.exists(delegateId)) continue; // finished cleanly — skip
-        const { role: delegateRole } = inspectSession(store.logPath(delegateId), delegateId);
-        if (delegateRole !== undefined && isAgentRole(delegateRole)) {
-          delegationHost.rewireDelegate(delegateRole, delegateId);
-        }
+      for (const entry of projectDelegationLedger(store.logPath(sessionId))) {
+        if (!entry.active) continue; // explicitly shut down — skip
+        if (!wt.exists(entry.delegateId)) continue; // worktree gone — finished
+        if (!isAgentRole(entry.role)) continue;
+        delegationHost.rewireDelegate(entry.role as AgentRole, entry.delegateId);
       }
     }
 
