@@ -102,17 +102,19 @@ describe('composeAgentInstructions (#57)', () => {
     expect(EXECUTOR_OPERATIONS).toContain('Tracking happens above you');
   });
 
-  it('composes the orchestrator role from the same layers — plan, delegate, review, integrate (#114/#137)', () => {
+  it('composes the orchestrator role from the same layers — plan, delegate, review, integrate (#114/#137/#153)', () => {
     const composed = composeAgentInstructions('orchestrator');
     // Same shared core, then the orchestrator's own insert and operational layers,
     // in the same general → specific order joined by blank lines.
     expect(composed).toBe(`${SHARED_CORE}\n\n${ORCHESTRATOR_INSERT}\n\n${ORCHESTRATOR_OPERATIONS}`);
     expect(composed.indexOf(SHARED_CORE)).toBe(0);
-    // The insert carries the standing rules: delegate one task at a time, integrate
-    // the result via a PR, route decisions up rather than settling them.
-    expect(ORCHESTRATOR_INSERT).toContain('delegate one task at a time');
+    // The insert carries the standing rules: delegate tasks to executors, integrate
+    // results via PRs, route decisions (including which tasks to parallelize) up to
+    // the architect. No longer carries a "one task at a time" prohibition (#153).
+    expect(ORCHESTRATOR_INSERT).not.toContain('one task at a time');
+    expect(ORCHESTRATOR_INSERT).toContain('delegate');
     expect(ORCHESTRATOR_INSERT).toContain('pull request');
-    expect(ORCHESTRATOR_INSERT).toContain('Route every design and permission decision up to the architect');
+    expect(ORCHESTRATOR_INSERT).toContain('route every design and permission decision');
     // Operational guidance is a distinct layer from the insert.
     expect(ORCHESTRATOR_OPERATIONS).not.toContain(ORCHESTRATOR_INSERT);
     // #137: the orchestrator reviews the delegate's branch and integrates it by pushing
@@ -250,5 +252,46 @@ describe('arbitrator role (#99)', () => {
     expect(composed).toContain('updatedInput.answers');
     expect(composed).toContain('Project bookkeeping');
     expect(composed).toContain('AGENTS.md');
+  });
+});
+
+describe('orchestrator parallel delegation, architect-directed (#153)', () => {
+  it('ORCHESTRATOR_OPERATIONS permits parallel delegation under architect direction and no longer hard-forbids it', () => {
+    // The old prohibition is gone.
+    expect(ORCHESTRATOR_OPERATIONS).not.toContain("don't run delegates in parallel");
+    // Parallel execution is permitted — when the architect directs it.
+    expect(ORCHESTRATOR_OPERATIONS).toContain('architect directs');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('concurrently');
+  });
+
+  it('ORCHESTRATOR_OPERATIONS specifies that concurrent delegation is not unilateral', () => {
+    // The orchestrator never initiates parallel delegation on its own — that decision
+    // belongs to the architect.
+    expect(ORCHESTRATOR_OPERATIONS).toContain('unilaterally');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('Never initiate concurrent delegation unilaterally');
+  });
+
+  it('ORCHESTRATOR_OPERATIONS directs the orchestrator to spot and flag parallelization opportunities (standing advisory behavior)', () => {
+    // A standing behavior: proactively identify independent, non-overlapping work and
+    // bring the opportunity to the architect with a recommendation before delegating.
+    expect(ORCHESTRATOR_OPERATIONS).toContain('Spot and flag parallelization opportunities');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('the architect decides');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('standing advisory behavior');
+  });
+
+  it('ORCHESTRATOR_OPERATIONS directs using an Arbitrator for conflicting parallel branches at integration', () => {
+    // When parallel branches conflict at integration, spawn an Arbitrator delegate
+    // with both branch names and each side's session id; non-conflicting branches
+    // integrate as separate PRs.
+    expect(ORCHESTRATOR_OPERATIONS).toContain('Arbitrator');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('arbitrator');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('session id');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('Non-conflicting parallel branches integrate as separate PRs');
+  });
+
+  it('ORCHESTRATOR_INSERT no longer carries the one-task-at-a-time constraint and routes parallelization to the architect', () => {
+    expect(ORCHESTRATOR_INSERT).not.toContain('one task at a time');
+    // Architect-direction for concurrency is still prominent in the insert.
+    expect(ORCHESTRATOR_INSERT).toContain('architect directs');
   });
 });
