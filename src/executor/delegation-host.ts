@@ -30,13 +30,16 @@ export interface DelegationHostDeps {
    */
   readonly openSubChannel: (id: string) => Channel;
   /**
-   * Provision a full **executor delegate** on its own sub-channel (#114): a fresh
-   * isolated worktree + full executor wiring (responder, permission/delegation MCP,
-   * a nested host) — distinct from the evaluator's shared, no-worktree review mode.
-   * Production wires this from the extension's session-provisioning helper; returns
-   * the delegate wiring (its closer + its agent's report seat).
+   * Provision a full **isolated-worktree delegate** on its own sub-channel (#114,
+   * #99): a fresh worktree + full wiring (responder, permission/delegation MCP, a
+   * nested host) for the given `role` — distinct from the evaluator's shared,
+   * no-worktree review mode. The `role` is passed so the provisioner can compose
+   * the correct instructions (e.g. `composeAgentInstructions(role)`) rather than
+   * defaulting to executor instructions for every authoring-delegate role. Production
+   * wires this from the extension's session-provisioning helper; returns the delegate
+   * wiring (its closer + its agent's report seat).
    */
-  readonly provisionExecutorDelegate: (id: string, sub: Channel) => DelegateWiring;
+  readonly provisionExecutorDelegate: (role: AgentRole, id: string, sub: Channel) => DelegateWiring;
   /**
    * Build a shared-worktree **critique delegate's** responder for its (validated,
    * non-executor) agent role — production passes a `claude`-backed one running on
@@ -54,6 +57,14 @@ export interface DelegationHostDeps {
 export interface DelegationHost {
   close(): void;
 }
+
+/**
+ * Roles that are provisioned with a fresh isolated worktree + full executor
+ * wiring (#114, #99) — distinct from the shared-worktree critique responder
+ * used by roles like the evaluator that only read, never author. Adding a new
+ * authoring-delegate role is registering it here, not a new string comparison.
+ */
+const ISOLATED_WORKTREE_ROLES = new Set<string>(['executor', 'arbitrator']);
 
 /**
  * The host side of live delegation (#93): owns a {@link createDelegationManager}
@@ -83,11 +94,12 @@ export function createDelegationHost(deps: DelegationHostDeps): DelegationHost {
     spawnerChannel,
     openSubChannel,
     // The role reaching the manager is always validated to an AgentRole below
-    // before spawn is called, so the narrowing cast is safe. Executor delegates get
-    // a fresh worktree + full wiring (a real, attachable session); every other
-    // critique role (the evaluator) is a plain responder on the spawner's worktree.
+    // before spawn is called, so the narrowing cast is safe. Roles in
+    // ISOLATED_WORKTREE_ROLES get a fresh worktree + full wiring (a real,
+    // attachable session); every other critique role (the evaluator) is a plain
+    // responder on the spawner's worktree.
     createDelegate: (role, id, sub) => {
-      if (role === 'executor') return deps.provisionExecutorDelegate(id, sub);
+      if (ISOLATED_WORKTREE_ROLES.has(role)) return deps.provisionExecutorDelegate(role as AgentRole, id, sub);
       return { close: runExecutor(sub, id, deps.createResponder(role as AgentRole, id), role).close };
     },
     generateToken: deps.generateToken,

@@ -355,8 +355,8 @@ function provisionSession(args: {
       spawnerRole: role,
       hostId: `${sessionId}-delegation-host`,
       openSubChannel: (id) => store.open(id),
-      provisionExecutorDelegate: (id, sub): DelegateWiring => {
-        const child = provisionSession({ context, folder, store, sessionId: id, role: 'executor', channel: sub, liveSessions, onUsage: meter.add });
+      provisionExecutorDelegate: (delegateRole, id, sub): DelegateWiring => {
+        const child = provisionSession({ context, folder, store, sessionId: id, role: delegateRole, channel: sub, liveSessions, onUsage: meter.add });
         // Surface the delegate so the architect can find it: it's a real, attachable
         // session with no auto-panel (#114), so tell them it exists, on which branch,
         // and that it's opened on demand from the session view.
@@ -555,7 +555,7 @@ function capitalize(role: AgentRole): string {
  * to a proper versioned release. An empty value means "no `--model`" (inherit).
  */
 function modelForRole(role: AgentRole): string | undefined {
-  const DEFAULTS: Record<AgentRole, string> = { executor: 'sonnet', evaluator: 'sonnet', orchestrator: '' };
+  const DEFAULTS: Record<AgentRole, string> = { executor: 'sonnet', evaluator: 'sonnet', orchestrator: '', arbitrator: 'sonnet' };
   const configured = vscode.workspace.getConfiguration('mjolnirsoft.model').get<string>(role);
   const value = (configured ?? DEFAULTS[role]).trim();
   return value || undefined;
