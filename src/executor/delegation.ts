@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Channel, Message, Participant, Role } from '../core/channel.ts';
 import { acknowledge, runExecutor, deliversToAgent } from './executor-runtime.ts';
 
@@ -88,6 +89,13 @@ export interface DelegationDeps {
    * whatever this wires.
    */
   readonly createDelegate?: (role: Role, id: string, sub: Channel) => DelegateWiring;
+  /**
+   * Generate a short unique token appended to each derived delegate id. Defaults to
+   * 8 hex chars from {@link randomUUID} — unique by construction, never colliding
+   * across reloads or with leftover branches even when the in-memory sequence resets
+   * to 0. Injectable so tests can drive it deterministically.
+   */
+  readonly generateToken?: () => string;
 }
 
 /** Create a {@link DelegationManager} for one spawner. */
@@ -95,9 +103,13 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
   const { spawnerId, spawnerRole, spawnerChannel, openSubChannel } = deps;
   const createDelegate: NonNullable<DelegationDeps['createDelegate']> =
     deps.createDelegate ?? ((role, id, sub) => ({ close: runExecutor(sub, id, acknowledge, role).close }));
+  // Short random hex suffix — unique by construction so the id never collides with a
+  // leftover branch or a prior-session id even when `sequence` resets on a reload.
+  // The injectable seam lets tests drive it deterministically.
+  const generateToken = deps.generateToken ?? (() => randomUUID().replace(/-/g, '').slice(0, 8));
 
-  // Monotonic so a derived id is unique even if a role is spawned repeatedly; the
-  // role stays in the id (`<spawner>-<role>-<n>`) for log traceability of lineage.
+  // Per-manager monotonic counter — cosmetic only (keeps the role legible in logs
+  // and gives a human-readable spawn order). Uniqueness comes from `generateToken`.
   let sequence = 0;
   // Each live delegate keeps its `close` and its `driver` (the spawner's seat on the
   // sub-channel) — the driver is how a follow-up reaches the delegate (#111).
@@ -105,7 +117,7 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
 
   return {
     spawn(role, openingTask) {
-      const id = `${spawnerId}-${role}-${++sequence}`;
+      const id = `${spawnerId}-${role}-${++sequence}-${generateToken()}`;
       const sub = openSubChannel(id);
 
       // The delegate: whatever the factory wires on the sub-channel — a plain
