@@ -331,20 +331,21 @@ describe('getContextNote injection into orchestrator prompt (#165)', () => {
 
     // 80K < 75% of 200K (150K) → below
     const belowNote = makeContextNote(80_000, 0.75, 200_000);
-    expect(belowNote).toContain('Below threshold');
-    expect(belowNote).not.toContain('PAST THRESHOLD');
-    expect(belowNote).toContain('75% of 200K window');
+    expect(belowNote).toBe(
+      '[Context size: 80K tokens (threshold 150K tokens — 75% of 200K window). Below threshold — continue.]',
+    );
 
     // 160K > 75% of 200K (150K) → above
     const aboveNote = makeContextNote(160_000, 0.75, 200_000);
-    expect(aboveNote).toContain('PAST THRESHOLD');
-    expect(aboveNote).toContain('mcp__compact__request');
-    expect(aboveNote).toContain('75% of 200K window');
+    expect(aboveNote).toBe(
+      '[Context size: 160K tokens (threshold 150K tokens — 75% of 200K window). ⚠ PAST THRESHOLD — after integrating the current task, write a self-hand-off and call mcp__compact__request.]',
+    );
 
     // 1M window example: 299K < 75% of 1M (750K) → below
     const opusNote = makeContextNote(299_000, 0.75, 1_000_000);
-    expect(opusNote).toContain('Below threshold');
-    expect(opusNote).toContain('75% of 1M window');
+    expect(opusNote).toBe(
+      '[Context size: 299K tokens (threshold 750K tokens — 75% of 1M window). Below threshold — continue.]',
+    );
   });
 });
 

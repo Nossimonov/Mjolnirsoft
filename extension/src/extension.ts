@@ -338,7 +338,7 @@ function provisionSession(args: {
     const compactionPercent = isOrchestrator
       ? loadProjectConfig(join(repoDir, 'mjolnir.config.json')).compaction.thresholdContextPercent
       : undefined;
-    const getContextNote = isOrchestrator && compactionPercent !== undefined
+    const getContextNote = compactionPercent !== undefined
       ? (): string => {
           const tokens = contextSnapshot; // raw prompt tokens = current context window occupancy
           const windowSize = contextWindowFor(model);
