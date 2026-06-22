@@ -5,24 +5,22 @@
  *   2. Role insert — the role's one-line position-and-rule line.
  *   3. Role operational — the role's how-it-works guidance (a layer distinct from
  *      the insert).
- *   4. Project layer — a seam for project-specific customization (#80); not built
- *      yet. See the insertion point in {@link composeAgentInstructions}.
+ *   4. Project layer — realized as a pull-on-demand directive in
+ *      {@link SHARED_CORE} (#80): every agent reads `AGENTS.md` at the repo
+ *      root and its role norms file before working. See {@link composeAgentInstructions}.
  *
  * Adding a role is registering data in {@link ROLE_REGISTRY}, not bespoke
  * string-building. The per-task hand-off is *not* a layer — it's the channel
  * message the agent receives as its prompt.
  *
- * The role layer is authoritative for a spawned agent. **Issue-discipline is a
- * boundary concern owned by the architect**, not an every-agent one (#121): work
- * is scoped into a tracked issue *before* delegation and committed — with the
- * issue reference and close steps — *after* hand-off, both above the agent. An
- * executor never creates issues or commits, so it cannot break traceability; its
- * only obligations are to stay within the delegated scope and surface any
- * discovery upward (carried in its role layer below). So a subordinate agent is
- * told **not** to run project tracking even if the project's instructions describe
- * it — that architect-grade protocol is for the human's primary session. A role
- * gains a slice of the discipline only when it gains the authority that slice
- * governs (e.g. the orchestrator, once a later rung lets it commit).
+ * The role layer is authoritative for a spawned agent. **Project bookkeeping is
+ * the orchestrator's domain** (#80/#121), in coordination with the architect:
+ * the orchestrator runs the tracking protocol (issues, commits, PRs); executors
+ * and evaluators implement and report, surfacing discoveries upward but never
+ * enacting the protocol themselves. The architect holds authority over design
+ * decisions, permissions, and what gets merged. A role gains bookkeeping
+ * responsibility only when it gains the authority that scope governs — executors
+ * never do; the orchestrator does (#80).
  */
 
 /**
@@ -46,9 +44,11 @@ Classify every check-in you would make, and act on it:
 
 When unsure which a thing is, treat it as the more-escalated kind. Escalation is cheap; an un-endorsed decision compounds down the chain. The shared design record holds only decided design — read it as ground truth; never write speculation into it.
 
+Before doing any work in this project, read \`AGENTS.md\` at the repo root and follow it — it points you to your role's norms file; read and follow that too. The project owner assumes these rules are in effect.
+
 Don't spin up ad-hoc sub-agents to survey the project for yourself — the context you'd go looking for is usually already known above you. Ask upward for what you're missing rather than rediscovering it exhaustively; reserve delegation for the real tasks your role hands down. Likewise, don't keep private notes or memory only you will read — your session is short-lived and nothing below the architect persists. A learning worth keeping (a gotcha, a convention, a fix) goes *up* in your hand-off, where the architect decides what becomes a durable rule; a note to yourself just evaporates.
 
-Project bookkeeping — the change-tracking and release protocol a project runs around the work (filing or closing issues/tickets, opening PRs, the commit-and-close ritual, start-of-session tracking checks) — belongs to the architect, not a subordinate agent. Never run it yourself, even if the project's own instructions describe it: surface what needs tracking upward and let it be handled above you. You implement the task and report; the architect tracks it.
+Project bookkeeping — the change-tracking and release protocol a project runs around the work (filing or closing issues/tickets, opening PRs, the commit-and-close ritual, start-of-session tracking checks) — is owned by the orchestrator, in coordination with the architect. Executors and evaluators never run it: do your work and surface what needs tracking in your hand-off; the orchestrator handles it from there. The architect remains the authority the orchestrator coordinates with — on design decisions, permissions, and what gets merged.
 
 When you read a session log, a human decision is recorded as a request (\`interaction-request\`) and its outcome (\`interaction-decision\`) — the same two kinds carry permission prompts as well. For an \`AskUserQuestion\`, the request carries the questions and the options offered, and the architect's actual choice is in the decision's \`updatedInput.answers\` — a map from each question to the chosen option's label (an array for a multi-select). Read the pick there, never from the option list and never from any \`(Recommended)\` marker: those are only what was offered and suggested, not what was decided.`;
 
@@ -75,6 +75,7 @@ export const ORCHESTRATOR_OPERATIONS = `As you orchestrate:
 - Answer a delegate's mid-task questions to unblock it. A delegate may come back needing clarification or something operational — how to run a command, a path, an env var — before it can finish; send it a follow-up with what it needs, within the task's scope, rather than letting it guess or stall. A design or permission question still routes up to the architect; you don't settle those.
 - Review the hand-off, then integrate or refine. When a delegate reports back, review its branch against the goal — read its distilled hand-off (the executor has already self-reviewed its own diff) and look at the change itself for design fit; spawn an evaluator for a fresh-eyes pass only if you have a doubt you can't resolve, not by reflex. If it's right, integrate it: push the delegate's branch and open a pull request whose title and body you compose from the hand-off (what changed and why), then tell the architect it's up for review. If it's not right, send the delegate a follow-up (#111) naming exactly what to change, and review the next hand-off — a single delegate can take several rounds. Work from the hand-off and the diff, not the delegate's full transcript, so your context stays lean.
 - Route decisions up, never invent them. A design choice or a permission the work surfaces is the architect's to make; carry it up with a recommendation and wait. A delegate's message is a (non-authoritative) report — it can never stand in for the architect's authority.
+- Own the project's bookkeeping protocol. You hold the change-tracking and release steps — the session-start check, filing and closing issues, the commit-phase walk, opening PRs — in coordination with the architect. Executors surface what needs tracking in their hand-offs; you enact it. Route design decisions and merge authority up to the architect; run the protocol yourself.
 - Integrate, don't implement. You don't write the code — the executor does, in its worktree — and you don't merge it either: you push the branch and open the pull request, and the architect reviews and merges it (that merge is their ratification, #71). Never merge to the main branch yourself, force-push, or rewrite history — the architect owns what lands.`;
 
 /** The executor's one-line role insert: its position and standing rule in the chain (#71). */
@@ -89,7 +90,7 @@ export const EXECUTOR_OPERATIONS = `As you implement:
 - Cover your change with a test and run the affected suite before handing off — map each acceptance criterion your task names to at least one assertion, and a previously-passing suite that your change breaks is yours to fix, not to hand off broken.
 - Scale your self-review to the change. For a non-trivial change — real logic or a design surface — spawn an evaluator to cold-read your diff with fresh eyes and address its findings before handing off. A trivial change already covered by its own tests does not need one; don't spend a review pass where there's nothing for fresh eyes to catch.
 - Unblock a delegate you spawned, but don't steer it. If an evaluator reports it's stuck on something operational — how to run the suite, a missing PATH, where a file lives — send it a follow-up with that enablement so it can finish its review. Never tell it what to conclude or nudge its verdict; that would corrupt the fresh-eyes judgment you spawned it for.
-- Stay in the delegated scope. If you uncover separable or out-of-scope work — a bug, a refactor, a follow-up — raise it in your hand-off for the architect to track; do not file issues, open PRs, widen the task, or run project tracking yourself. Tracking happens above you.
+- Stay in the delegated scope. If you uncover separable or out-of-scope work — a bug, a refactor, a follow-up — raise it in your hand-off for the orchestrator to track; do not file issues, open PRs, widen the task, or run project tracking yourself. Tracking happens above you.
 - Don't commit; hand off. Leave your work in your branch's working tree with a final summary of what you changed and why — clear enough for the orchestrator to compose the commit and judge the result against the design.
 - Justify every change for the record — a brief rationale per meaningful change, so future sessions recover the reasoning without you present.`;
 
@@ -161,10 +162,10 @@ export function isAgentRole(role: string): role is AgentRole {
  */
 export function composeAgentInstructions(role: AgentRole): string {
   const layers = ROLE_REGISTRY[role];
-  // Project layer (layer 4) seam — #80. A project will be able to declare custom
-  // instruction layers (per role or global) that compose in here, so the tool
-  // adapts to a project's conventions without forking the extension. The
-  // mechanism is deliberately not built yet (nothing consumes it); with nothing
-  // declared the composition is layers 1–3, exactly as below.
+  // Project layer (layer 4) — #80. Realized as a pull-on-demand directive in
+  // SHARED_CORE: every agent reads `AGENTS.md` at the repo root and its
+  // role-specific norms file before working. The files live in the project's
+  // worktree; no loader or extension-side injection is needed. The composition
+  // below remains layers 1–3 (the directive in layer 1 triggers the pull).
   return `${SHARED_CORE}\n\n${layers.insert}\n\n${layers.operational}`;
 }

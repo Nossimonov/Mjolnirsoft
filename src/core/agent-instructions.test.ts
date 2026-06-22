@@ -37,15 +37,41 @@ describe('composeAgentInstructions (#57)', () => {
     );
   });
 
-  it('puts the project-bookkeeping boundary in the shared core, so every role is kept off it (#121)', () => {
-    // The orchestrator filed a spurious issue by enacting the project's tracking
-    // protocol; this boundary (shared by all roles) keeps any subordinate agent off
-    // change-tracking/release ceremony — that's the architect's, surfaced upward.
+  it('puts the bookkeeping rule in the shared core: orchestrator owns it, executors/evaluators excluded (#80/#121)', () => {
+    // Bookkeeping is the orchestrator's domain (coordinated with the architect),
+    // not fenced off from it. Executors and evaluators still never run it.
     expect(SHARED_CORE).toContain('Project bookkeeping');
-    expect(SHARED_CORE).toContain('belongs to the architect, not a subordinate agent');
-    expect(SHARED_CORE).toContain('the architect tracks it');
+    // Orchestrator ownership:
+    expect(SHARED_CORE).toContain('owned by the orchestrator');
+    expect(SHARED_CORE).toContain('in coordination with the architect');
+    // Executors/evaluators excluded:
+    expect(SHARED_CORE).toContain('Executors and evaluators never run it');
+    // Old "belongs to the architect" framing is gone:
+    expect(SHARED_CORE).not.toContain('belongs to the architect, not a subordinate agent');
+    expect(SHARED_CORE).not.toContain('the architect tracks it');
+    // Every composed role carries the bookkeeping rule:
     expect(composeAgentInstructions('orchestrator')).toContain('Project bookkeeping');
     expect(composeAgentInstructions('executor')).toContain('Project bookkeeping');
+    expect(composeAgentInstructions('evaluator')).toContain('Project bookkeeping');
+  });
+
+  it('directs every agent to read AGENTS.md and its role norms file before working (#80)', () => {
+    // Pull-on-demand: the agent reads the project norms itself rather than having
+    // the extension inject them. The directive lives in SHARED_CORE so it reaches
+    // every spawned role.
+    expect(SHARED_CORE).toContain('AGENTS.md');
+    expect(SHARED_CORE).toContain("role's norms file");
+    expect(composeAgentInstructions('orchestrator')).toContain('AGENTS.md');
+    expect(composeAgentInstructions('executor')).toContain('AGENTS.md');
+    expect(composeAgentInstructions('evaluator')).toContain('AGENTS.md');
+  });
+
+  it('tells the orchestrator it owns bookkeeping; its operational layer reflects that (#80)', () => {
+    // The orchestrator's operational guidance now includes an explicit bookkeeping-
+    // ownership bullet, not a "tracking happens above you" deferral.
+    expect(ORCHESTRATOR_OPERATIONS).toContain('Own the project');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('bookkeeping protocol');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('in coordination with the architect');
   });
 
   it('tells every agent to ask upward for missing context rather than self-survey (#131)', () => {
