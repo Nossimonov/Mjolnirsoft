@@ -7,6 +7,7 @@ import { SessionStore } from '../../src/core/session-store.ts';
 import { WorktreeManager, currentRemoteBase } from '../../src/core/worktree.ts';
 import { loadLocalEnv } from '../../src/cli/load-local-env.ts';
 import { loadProjectConfig } from '../../src/core/project-config.ts';
+import { contextWindowFor } from '../../src/core/model-context-window.ts';
 import { runExecutor } from '../../src/executor/executor-runtime.ts';
 import { createClaudeCodeResponder, resolveClaudeBin, addUsage, ZERO_USAGE, USAGE_MESSAGE, claudeSessionIdFor, permissionPolicyFor, weightedUsage, type Usage } from '../../src/executor/claude-code-responder.ts';
 import { createReasoningStream, type ReasoningStream } from '../../src/executor/reasoning-stream.ts';
@@ -329,22 +330,25 @@ function provisionSession(args: {
       usageSeat?.send({ type: USAGE_MESSAGE, payload: turn });
     };
 
-    // Context-size note injected into each orchestrator turn (#165): the prompt-side
+    // Context-size note injected into each orchestrator turn (#165/#180): the prompt-side
     // raw token count from the most recently completed turn tells the orchestrator how
     // much of the context window is currently occupied, so it can self-judge whether
     // to compact (#9). Raw tokens (not weighted) are the right unit — the context
-    // window limit is in raw tokens (e.g. 200K for Sonnet), not weighted-cost tokens.
-    const compactionThreshold = isOrchestrator
-      ? loadProjectConfig(join(repoDir, 'mjolnir.config.json')).compaction.thresholdWeightedTokens
+    // window limit is in raw tokens, not weighted-cost tokens.
+    const compactionPercent = isOrchestrator
+      ? loadProjectConfig(join(repoDir, 'mjolnir.config.json')).compaction.thresholdContextPercent
       : undefined;
-    const getContextNote = isOrchestrator && compactionThreshold !== undefined
+    const getContextNote = isOrchestrator && compactionPercent !== undefined
       ? (): string => {
           const tokens = contextSnapshot; // raw prompt tokens = current context window occupancy
-          const aboveThreshold = tokens > compactionThreshold;
+          const windowSize = contextWindowFor(model);
+          const thresholdTokens = Math.round(windowSize * compactionPercent);
+          const pct = Math.round(compactionPercent * 100);
+          const aboveThreshold = tokens > thresholdTokens;
           const verdict = aboveThreshold
             ? `⚠ PAST THRESHOLD — after integrating the current task, write a self-hand-off and call mcp__compact__request.`
             : `Below threshold — continue.`;
-          return `[Context size: ${formatTokens(tokens)} tokens (threshold ${formatTokens(compactionThreshold)} tokens). ${verdict}]`;
+          return `[Context size: ${formatTokens(tokens)} tokens (threshold ${formatTokens(thresholdTokens)} tokens — ${pct}% of ${formatTokens(windowSize)} window). ${verdict}]`;
         }
       : undefined;
 

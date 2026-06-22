@@ -316,24 +316,35 @@ describe('getContextNote injection into orchestrator prompt (#165)', () => {
 
   it('context note reflects threshold verdict when above threshold', async () => {
     // Verify the note format used by the extension's getContextNote closure by testing
-    // the format string logic directly. The extension builds: "[Context size: X tokens — verdict]"
-    // The below tests the threshold comparison logic used when wiring getContextNote.
-    function makeContextNote(tokens: number, threshold: number): string {
-      const fmtK = (n: number) => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n);
-      const aboveThreshold = tokens > threshold;
+    // the format string logic directly. The extension builds the note from a percent
+    // and window size, resolving both into human-legible absolute figures (#180).
+    function makeContextNote(tokens: number, percent: number, windowSize: number): string {
+      const fmtK = (n: number) => n >= 1e6 ? `${(n / 1e6).toFixed(1).replace(/\.0$/, '')}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1).replace(/\.0$/, '')}K` : String(n);
+      const thresholdTokens = Math.round(windowSize * percent);
+      const pct = Math.round(percent * 100);
+      const aboveThreshold = tokens > thresholdTokens;
       const verdict = aboveThreshold
         ? `⚠ PAST THRESHOLD — after integrating the current task, write a self-hand-off and call mcp__compact__request.`
         : `Below threshold — continue.`;
-      return `[Context size: ${fmtK(tokens)} tokens (threshold ${fmtK(threshold)} tokens). ${verdict}]`;
+      return `[Context size: ${fmtK(tokens)} tokens (threshold ${fmtK(thresholdTokens)} tokens — ${pct}% of ${fmtK(windowSize)} window). ${verdict}]`;
     }
 
-    const belowNote = makeContextNote(80_000, 150_000);
+    // 80K < 75% of 200K (150K) → below
+    const belowNote = makeContextNote(80_000, 0.75, 200_000);
     expect(belowNote).toContain('Below threshold');
     expect(belowNote).not.toContain('PAST THRESHOLD');
+    expect(belowNote).toContain('75% of 200K window');
 
-    const aboveNote = makeContextNote(160_000, 150_000);
+    // 160K > 75% of 200K (150K) → above
+    const aboveNote = makeContextNote(160_000, 0.75, 200_000);
     expect(aboveNote).toContain('PAST THRESHOLD');
     expect(aboveNote).toContain('mcp__compact__request');
+    expect(aboveNote).toContain('75% of 200K window');
+
+    // 1M window example: 299K < 75% of 1M (750K) → below
+    const opusNote = makeContextNote(299_000, 0.75, 1_000_000);
+    expect(opusNote).toContain('Below threshold');
+    expect(opusNote).toContain('75% of 1M window');
   });
 });
 
