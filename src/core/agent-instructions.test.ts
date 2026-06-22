@@ -241,10 +241,10 @@ describe('arbitrator role (#99)', () => {
     expect(ARBITRATOR_OPERATIONS).toContain('rather than guessing');
   });
 
-  it('the operations layer directs producing the reconciled result in the worktree and handing off (not committing)', () => {
+  it('the operations layer directs producing the reconciled result in the worktree, committing it, and handing off', () => {
     expect(ARBITRATOR_OPERATIONS).toContain('your own worktree');
     expect(ARBITRATOR_OPERATIONS).toContain('hand off');
-    expect(ARBITRATOR_OPERATIONS).toContain('do not commit');
+    expect(ARBITRATOR_OPERATIONS).toContain('no closing keyword');
   });
 
   it('the composed arbitrator instructions carry SHARED_CORE (session-log literacy, bookkeeping, etc.)', () => {
