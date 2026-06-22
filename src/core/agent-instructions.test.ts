@@ -117,6 +117,11 @@ describe('composeAgentInstructions (#57)', () => {
     // + opening a PR (the architect's merge is the ratification), or refines via #111.
     expect(ORCHESTRATOR_OPERATIONS).toContain('open a pull request');
     expect(ORCHESTRATOR_OPERATIONS).toContain('the architect reviews and merges');
+    // #142: it integrates from the distilled hand-off, not by re-reading the whole
+    // diff (which bloats its long-lived context) — design-fit from the summary,
+    // diff only for a specific unresolved point.
+    expect(ORCHESTRATOR_OPERATIONS).toContain('from the distilled hand-off');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('never wholesale');
   });
 
   it('composes the evaluator role from the same layers — fresh eyes, critique-only (#93)', () => {
