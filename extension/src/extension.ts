@@ -682,7 +682,7 @@ function capitalize(role: AgentRole): string {
  * to a proper versioned release. An empty value means "no `--model`" (inherit).
  */
 function modelForRole(role: AgentRole): string | undefined {
-  const DEFAULTS: Record<AgentRole, string> = { executor: 'sonnet', evaluator: 'sonnet', orchestrator: '', arbitrator: 'sonnet' };
+  const DEFAULTS: Record<AgentRole, string> = { executor: 'sonnet', evaluator: 'sonnet', orchestrator: '', arbitrator: 'sonnet', investigator: 'sonnet' };
   const configured = vscode.workspace.getConfiguration('mjolnirsoft.model').get<string>(role);
   const value = (configured ?? DEFAULTS[role]).trim();
   return value || undefined;
