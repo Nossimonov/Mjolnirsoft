@@ -245,6 +245,36 @@ describe('createDelegationHost (#93)', () => {
   });
 });
 
+describe('createDelegationHost — investigator-delegate mode (#166)', () => {
+  it('spawns an investigator on the shared-worktree critique-responder path (not isolated worktree)', async () => {
+    const { bridge, seen, provisioned, subLogs } = wire();
+
+    const { delegateId: id } = await bridge.spawn('investigator', 'verify what issue #142 decided');
+    await flush();
+
+    // The investigator is read-only — it takes the shared-worktree critique-responder
+    // path (like the evaluator), not the isolated-worktree provisioning path.
+    expect(seen).toEqual([{ role: 'investigator', id }]);
+    expect(provisioned).toEqual([]);
+    expect(subLogs.get(id!)?.[0]).toMatchObject({
+      type: 'text',
+      payload: 'verify what issue #142 decided',
+    });
+  });
+
+  it('bridges the investigator finding up under the clean delegate id, attributed as a (non-authoritative) agent', async () => {
+    const { bridge, reports } = wire();
+
+    const { delegateId: id } = await bridge.spawn('investigator', 'verify state');
+    await flush();
+
+    expect(reports).toEqual([
+      { from: id, role: 'investigator', type: 'result', payload: 'critique by investigator: verify state' },
+    ]);
+    expect(senderAttribution(reports[0])).toBe(`[Message from agent (id: ${id})]`);
+  });
+});
+
 describe('createDelegationHost — arbitrator-delegate mode (#99)', () => {
   it('provisions an arbitrator on the isolated-worktree path (not the critique responder)', async () => {
     const { bridge, provisioned, seen, subLogs } = wire();

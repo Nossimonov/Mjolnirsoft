@@ -601,8 +601,10 @@ describe('buildClaudeArgs', () => {
 
   it('lets the orchestrator git push (to open PRs) but not force-push; executors keep the no-push base (#137)', () => {
     const deny = (role: string) => (JSON.parse(permissionPolicyFor(role)) as { permissions: { deny: string[] } }).permissions.deny;
-    // Executor/evaluator: the base policy — blanket git push denied (they hand off, never push).
+    // Executor/evaluator/investigator: the base policy — blanket git push denied (they hand off, never push).
     expect(permissionPolicyFor('executor')).toBe(EXECUTOR_PERMISSIONS);
+    expect(permissionPolicyFor('evaluator')).toBe(EXECUTOR_PERMISSIONS);
+    expect(permissionPolicyFor('investigator')).toBe(EXECUTOR_PERMISSIONS);
     expect(deny('executor')).toContain('Bash(git push *)');
     // Orchestrator: normal push allowed (the blanket deny lifted), force-push still denied.
     expect(deny('orchestrator')).not.toContain('Bash(git push *)');
