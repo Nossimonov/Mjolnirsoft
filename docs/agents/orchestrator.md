@@ -53,22 +53,22 @@ When an active issue A surfaces a prereq B that must complete first, both stay a
 
 When work surfaces a separable concern outside any active issue's scope: (1) note it in working memory immediately; (2) decide **prereq** (current work can't ship without it → file/surface it, mark the original `blocked`, do the prereq first) vs **defer** (ships without it → set aside, keep it out of the current commit). Refinements to *closed* work get **new** issues, not reopened ones. An unrelated **bug** found incidentally also gets the `in-flight-bug` label (in addition to its type label) so the set is discoverable for a focused fix pass.
 
-### On commit — walk these phases in order
+### On integration — walk these phases in order
 
-1. **Test** — run the suite(s) your commit touches; a newly-failing previously-passing suite blocks the commit.
-2. **Verify (manual, when applicable)** — if an acceptance criterion is out of the automated suite's reach, surface for architect verification and wait (see *Pause for Manual Verification*). Feedback iterates in the working tree, not follow-up issues.
+1. **Test** — run the suite(s) the executor's commit touches; a newly-failing previously-passing suite blocks the PR.
+2. **Verify (manual, when applicable)** — if an acceptance criterion is out of the automated suite's reach, surface for architect verification and wait (see *Pause for Manual Verification*). Feedback iterates via executor follow-up, not in the working tree.
 3. **Review** — for each assigned issue ask: did the work complete a stated criterion? were the criteria complete, or did delivery expose gaps? did running it surface refinements that should land before close? **are all artifacts the work depends on actually in source control** (run `git status`; trace names referenced from staged content back to tracked files; include user-authored content)? Gaps → treat as in-flight discoveries; do not close.
 4. **Update AC/task checkboxes** — flip `- [ ]` to `- [x]` for criteria this commit satisfies (via `gh issue edit --body`), even when the issue isn't closing — the checkboxes are the resumable state. Check *after* Verify confirms correctness, *before* Close.
-5. **Update the design record** — for work that changes what the system does, fold the now-true design language from the closing issue into the correct `docs/DESIGN.md` component section, **and** prune/replace any prior text the change made inaccurate, in this same commit (see *Design Documentation*). The "remove what's now false" half is not optional. Pure internal refactors with no behavioural or contract change skip this step.
-6. **Close (only if review is clean)** — observe the hierarchy closing rules (sub-issues first; parents only when every child is closed); cascade upward; remove `blocked` from any issue whose blocker just closed. Prefer the commit-message auto-close keyword (`closes #N` / `fixes #N` / `resolves #N`) over an explicit `gh issue close`; reserve the explicit close for cascading parent closes the commit body can't express.
-7. **File deferred-discovery issues** noted during the session — all of them — before writing the commit message.
-8. **Write the commit message** referencing the advancing issue. The closing keyword goes only on the commit that lands after Verify is satisfied; intermediate commits use a plain `(#N)` reference.
+5. **Update the design record** — for work that changes what the system does, fold the now-true design language from the closing issue into the correct `docs/DESIGN.md` component section, **and** prune/replace any prior text the change made inaccurate, in a follow-up commit on the branch (see *Design Documentation*). The "remove what's now false" half is not optional. Pure internal refactors with no behavioural or contract change skip this step.
+6. **Close (only if review is clean)** — observe the hierarchy closing rules (sub-issues first; parents only when every child is closed); cascade upward; remove `blocked` from any issue whose blocker just closed. Prefer the PR-body auto-close keyword (`closes #N` / `fixes #N` / `resolves #N`) over an explicit `gh issue close`; reserve the explicit close for cascading parent closes the PR body can't express.
+7. **File deferred-discovery issues** noted during the session — all of them — before opening the PR.
+8. **Open the PR** for the executor's branch, composing the title and body from the hand-off (what changed and why). Put `closes #N` in the PR body only after Verify is satisfied; the executor's intermediate commit uses a plain `(#N)` reference.
 
-### Pause for Manual Verification Before Committing
+### Pause for Manual Verification Before Opening the PR
 
-When the work has user-visible or behavioural effects the automated suite cannot fully verify, **do not commit until the architect has exercised it and confirmed it behaves as intended.** Surface the change as ready for verification, name what to test, and wait. Iterate in the working tree (use `git stash` for mid-iteration checkpoints, not commits). Only once confirmed do you commit, and only then does the closing keyword (`closes #N`) go on the message.
+When the work has user-visible or behavioural effects the automated suite cannot fully verify, **do not put `closes #N` in the PR body until the architect has exercised it and confirmed it behaves as intended.** Surface the change as ready for verification, name what to test, and wait. Feedback iterates via executor follow-up (a new commit to the branch). Only once confirmed does `closes #N` go in the PR body.
 
-Triggers: a new CLI/tool surface, an interactive flow, output a human must judge as correct, behaviour in a code path the suite doesn't cover. Does **not** trigger for pure refactors, fixes covered by a new/existing regression test, or doc/config changes — commit those directly once automated tests pass.
+Triggers: a new CLI/tool surface, an interactive flow, output a human must judge as correct, behaviour in a code path the suite doesn't cover. Does **not** trigger for pure refactors, fixes covered by a new/existing regression test, or doc/config changes — open those PRs with the closing keyword directly once automated tests pass.
 
 ### Exceptions
 

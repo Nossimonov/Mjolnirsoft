@@ -254,7 +254,7 @@ describe('DEFAULT_EXECUTOR_ROLE (executor instructions)', () => {
 
   it('preserves the executor operational guidance', () => {
     expect(DEFAULT_EXECUTOR_ROLE).toContain('Read widely, write narrowly');
-    expect(DEFAULT_EXECUTOR_ROLE).toContain("Don't commit; hand off");
+    expect(DEFAULT_EXECUTOR_ROLE).toContain('Commit your work to your branch before handing off');
   });
 });
 
