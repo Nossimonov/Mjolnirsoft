@@ -340,16 +340,42 @@ export const EXECUTOR_PERMISSION_POLICY = {
 export const EXECUTOR_PERMISSIONS = JSON.stringify(EXECUTOR_PERMISSION_POLICY);
 
 /**
- * The serialized `--settings` policy for an agent of `role`. Executors, evaluators,
- * and investigators get the base {@link EXECUTOR_PERMISSIONS}; the **orchestrator**
- * additionally may `git push` and run `gh` so it can integrate a delegate's work by
- * pushing the branch and opening a PR (#137) — it still can't force-push or
- * hard-reset (the architect reviews and merges; that merge is the ratification, #71).
- * Everything else (the `Agent` deny #131, auto-memory off #132, CLAUDE.md excludes
- * #121) is inherited. The investigator's read-only constraint is enforced by its role
- * instructions (#166), matching the evaluator's treatment.
+ * Read-only variant of {@link EXECUTOR_PERMISSION_POLICY}: `Edit`, `Write`, and
+ * `NotebookEdit` are removed from the allow list and explicitly added to the deny
+ * list, so a misbehaving evaluator or investigator is blocked at the *declarative*
+ * tool level — not merely discouraged by role instructions (#185).
+ *
+ * **Soft-confinement caveat (same as the executor policy, #62):** `Bash` remains
+ * allowed (read-only roles legitimately need `git log`/`git diff`/`gh issue view`),
+ * so shell-mediated file writes are not blocked at this layer. The hard read-only
+ * boundary requires an OS-level sandbox (tracked by #62).
+ */
+export const READONLY_PERMISSION_POLICY = {
+  ...EXECUTOR_PERMISSION_POLICY,
+  permissions: {
+    allow: EXECUTOR_PERMISSION_POLICY.permissions.allow.filter(
+      (rule) => rule !== 'Edit(./**)' && rule !== 'Write(./**)',
+    ),
+    deny: [...EXECUTOR_PERMISSION_POLICY.permissions.deny, 'Edit', 'Write', 'NotebookEdit'],
+  },
+};
+
+/** The read-only policy serialized for `--settings` (#185). */
+export const READONLY_PERMISSIONS = JSON.stringify(READONLY_PERMISSION_POLICY);
+
+/**
+ * The serialized `--settings` policy for an agent of `role`.
+ * - **evaluator / investigator** — {@link READONLY_PERMISSIONS}: reads/search/inspection
+ *   allowed; `Edit` and `Write` denied at the policy level (hard enforcement, #185).
+ * - **executor / arbitrator** — base {@link EXECUTOR_PERMISSIONS}: full cwd-scoped edits.
+ * - **orchestrator** — extends the base with `git push` and `gh` so it can integrate
+ *   delegate work by pushing the branch and opening a PR (#137); force-push still denied.
+ *
+ * Everything else (`Agent` deny #131, auto-memory off #132, CLAUDE.md excludes #121)
+ * is inherited by all roles from the base policy.
  */
 export function permissionPolicyFor(role: string): string {
+  if (role === 'evaluator' || role === 'investigator') return READONLY_PERMISSIONS;
   if (role !== 'orchestrator') return EXECUTOR_PERMISSIONS;
   const base = EXECUTOR_PERMISSION_POLICY;
   return JSON.stringify({

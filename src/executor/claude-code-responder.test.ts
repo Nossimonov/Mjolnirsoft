@@ -14,6 +14,7 @@ import {
   createStreamReader,
   DEFAULT_EXECUTOR_ROLE,
   EXECUTOR_PERMISSIONS,
+  READONLY_PERMISSIONS,
   type ViewEvent,
 } from './claude-code-responder.ts';
 import { isAuthError } from './auth-error.ts';
@@ -601,16 +602,40 @@ describe('buildClaudeArgs', () => {
 
   it('lets the orchestrator git push (to open PRs) but not force-push; executors keep the no-push base (#137)', () => {
     const deny = (role: string) => (JSON.parse(permissionPolicyFor(role)) as { permissions: { deny: string[] } }).permissions.deny;
-    // Executor/evaluator/investigator: the base policy — blanket git push denied (they hand off, never push).
+    // Executor: the base policy — blanket git push denied (hands off, never pushes).
     expect(permissionPolicyFor('executor')).toBe(EXECUTOR_PERMISSIONS);
-    expect(permissionPolicyFor('evaluator')).toBe(EXECUTOR_PERMISSIONS);
-    expect(permissionPolicyFor('investigator')).toBe(EXECUTOR_PERMISSIONS);
     expect(deny('executor')).toContain('Bash(git push *)');
     // Orchestrator: normal push allowed (the blanket deny lifted), force-push still denied.
     expect(deny('orchestrator')).not.toContain('Bash(git push *)');
     expect(deny('orchestrator')).toEqual(expect.arrayContaining(['Bash(git push --force *)', 'Bash(git push -f *)']));
     // It keeps the rest of the base floor (Agent #131, foot-guns).
     expect(deny('orchestrator')).toEqual(expect.arrayContaining(['Agent', 'Bash(rm -rf *)', 'Bash(git reset --hard *)']));
+  });
+
+  it('routes evaluator and investigator through READONLY_PERMISSIONS — denied edits, executor/orchestrator unchanged (#185)', () => {
+    // Read-only roles get READONLY_PERMISSIONS, not EXECUTOR_PERMISSIONS.
+    expect(permissionPolicyFor('evaluator')).toBe(READONLY_PERMISSIONS);
+    expect(permissionPolicyFor('investigator')).toBe(READONLY_PERMISSIONS);
+    // Other roles keep their existing policies.
+    expect(permissionPolicyFor('executor')).toBe(EXECUTOR_PERMISSIONS);
+    expect(permissionPolicyFor('arbitrator')).toBe(EXECUTOR_PERMISSIONS);
+  });
+
+  it('READONLY_PERMISSIONS denies Edit and Write but keeps read/search/inspection tools (#185)', () => {
+    const policy = JSON.parse(READONLY_PERMISSIONS) as { permissions: { allow: string[]; deny: string[] } };
+    // Edit and Write must not appear in the allow list.
+    expect(policy.permissions.allow).not.toContain('Edit(./**)');
+    expect(policy.permissions.allow).not.toContain('Write(./**)');
+    // Edit, Write, and NotebookEdit must be explicitly denied (hard enforcement, not just omitted).
+    expect(policy.permissions.deny).toContain('Edit');
+    expect(policy.permissions.deny).toContain('Write');
+    expect(policy.permissions.deny).toContain('NotebookEdit');
+    // Read/search/inspection tools remain available.
+    expect(policy.permissions.allow).toEqual(expect.arrayContaining(['Read', 'Glob', 'Grep', 'WebFetch', 'Bash']));
+    // Delegation tools remain so evaluators/investigators can be spawned by an executor.
+    expect(policy.permissions.allow).toEqual(expect.arrayContaining(['mcp__delegate__spawn', 'mcp__delegate__send']));
+    // Base deny floor is preserved.
+    expect(policy.permissions.deny).toEqual(expect.arrayContaining(['Agent', 'Bash(rm -rf *)', 'Bash(git push *)']));
   });
 
   it('always spawns with the exact base policy — learned "Always" rules are not merged here (#70)', () => {
