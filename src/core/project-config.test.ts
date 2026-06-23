@@ -25,7 +25,7 @@ describe('loadProjectConfig', () => {
 
   it('reads the declared storage backend', () => {
     expect(loadProjectConfig(tempConfig('{ "storage": { "backend": "git" } }')))
-      .toEqual({ storage: { backend: 'git' }, compaction: { thresholdContextPercent: 0.75 } });
+      .toEqual({ storage: { backend: 'git' }, compaction: { thresholdContextPercent: 0.75, idleThresholdSeconds: 210 } });
   });
 
   it('defaults the backend when storage is omitted', () => {
@@ -98,5 +98,41 @@ describe('loadProjectConfig — compaction config (#165/#180)', () => {
   it('DEFAULT_PROJECT_CONFIG has the compaction field with the named default', () => {
     expect(DEFAULT_PROJECT_CONFIG.compaction).toBeDefined();
     expect(DEFAULT_PROJECT_CONFIG.compaction.thresholdContextPercent).toBe(0.75);
+  });
+});
+
+describe('loadProjectConfig — idle compaction config (#167)', () => {
+  it('defaults idleThresholdSeconds to 210 when omitted', () => {
+    const cfg = loadProjectConfig(tempConfig('{}'));
+    expect(cfg.compaction.idleThresholdSeconds).toBe(210);
+  });
+
+  it('reads a custom idleThresholdSeconds', () => {
+    const cfg = loadProjectConfig(tempConfig('{ "compaction": { "idleThresholdSeconds": 60 } }'));
+    expect(cfg.compaction.idleThresholdSeconds).toBe(60);
+  });
+
+  it('accepts 0 to disable the idle trigger', () => {
+    const cfg = loadProjectConfig(tempConfig('{ "compaction": { "idleThresholdSeconds": 0 } }'));
+    expect(cfg.compaction.idleThresholdSeconds).toBe(0);
+  });
+
+  it('defaults idleThresholdSeconds when compaction object is present but key is absent', () => {
+    const cfg = loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": 0.8 } }'));
+    expect(cfg.compaction.idleThresholdSeconds).toBe(210);
+  });
+
+  it('throws when idleThresholdSeconds is not a number', () => {
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "idleThresholdSeconds": "never" } }')))
+      .toThrow(/idleThresholdSeconds must be a number/);
+  });
+
+  it('throws when idleThresholdSeconds is negative', () => {
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "idleThresholdSeconds": -1 } }')))
+      .toThrow(/idleThresholdSeconds must be ≥ 0/);
+  });
+
+  it('DEFAULT_PROJECT_CONFIG has idleThresholdSeconds of 210', () => {
+    expect(DEFAULT_PROJECT_CONFIG.compaction.idleThresholdSeconds).toBe(210);
   });
 });
