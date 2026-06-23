@@ -474,13 +474,13 @@ function provisionSession(args: {
       spawnerRole: role,
       hostId: `${sessionId}-delegation-host`,
       openSubChannel: (id) => store.open(id),
-      provisionExecutorDelegate: (delegateRole, id, sub): DelegateWiring => {
+      provisionExecutorDelegate: (delegateRole, id, sub, resuming): DelegateWiring => {
         const child = provisionSession({ context, folder, store, sessionId: id, role: delegateRole, channel: sub, liveSessions, onUsage: meter.add });
         // Surface the delegate so the architect can find it: it's a real, attachable
         // session with no auto-panel (#114), so tell them it exists, on which branch,
         // and that it's opened on demand from the session view.
         void vscode.window.showInformationMessage(
-          `Executor delegate "${id}" started on branch ${child.branch} — ` +
+          `Executor delegate “${id}” ${resuming ? 'resumed' : 'started'} on branch ${child.branch} — ` +
             `open it from “Mjolnirsoft: Open Session View” to watch or answer it.`,
         );
         return { reportFrom: child.agentId, close: () => void child.close() };

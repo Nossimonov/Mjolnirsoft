@@ -38,8 +38,12 @@ export interface DelegationHostDeps {
    * defaulting to executor instructions for every authoring-delegate role. Production
    * wires this from the extension's session-provisioning helper; returns the delegate
    * wiring (its closer + its agent's report seat).
+   *
+   * `resuming` is `true` when the delegate is being re-wired after a reload (#128,
+   * `rewireDelegate`) and `false` for a genuinely-new spawn — so the provisioner
+   * can surface the right user-facing message ("resumed" vs "started").
    */
-  readonly provisionExecutorDelegate: (role: AgentRole, id: string, sub: Channel) => DelegateWiring;
+  readonly provisionExecutorDelegate: (role: AgentRole, id: string, sub: Channel, resuming: boolean) => DelegateWiring;
   /**
    * Build a shared-worktree **critique delegate's** responder for its (validated,
    * non-executor) agent role — production passes a `claude`-backed one running on
@@ -108,7 +112,7 @@ export function createDelegationHost(deps: DelegationHostDeps): DelegationHost {
     // attachable session); every other critique role (the evaluator) is a plain
     // responder on the spawner's worktree.
     createDelegate: (role, id, sub) => {
-      if (ISOLATED_WORKTREE_ROLES.has(role)) return deps.provisionExecutorDelegate(role as AgentRole, id, sub);
+      if (ISOLATED_WORKTREE_ROLES.has(role)) return deps.provisionExecutorDelegate(role as AgentRole, id, sub, false);
       return { close: runExecutor(sub, id, deps.createResponder(role as AgentRole, id), role).close };
     },
     generateToken: deps.generateToken,
@@ -174,7 +178,7 @@ export function createDelegationHost(deps: DelegationHostDeps): DelegationHost {
       const sub = openSubChannel(id);
       let wiring: DelegateWiring;
       try {
-        wiring = deps.provisionExecutorDelegate(role, id, sub);
+        wiring = deps.provisionExecutorDelegate(role, id, sub, true);
       } catch (error) {
         sub.close();
         console.error(`[mjolnir] rewireDelegate: could not re-provision ${id}: ${String(error)}`);

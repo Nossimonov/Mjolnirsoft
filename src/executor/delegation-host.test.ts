@@ -75,14 +75,15 @@ function wire(options: WireOptions = {}) {
   // The full isolated-worktree delegate (#114, #99) path: a fake stand-in for the
   // extension's real provisioning. It runs a plain responder under the *suffixed*
   // agent seat (`${id}-executor`, as the real wiring does alongside its MCP seats),
-  // records the provisioning (including the role, so tests can verify correct
-  // instructions would be composed), and names that seat via reportFrom.
-  const provisioned: Array<{ role: AgentRole; id: string }> = [];
+  // records the provisioning (including the role and whether it is resuming, so
+  // tests can verify correct instructions and the resuming flag would be used),
+  // and names that seat via reportFrom.
+  const provisioned: Array<{ role: AgentRole; id: string; resuming: boolean }> = [];
   let closedExecutorDelegates = 0;
   const provisionExecutorDelegate: DelegationHostDeps['provisionExecutorDelegate'] =
     options.provisionExecutorDelegate ??
-    ((role: AgentRole, id: string, sub: Channel): DelegateWiring => {
-      provisioned.push({ role, id });
+    ((role: AgentRole, id: string, sub: Channel, resuming: boolean): DelegateWiring => {
+      provisioned.push({ role, id, resuming });
       const agentSeat = `${id}-executor`;
       const agent = runExecutor(
         sub,
@@ -332,6 +333,22 @@ describe('createDelegationHost — rewireDelegate (#128)', () => {
     expect(reports).toEqual([]);
   });
 
+  it('passes resuming: true on rewire and resuming: false on fresh spawn (#191)', async () => {
+    const { bridge, host, provisioned } = wire();
+
+    // A fresh spawn sets resuming: false.
+    const { delegateId: spawnId } = await bridge.spawn('executor', 'new task');
+    expect(provisioned).toEqual([{ role: 'executor', id: spawnId, resuming: false }]);
+
+    // A rewire (post-reload) sets resuming: true.
+    const rewiredId = 'w1-executor-executor-1-rewired-flag';
+    host.rewireDelegate('executor', rewiredId);
+    expect(provisioned).toEqual([
+      { role: 'executor', id: spawnId, resuming: false },
+      { role: 'executor', id: rewiredId, resuming: true },
+    ]);
+  });
+
   it('is idempotent: re-wiring an already-wired delegate is a no-op', async () => {
     const { bridge, host, reports } = wire();
 
@@ -385,7 +402,7 @@ describe('createDelegationHost — arbitrator-delegate mode (#99)', () => {
     // The arbitrator role takes the provisionExecutorDelegate path (isolated worktree),
     // not the shared-worktree critique-responder path; the role is passed through so
     // the provisioner can compose the correct instructions.
-    expect(provisioned).toEqual([{ role: 'arbitrator', id }]);
+    expect(provisioned).toEqual([{ role: 'arbitrator', id, resuming: false }]);
     expect(seen).toEqual([]);
     expect(subLogs.get(id!)?.[0]).toMatchObject({ type: 'text', payload: 'reconcile branch-a and branch-b' });
   });
@@ -412,7 +429,7 @@ describe('createDelegationHost — executor-delegate mode (#114)', () => {
 
     // The executor role took the provisioning path — a real, attachable session on
     // its own sub-channel — *not* the shared-worktree critique-responder path.
-    expect(provisioned).toEqual([{ role: 'executor', id }]);
+    expect(provisioned).toEqual([{ role: 'executor', id, resuming: false }]);
     expect(seen).toEqual([]);
     // The opening task landed on the delegate's own sub-channel.
     expect(subLogs.get(id!)?.[0]).toMatchObject({ type: 'text', payload: 'build the feature' });
