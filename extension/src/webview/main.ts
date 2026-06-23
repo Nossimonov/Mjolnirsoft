@@ -263,6 +263,12 @@ content?.addEventListener('click', (event: MouseEvent) => {
     vscode.postMessage({ kind: 'decision', requestId, behavior: 'allow', answers });
     turn.querySelectorAll('.opt').forEach((opt) => ((opt as HTMLButtonElement).disabled = true));
     lockCard(card, 'answer sent');
+    // Also lock the "can't answer" section if the architect had opened it before
+    // choosing a preset — prevents a stale "Send explanation" from posting a second decision.
+    const cantAnswerSection = turn.querySelector('.cant-answer-section') as HTMLElement | null;
+    cantAnswerSection?.querySelectorAll('button').forEach((b) => ((b as HTMLButtonElement).disabled = true));
+    const cantAnswerTextarea = cantAnswerSection?.querySelector('.cant-answer-input') as HTMLTextAreaElement | null;
+    if (cantAnswerTextarea) cantAnswerTextarea.disabled = true;
     return;
   }
 });
