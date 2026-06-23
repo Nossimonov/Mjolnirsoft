@@ -52,16 +52,19 @@ describe('createOrchestratorSingleton (#215)', () => {
     expect(second).toBe(true);
   });
 
-  it('evict() is safe when the close function throws', () => {
+  it('evict() clears registration even when the close function throws', () => {
     // A throwing close must not prevent the registration from being cleared.
     const singleton = createOrchestratorSingleton();
     singleton.register(() => { throw new Error('close failed'); });
     expect(() => singleton.evict()).toThrow('close failed');
-    // Registration is cleared — a second evict is a no-op.
-    let secondCalled = false;
-    singleton.register(() => { secondCalled = true; });
+    // No re-registration here — the next evict must be a no-op.
+    let callCount = 0;
+    singleton.evict(); // nothing registered, must not throw or call anything
+    expect(callCount).toBe(0);
+    // Re-registration after a throwing evict works normally.
+    singleton.register(() => { callCount++; });
     singleton.evict();
-    expect(secondCalled).toBe(true);
+    expect(callCount).toBe(1);
   });
 });
 
