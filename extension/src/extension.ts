@@ -33,6 +33,7 @@ import { createIdleCompactionTrigger, type IdleCompactionTrigger } from '../../s
 import { inspectSession, orchestratorSessionKey } from '../../src/executor/session-inspector.ts';
 import { projectDelegationLedger } from '../../src/executor/delegation-ledger.ts';
 import { REASONING_DIGEST } from '../../src/executor/reasoning-digest.ts';
+import { createOrchestratorSingleton } from '../../src/executor/orchestrator-singleton.ts';
 import { renderMessage, renderInteractionRequest, renderReasoningDigestLive, linkifySessionIds } from './render.ts';
 
 // The MCP server is named `perm` in the generated config, so its `approve` tool
@@ -75,6 +76,12 @@ const IDLE_COMPACTION_PROMPT =
 // not a running total; a live panel shows the running tally from its meter, a replayed
 // panel sums these. Defined in the responder (which short-circuits it so an agent
 // never feeds its own usage back to itself) and imported here.
+
+// Singleton orchestrator guard (#215): at most one orchestrator generation is bound to
+// the session channel at a time. Tracks the active generation's teardown function;
+// `launchSession` calls `evict()` before opening the new channel and `register()`
+// after all participants are wired, covering compaction-relaunch, reload, and abort paths.
+const orchestratorSingleton = createOrchestratorSingleton();
 
 /** Compact a token count: 1234 → "1.2K", 1_234_567 → "1.2M". */
 function formatTokens(n: number): string {
@@ -700,6 +707,13 @@ function launchSession(
   // (CLAUDE_BIN) so it's found even when the extension host's PATH lacks it.
   loadLocalEnv(join(folder.uri.fsPath, '.local.env'));
 
+  // Singleton orchestrator enforcement (#215): evict any prior generation before the
+  // new one opens its channel. This is the enforcement point — the old generation's
+  // agent and FileChannel are closed here, before the new channel is created and the
+  // new agent joins, so at most one orchestrator ever consumes channel messages.
+  // A no-op for executor/evaluator sessions and when no prior generation is registered.
+  if (role === 'orchestrator') orchestratorSingleton.evict();
+
   // Open this session's channel once for the live wiring; the panel attaches its
   // own (replaying) handle separately. The command owns this channel's lifecycle.
   const channel = store.open(sessionId);
@@ -824,6 +838,23 @@ function launchSession(
         },
       });
     }
+  }
+
+  // Register the eviction function for this orchestrator generation (#215). Called by
+  // the next launchSession('orchestrator') before it opens its channel, ensuring the
+  // old generation is fully unsubscribed before the new one binds. Idempotent: bails
+  // out early if compaction already cleaned up (compacted=true), safe for double-close
+  // otherwise (all close() methods tolerate being called on already-closed resources).
+  if (isOrchestrator) {
+    orchestratorSingleton.register((): void => {
+      if (compacted) return; // compaction or prior eviction already cleaned up
+      compacted = true;
+      compactionObserver?.close();
+      compactionHost?.close();
+      idleTrigger?.close();
+      provisioned.closeForCompaction(); // preserve delegate worktrees for the new generation
+      channel.close();
+    });
   }
 
   openSessionPanel(context, store, sessionId, folder.uri.fsPath, liveSessions, {
