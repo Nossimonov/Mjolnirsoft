@@ -560,6 +560,32 @@ export function extractUsage(resultRaw: string): Usage | undefined {
 }
 
 /**
+ * Extracts per-turn {@link Usage} from the `iterations[i]` entry of a multi-turn
+ * combined result line (#172). When `--input-format stream-json` bundles N pushed
+ * messages into one `result` line, the `iterations` array carries one usage record
+ * per turn. Each entry's usage may be nested as `iter.usage` or at the top level.
+ * Returns undefined when the iteration is absent or carries no token counts.
+ */
+export function extractIterationUsage(iterations: unknown[], i: number): Usage | undefined {
+  const iter = iterations[i];
+  if (!iter || typeof iter !== 'object') return undefined;
+  const iterObj = iter as Record<string, unknown>;
+  // Usage may be nested as iter.usage (likely) or at the top level of the iter object.
+  const u = (iterObj.usage && typeof iterObj.usage === 'object')
+    ? iterObj.usage as Record<string, unknown>
+    : iterObj;
+  const n = (k: string): number => (typeof u[k] === 'number' ? (u[k] as number) : 0);
+  const tally: Usage = {
+    inputTokens: n('input_tokens'),
+    outputTokens: n('output_tokens'),
+    cacheReadTokens: n('cache_read_input_tokens'),
+    cacheCreationTokens: n('cache_creation_input_tokens'),
+  };
+  return (tally.inputTokens || tally.outputTokens || tally.cacheReadTokens || tally.cacheCreationTokens)
+    ? tally : undefined;
+}
+
+/**
  * Default launcher: spawn `claude -p` headless. A non-`--bare` run uses the
  * logged-in Claude Code session (the user's subscription). With `--output-format
  * stream-json` the run streams as NDJSON: stdout is read line-by-line. The raw
@@ -643,6 +669,136 @@ export const runClaudeCodeCli: RunClaudeCode = (
     });
   });
 
+/** One in-flight `send()` call waiting for its turn's result from the stream. */
+export interface PendingEntry {
+  resolve(v: string): void;
+  reject(e: Error): void;
+  handlers: StreamTurnHandlers;
+  digestAssembler?: ReturnType<typeof createReasoningDigestAssembler>;
+}
+
+/**
+ * Manages the FIFO pending-entry queue for {@link createPersistentCli} (#172).
+ *
+ * **Combined envelope:** when `--input-format stream-json` bundles N pushed messages
+ * into one `result` line (e.g. message B pushed while a tool is running for A),
+ * `num_turns>1` and `result.result` is the *last* turn's text only. Intermediate
+ * answers live in the `assistant` message events in the stream. This multiplexer
+ * tracks turn boundaries by watching for injected user-message echoes in the stream
+ * (`{"type":"user","message":{"role":"user","content":"<string>"}}`), captures the
+ * preceding assistant text per turn, and resolves all N entries when the single
+ * result line arrives: entries 0..N-2 from the captured text, entry N-1 from
+ * `result.result`. Per-turn usage comes from `result.iterations[i]` (#116).
+ *
+ * Extracted from `createPersistentCli` for unit-testability: the turn-boundary
+ * logic is pure (no I/O) and can be driven by feeding raw stream lines.
+ */
+export function createTurnMultiplexer(getStderr: () => string): {
+  add(entry: PendingEntry): void;
+  onResult(raw: string): void;
+  onLine(line: string): void;
+  drain(err: Error): void;
+} {
+  const pending: PendingEntry[] = [];
+  // Intermediate turn answers committed as the stream crosses each turn boundary.
+  // committed[i].text = turn i's answer (all turns except the last).
+  const committed: Array<{ text: string }> = [];
+  let lastAssistantText = '';
+  // Number of injected user-message echoes seen so far (each marks a new turn start).
+  let userTurnsSeen = 0;
+
+  const onLine = (line: string): void => {
+    // Feed the currently-active turn's digest assembler. committed.length is the index
+    // of the active turn: entries 0..committed.length-1 are already captured; the next
+    // entry is still accumulating stream events.
+    // Note: the turn-boundary user-echo line is fed to the PRIOR turn's assembler
+    // (committed.length hasn't incremented yet when this runs). That is harmless:
+    // createReasoningDigestAssembler's handleToolResults guards `!Array.isArray(content)`
+    // and user-echo content is a string, so the line is silently ignored by the assembler.
+    pending[committed.length]?.digestAssembler?.feed(line);
+
+    let obj: unknown;
+    try { obj = JSON.parse(line.trim()); } catch { return; }
+    if (typeof obj !== 'object' || obj === null) return;
+    const rec = obj as { type?: unknown; message?: unknown };
+
+    if (rec.type === 'assistant') {
+      // Capture the text of the most recent complete assistant message. It will be
+      // committed as the current turn's answer when the next user echo arrives.
+      const msg = rec.message as { content?: unknown } | null;
+      if (Array.isArray(msg?.content)) {
+        const text = (msg!.content as Array<{ type?: string; text?: string }>)
+          .filter(b => b.type === 'text').map(b => b.text ?? '').join('');
+        if (text) lastAssistantText = text;
+      }
+      return;
+    }
+
+    if (rec.type === 'user') {
+      const msg = rec.message as { role?: unknown; content?: unknown } | null;
+      // Injected messages have string content; tool results have array content — skip those.
+      if (msg?.role === 'user' && typeof msg.content === 'string') {
+        userTurnsSeen++;
+        if (userTurnsSeen > 1) {
+          // A new turn is starting: the previous turn's assistant text is now final.
+          committed.push({ text: lastAssistantText });
+          lastAssistantText = '';
+        }
+      }
+    }
+  };
+
+  const onResult = (raw: string): void => {
+    let parsed: { num_turns?: number; iterations?: unknown[]; is_error?: boolean } | undefined;
+    try { parsed = JSON.parse(raw) as typeof parsed; } catch {}
+    const numTurns = Math.max(1, parsed?.num_turns ?? 1);
+    const iterations = Array.isArray(parsed?.iterations) ? parsed!.iterations : [];
+    // is_error is session-level, not turn-specific: if any turn produced an error the
+    // whole run is marked failed. Resolving intermediate entries as success while only
+    // rejecting the last would give callers a spurious partial success. Route all entries
+    // through interpretClaudeResult (which throws on is_error) so all are rejected.
+    const isErrorResult = !!parsed?.is_error;
+
+    const toResolve = pending.splice(0, numTurns);
+    for (let i = 0; i < toResolve.length; i++) {
+      const entry = toResolve[i]!;
+      const isLast = i === toResolve.length - 1;
+      if (entry.handlers.onUsage) {
+        // Per-turn usage from iterations[i]; fall back to aggregate for single-turn results.
+        const usage = extractIterationUsage(iterations, i) ?? (numTurns === 1 ? extractUsage(raw) : undefined);
+        if (usage) entry.handlers.onUsage(usage);
+      }
+      if (entry.digestAssembler && entry.handlers.onDigest) {
+        entry.handlers.onDigest(entry.digestAssembler.build());
+      }
+      try {
+        // Intermediate turns use the assistant text captured from the stream. If
+        // committed[i] is absent (fewer turn boundaries seen than num_turns claims),
+        // this resolves with ''; buildReply('') → undefined, so the turn produces no
+        // channel message. This is a protocol mismatch from the CLI; in practice it
+        // should not occur.
+        entry.resolve((!isLast && !isErrorResult)
+          ? (committed[i]?.text?.trim() ?? '')
+          : interpretClaudeResult(raw, getStderr(), 0),
+        );
+      } catch (err) {
+        entry.reject(err as Error);
+      }
+    }
+    // Reset per-run state so a subsequent run starts clean.
+    committed.splice(0);
+    lastAssistantText = '';
+    userTurnsSeen = 0;
+  };
+
+  const drain = (err: Error): void => {
+    const drained = pending.splice(0);
+    for (const entry of drained) entry.reject(err);
+  };
+
+  return { add: (entry) => { pending.push(entry); }, onResult, onLine, drain };
+}
+
 /**
  * Persistent streaming session factory: spawn `claude --print --input-format
  * stream-json` once, keep stdin open, and push each user message as an NDJSON
@@ -650,17 +806,14 @@ export const runClaudeCodeCli: RunClaudeCode = (
  * to stdin so claude can consume them at the next tool boundary within the same
  * running turn — not deferred to a separate later turn.
  *
- * Ordering: claude processes messages in the order they arrive on stdin and emits
- * one `result` line per message, also in order. A FIFO pending queue maps each
- * pushed message to its resolver: `onResult` always shifts the oldest entry, so
- * each send() promise resolves to the correct result regardless of how many
- * messages are in flight simultaneously.
+ * **Combined envelope:** when a message is injected while a tool is running, claude
+ * bundles both turns into one `result` line with `num_turns>1`. {@link createTurnMultiplexer}
+ * handles this: it tracks turn boundaries in the stream, captures each turn's
+ * assistant text, and resolves all N pending entries when the single result arrives.
  *
- * Digest and usage per turn: each pending entry owns its own `digestAssembler`.
- * Stream events (onLine) always feed the front-of-queue entry's assembler because
- * events appear in stream order: turn-N events, result-N, turn-N+1 events, ...
- * When `onResult` fires, the assembler is `build()`-called before shifting,
- * so the digest is complete for that turn.
+ * Concurrent sends ARE possible (#172): executor-runtime fires respond() immediately
+ * for each incoming channel message. The multiplexer's FIFO queue + per-result reset
+ * guarantee correct per-turn attribution regardless of how many messages are in flight.
  */
 export const createPersistentCli: CreateStreamSession = ({ cwd, ...runArgs }) => {
   const args = buildStreamSessionArgs(runArgs);
@@ -673,57 +826,18 @@ export const createPersistentCli: CreateStreamSession = ({ cwd, ...runArgs }) =>
   let stderrBuf = '';
   child.stderr.on('data', (chunk) => { stderrBuf += String(chunk); });
 
-  // FIFO queue of in-flight sends. Results arrive in push order so pending[0]
-  // always corresponds to the next result line (#172 multi-result envelope).
-  interface PendingEntry {
-    resolve(v: string): void;
-    reject(e: Error): void;
-    handlers: StreamTurnHandlers;
-    digestAssembler?: ReturnType<typeof createReasoningDigestAssembler>;
-  }
-  const pending: PendingEntry[] = [];
+  const mux = createTurnMultiplexer(() => stderrBuf);
+  const reader = createStreamReader({ onResult: mux.onResult, onLine: mux.onLine });
 
-  // Single stream reader for the whole process lifetime. onLine taps the
-  // front-of-queue entry's assembler; onResult shifts it, extracts usage/digest,
-  // and resolves or rejects that entry's promise.
-  const reader = createStreamReader({
-    onResult(raw) {
-      const entry = pending.shift();
-      if (!entry) return; // spurious result with no pending send (shouldn't happen)
-      const { resolve, reject, handlers, digestAssembler } = entry;
-      if (handlers.onUsage) { const u = extractUsage(raw); if (u) handlers.onUsage(u); }
-      if (digestAssembler && handlers.onDigest) handlers.onDigest(digestAssembler.build());
-      try {
-        resolve(interpretClaudeResult(raw, stderrBuf, 0));
-      } catch (err) {
-        reject(err as Error);
-      }
-    },
-    // Events appear in order: turn-N events → result-N → turn-N+1 events → ...
-    // pending[0] is the current-in-flight entry until its result shifts it off.
-    onLine: (line) => pending[0]?.digestAssembler?.feed(line),
-  });
-
-  child.stdout.on('data', (chunk) => {
-    reader.feed(decoder.write(chunk as Buffer));
-  });
-
-  child.on('error', (err) => {
-    const drained = pending.splice(0);
-    for (const entry of drained) entry.reject(err);
-  });
-
+  child.stdout.on('data', (chunk) => { reader.feed(decoder.write(chunk as Buffer)); });
+  child.on('error', (err) => { mux.drain(err); });
   child.on('close', (code) => {
     const tail = decoder.end();
     if (tail) reader.feed(tail);
-    reader.flush(); // parses any trailing result line without a terminating \n
-    // Reject any entries still waiting after flush() (process exited without results).
-    const drained = pending.splice(0);
-    if (drained.length > 0) {
-      const detail = stderrBuf.trim() || `exited with code ${code ?? 1}`;
-      const exitErr = new Error(`claude failed (exit ${code ?? 1}): ${detail}`);
-      for (const entry of drained) entry.reject(exitErr);
-    }
+    reader.flush(); // parses any trailing result line emitted without a terminating \n
+    // Reject remaining entries (process exited before all results were emitted).
+    const detail = stderrBuf.trim() || `exited with code ${code ?? 1}`;
+    mux.drain(new Error(`claude failed (exit ${code ?? 1}): ${detail}`));
   });
 
   return {
@@ -733,16 +847,13 @@ export const createPersistentCli: CreateStreamSession = ({ cwd, ...runArgs }) =>
         const digestAssembler = (onDigest || onReasoningChange)
           ? createReasoningDigestAssembler({ onChange: onReasoningChange })
           : undefined;
-        pending.push({ resolve, reject, handlers: { onReasoningChange, onDigest, onUsage }, digestAssembler });
+        mux.add({ resolve, reject, handlers: { onReasoningChange, onDigest, onUsage }, digestAssembler });
         child.stdin!.write(
           JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } }) + '\n',
         );
       });
     },
-
-    close() {
-      child.stdin!.end();
-    },
+    close() { child.stdin!.end(); },
   };
 };
 
@@ -1013,13 +1124,16 @@ export function createClaudeCodeResponder(
         // dispose while a turn is in flight), in which case `dead` is null and close() would
         // throw a TypeError instead of surfacing the real error (#172).
         //
-        // Concurrent-turn note: if two turns share this session and both catch the same
-        // session-startup error (isNoConversation / isAlreadyInUse), they may race to null/
-        // replace `session`. That window is bounded by MAX_TURN_ATTEMPTS and practically only
-        // arises on the very first turn pair — once `started` is true a healthy session is
-        // shared and these errors never occur. Transient overloads always sleep before retry,
-        // preventing the race entirely. The failure mode is both turns erroring out on startup,
-        // not an infinite cascade or data corruption.
+        // Concurrent-turn note: if two turns share this session and both catch a session-startup
+        // error (isNoConversation / isAlreadyInUse), they may race to null/replace `session` in
+        // a compounding way: Turn A creates session[1] and yields at await; Turn B catches, closes
+        // session[1] (the one A is using), creates session[2]; session[1]'s close handler rejects
+        // A's pending send; A's retry closes session[2] (B's current session), etc. Each recovery
+        // attempt can trigger the other, burning MAX_TURN_ATTEMPTS across both turns. Practical
+        // impact is bounded: this window only opens before `started` is true (startup errors
+        // don't arise for established sessions), and transient overloads always sleep before retry
+        // (preventing the cascade entirely). Both turns eventually exhaust attempts and post error
+        // messages to the channel; no data corruption or infinite loop results.
         const dead = session;
         session = null;
         dead?.close();

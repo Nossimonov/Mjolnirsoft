@@ -7,18 +7,22 @@ import {
   senderAttribution,
   interpretClaudeResult,
   extractUsage,
+  extractIterationUsage,
   addUsage,
   weightedUsage,
   claudeSessionIdFor,
   permissionPolicyFor,
   parseStreamEvent,
   createStreamReader,
+  createTurnMultiplexer,
   DEFAULT_EXECUTOR_ROLE,
   EXECUTOR_PERMISSIONS,
   READONLY_PERMISSIONS,
   type ViewEvent,
   type StreamSession,
   type StreamTurnHandlers,
+  type PendingEntry,
+  type Usage,
 } from './claude-code-responder.ts';
 import { isAuthError } from './auth-error.ts';
 import { SHARED_CORE, EXECUTOR_INSERT } from '../core/agent-instructions.ts';
@@ -1020,5 +1024,260 @@ describe('createClaudeCodeResponder — persistent session path (#172)', () => {
     expect(session.sends[0]).toContain('[Message from architect — authoritative (id: orchestrator)]');
     expect(session.sends[0]).toContain('[ctx: 50K tokens]');
     expect(session.sends[0]).toContain('write a haiku to haiku.md');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Helpers for createTurnMultiplexer tests
+// ---------------------------------------------------------------------------
+
+/** Make a PendingEntry whose resolution is captured for assertions. */
+function makeEntry(handlerOverrides: Partial<StreamTurnHandlers> = {}): {
+  entry: PendingEntry;
+  resolved: string | null;
+  rejected: Error | null;
+} {
+  let resolved: string | null = null;
+  let rejected: Error | null = null;
+  const entry: PendingEntry = {
+    resolve: (v) => { resolved = v; },
+    reject: (e) => { rejected = e; },
+    handlers: handlerOverrides,
+    digestAssembler: undefined,
+  };
+  return {
+    entry,
+    get resolved() { return resolved; },
+    get rejected() { return rejected; },
+  };
+}
+
+const userEcho = (content: string) =>
+  JSON.stringify({ type: 'user', message: { role: 'user', content } });
+const assistantMsg = (text: string) =>
+  JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+const resultLine = (opts: { num_turns?: number; result?: string; is_error?: boolean; iterations?: unknown[]; usage?: unknown } = {}) =>
+  JSON.stringify({
+    type: 'result',
+    num_turns: opts.num_turns ?? 1,
+    result: opts.result ?? 'ok',
+    is_error: opts.is_error ?? false,
+    ...(opts.iterations !== undefined ? { iterations: opts.iterations } : {}),
+    ...(opts.usage !== undefined ? { usage: opts.usage } : {}),
+  });
+
+describe('extractIterationUsage (#172 combined envelope)', () => {
+  it('extracts usage from iter.usage when present', () => {
+    const iters = [{ usage: { input_tokens: 60, output_tokens: 20, cache_read_input_tokens: 5, cache_creation_input_tokens: 3 } }];
+    expect(extractIterationUsage(iters, 0)).toEqual({ inputTokens: 60, outputTokens: 20, cacheReadTokens: 5, cacheCreationTokens: 3 });
+  });
+
+  it('extracts usage from top-level iter keys when no nested .usage', () => {
+    const iters = [{ input_tokens: 40, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }];
+    expect(extractIterationUsage(iters, 0)).toEqual({ inputTokens: 40, outputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0 });
+  });
+
+  it('returns undefined for a missing iteration index', () => {
+    expect(extractIterationUsage([], 0)).toBeUndefined();
+    expect(extractIterationUsage([{ usage: { output_tokens: 5 } }], 1)).toBeUndefined();
+  });
+
+  it('returns undefined when all token counts are zero (no usage info)', () => {
+    const iters = [{ usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }];
+    expect(extractIterationUsage(iters, 0)).toBeUndefined();
+  });
+});
+
+describe('createTurnMultiplexer (#172 combined envelope)', () => {
+  it('resolves a single-turn result to the lone pending entry (baseline)', () => {
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    mux.add(a.entry);
+    mux.onLine(userEcho('prompt'));
+    mux.onLine(assistantMsg('answer'));
+    mux.onResult(resultLine({ result: 'answer' }));
+    expect(a.resolved).toBe('answer');
+    expect(a.rejected).toBeNull();
+  });
+
+  it('resolves both entries from a combined envelope (num_turns=2) (#172 combined-envelope AC)', () => {
+    // The common mid-turn injection case: B pushed while a tool is running for A.
+    // Claude bundles both into ONE result line with num_turns=2; result.result is B's
+    // text only; A's text lives in the assistant stream before B's user echo.
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    const b = makeEntry();
+    mux.add(a.entry);
+    mux.add(b.entry);
+    mux.onLine(userEcho('prompt-A'));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onLine(userEcho('prompt-B'));   // turn boundary: commits A's text
+    mux.onLine(assistantMsg('answer-B'));
+    mux.onResult(resultLine({ num_turns: 2, result: 'answer-B' }));
+    expect(a.resolved).toBe('answer-A');
+    expect(b.resolved).toBe('answer-B');
+    expect(a.rejected).toBeNull();
+    expect(b.rejected).toBeNull();
+  });
+
+  it('resolves all three entries from a three-turn envelope', () => {
+    const mux = createTurnMultiplexer(() => '');
+    const [a, b, c] = [makeEntry(), makeEntry(), makeEntry()];
+    [a, b, c].forEach(e => mux.add(e.entry));
+    mux.onLine(userEcho('A'));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onLine(userEcho('B'));
+    mux.onLine(assistantMsg('answer-B'));
+    mux.onLine(userEcho('C'));
+    mux.onLine(assistantMsg('answer-C'));
+    mux.onResult(resultLine({ num_turns: 3, result: 'answer-C' }));
+    expect(a.resolved).toBe('answer-A');
+    expect(b.resolved).toBe('answer-B');
+    expect(c.resolved).toBe('answer-C');
+  });
+
+  it('rejects all pending entries on drain (process-level error)', () => {
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    const b = makeEntry();
+    mux.add(a.entry);
+    mux.add(b.entry);
+    mux.drain(new Error('process died'));
+    expect(a.rejected?.message).toBe('process died');
+    expect(b.rejected?.message).toBe('process died');
+    expect(a.resolved).toBeNull();
+    expect(b.resolved).toBeNull();
+  });
+
+  it('feeds onLine events to the active turn\'s digestAssembler, not others (#110 digest isolation)', () => {
+    const feedA = vi.fn();
+    const feedB = vi.fn();
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    const b = makeEntry();
+    a.entry.digestAssembler = { feed: feedA, build: vi.fn(() => ({ entries: [] })) } as unknown as PendingEntry['digestAssembler'];
+    b.entry.digestAssembler = { feed: feedB, build: vi.fn(() => ({ entries: [] })) } as unknown as PendingEntry['digestAssembler'];
+    mux.add(a.entry);
+    mux.add(b.entry);
+
+    const aEvent = '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"A thinks"}}}';
+    const bEvent = '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"B thinks"}}}';
+
+    mux.onLine(userEcho('prompt-A'));  // turn 0 starts
+    mux.onLine(aEvent);                // → assemblerA
+    mux.onLine(assistantMsg('A'));
+    mux.onLine(userEcho('prompt-B'));  // turn boundary → commits A; subsequent lines → assemblerB
+    mux.onLine(bEvent);                // → assemblerB
+    mux.onResult(resultLine({ num_turns: 2, result: 'B' }));
+
+    expect(feedA).toHaveBeenCalledWith(aEvent);
+    expect(feedB).toHaveBeenCalledWith(bEvent);
+    expect(feedB).not.toHaveBeenCalledWith(aEvent);
+  });
+
+  it('attributes per-turn usage from iterations[i] (#116)', () => {
+    const usagesA: Usage[] = [];
+    const usagesB: Usage[] = [];
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry({ onUsage: (u) => usagesA.push(u) });
+    const b = makeEntry({ onUsage: (u) => usagesB.push(u) });
+    mux.add(a.entry);
+    mux.add(b.entry);
+    mux.onLine(userEcho('A'));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onLine(userEcho('B'));
+    mux.onLine(assistantMsg('answer-B'));
+    mux.onResult(resultLine({
+      num_turns: 2,
+      result: 'answer-B',
+      iterations: [
+        { usage: { input_tokens: 60, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+        { usage: { input_tokens: 40, output_tokens: 30, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+      ],
+    }));
+    expect(usagesA).toEqual([{ inputTokens: 60, outputTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0 }]);
+    expect(usagesB).toEqual([{ inputTokens: 40, outputTokens: 30, cacheReadTokens: 0, cacheCreationTokens: 0 }]);
+  });
+
+  it('falls back to aggregate usage for single-turn result when iterations[] absent (#116)', () => {
+    const usages: Usage[] = [];
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry({ onUsage: (u) => usages.push(u) });
+    mux.add(a.entry);
+    mux.onLine(userEcho('A'));
+    mux.onLine(assistantMsg('A answer'));
+    mux.onResult(resultLine({
+      num_turns: 1,
+      result: 'A answer',
+      usage: { input_tokens: 50, output_tokens: 25, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    }));
+    expect(usages).toEqual([{ inputTokens: 50, outputTokens: 25, cacheReadTokens: 0, cacheCreationTokens: 0 }]);
+  });
+
+  it('resets between runs: sequential combined runs do not bleed state', () => {
+    // Regression guard: committed[] and userTurnsSeen must be reset after each result
+    // so the second combined run resolves with its OWN texts, not the first run's.
+    const mux = createTurnMultiplexer(() => '');
+
+    // First run: A+B combined
+    const a = makeEntry();
+    const b = makeEntry();
+    mux.add(a.entry);
+    mux.add(b.entry);
+    mux.onLine(userEcho('A'));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onLine(userEcho('B'));
+    mux.onLine(assistantMsg('answer-B'));
+    mux.onResult(resultLine({ num_turns: 2, result: 'answer-B' }));
+    expect(a.resolved).toBe('answer-A');
+    expect(b.resolved).toBe('answer-B');
+
+    // Second run: C+D combined — must not inherit stale state from first run
+    const c = makeEntry();
+    const d = makeEntry();
+    mux.add(c.entry);
+    mux.add(d.entry);
+    mux.onLine(userEcho('C'));
+    mux.onLine(assistantMsg('answer-C'));
+    mux.onLine(userEcho('D'));
+    mux.onLine(assistantMsg('answer-D'));
+    mux.onResult(resultLine({ num_turns: 2, result: 'answer-D' }));
+    expect(c.resolved).toBe('answer-C');
+    expect(d.resolved).toBe('answer-D');
+  });
+
+  it('rejects ALL entries on is_error — not just the last turn (#172 combined-envelope)', () => {
+    // is_error is session-level: if true, resolving intermediate entries as success
+    // while rejecting only the last would give callers a spurious partial success.
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    const b = makeEntry();
+    mux.add(a.entry);
+    mux.add(b.entry);
+    mux.onLine(userEcho('A'));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onLine(userEcho('B'));
+    mux.onLine(assistantMsg('answer-B'));
+    mux.onResult(resultLine({ num_turns: 2, result: 'Not logged in · Please run /login', is_error: true }));
+    // Both must be rejected, not A=resolved/B=rejected
+    expect(a.resolved).toBeNull();
+    expect(b.resolved).toBeNull();
+    expect(a.rejected).toBeInstanceOf(Error);
+    expect(b.rejected).toBeInstanceOf(Error);
+  });
+
+  it('ignores tool-result user events (array content) as turn boundaries', () => {
+    // Tool results appear as {"type":"user","message":{"content":[{"type":"tool_result",...}]}}.
+    // Only injected messages with string content mark a new turn.
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    mux.add(a.entry);
+    mux.onLine(userEcho('prompt-A'));
+    // Simulate a tool_result user event (array content, not string) — must NOT trigger turn boundary
+    mux.onLine(JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'output' }] } }));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onResult(resultLine({ num_turns: 1, result: 'answer-A' }));
+    expect(a.resolved).toBe('answer-A');
+    expect(a.rejected).toBeNull();
   });
 });
