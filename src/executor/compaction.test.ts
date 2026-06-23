@@ -314,37 +314,39 @@ describe('getContextNote injection into orchestrator prompt (#165)', () => {
     expect(prompts[0]).toContain('do a thing');
   });
 
-  it('context note reflects threshold verdict when above threshold', async () => {
+  it('context note carries advisory verdict — no auto-compact directive (#213)', async () => {
     // Verify the note format used by the extension's getContextNote closure by testing
     // the format string logic directly. The extension builds the note from a percent
     // and window size, resolving both into human-legible absolute figures (#180).
+    // The verdict is advisory only — no instruction to call mcp__compact__request.
     function makeContextNote(tokens: number, percent: number, windowSize: number): string {
       const fmtK = (n: number) => n >= 1e6 ? `${(n / 1e6).toFixed(1).replace(/\.0$/, '')}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1).replace(/\.0$/, '')}K` : String(n);
       const thresholdTokens = Math.round(windowSize * percent);
       const pct = Math.round(percent * 100);
       const aboveThreshold = tokens > thresholdTokens;
       const verdict = aboveThreshold
-        ? `⚠ PAST THRESHOLD — after integrating the current task, write a self-hand-off and call mcp__compact__request.`
-        : `Below threshold — continue.`;
+        ? `Above advisory threshold — for architect awareness.`
+        : `Within budget.`;
       return `[Context size: ${fmtK(tokens)} tokens (threshold ${fmtK(thresholdTokens)} tokens — ${pct}% of ${fmtK(windowSize)} window). ${verdict}]`;
     }
 
-    // 80K < 75% of 200K (150K) → below
+    // 80K < 75% of 200K (150K) → within budget
     const belowNote = makeContextNote(80_000, 0.75, 200_000);
     expect(belowNote).toBe(
-      '[Context size: 80K tokens (threshold 150K tokens — 75% of 200K window). Below threshold — continue.]',
+      '[Context size: 80K tokens (threshold 150K tokens — 75% of 200K window). Within budget.]',
     );
 
-    // 160K > 75% of 200K (150K) → above
+    // 160K > 75% of 200K (150K) → above — advisory only, no compact directive
     const aboveNote = makeContextNote(160_000, 0.75, 200_000);
     expect(aboveNote).toBe(
-      '[Context size: 160K tokens (threshold 150K tokens — 75% of 200K window). ⚠ PAST THRESHOLD — after integrating the current task, write a self-hand-off and call mcp__compact__request.]',
+      '[Context size: 160K tokens (threshold 150K tokens — 75% of 200K window). Above advisory threshold — for architect awareness.]',
     );
+    expect(aboveNote).not.toContain('mcp__compact__request');
 
-    // 1M window example: 299K < 75% of 1M (750K) → below
+    // 1M window example: 299K < 75% of 1M (750K) → within budget
     const opusNote = makeContextNote(299_000, 0.75, 1_000_000);
     expect(opusNote).toBe(
-      '[Context size: 299K tokens (threshold 750K tokens — 75% of 1M window). Below threshold — continue.]',
+      '[Context size: 299K tokens (threshold 750K tokens — 75% of 1M window). Within budget.]',
     );
   });
 });

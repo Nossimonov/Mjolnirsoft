@@ -419,8 +419,8 @@ function provisionSession(args: {
           const pct = Math.round(compactionPercent * 100);
           const aboveThreshold = tokens > thresholdTokens;
           const verdict = aboveThreshold
-            ? `⚠ PAST THRESHOLD — after integrating the current task, write a self-hand-off and call mcp__compact__request.`
-            : `Below threshold — continue.`;
+            ? `Above advisory threshold — for architect awareness.`
+            : `Within budget.`;
           return `[Context size: ${formatTokens(tokens)} tokens (threshold ${formatTokens(thresholdTokens)} tokens — ${pct}% of ${formatTokens(windowSize)} window). ${verdict}]`;
         }
       : undefined;
