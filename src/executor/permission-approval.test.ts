@@ -52,6 +52,30 @@ describe('approveToolUse', () => {
     expect(verdict).toEqual({ behavior: 'deny', message: 'no' });
   });
 
+  it('relays the free-text "can\'t answer" reason to the agent as the deny verdict message (#96)', async () => {
+    // Full round-trip: AskUserQuestion is escalated to the human, who submits a free-text
+    // explanation instead of a preset. The verdict the permission MCP server returns to the
+    // agent (as JSON text) must carry that reason verbatim so the agent can re-ask or revise.
+    const reason = "I can't see the content being referenced — please include it directly in the question.";
+    const request = vi.fn().mockResolvedValue({ requestId: 'r-ask', behavior: 'deny', message: reason });
+
+    const verdict = await approveToolUse(
+      { projectDir: '/proj', bridge: { request }, postAudit: vi.fn(), matchRule: () => undefined },
+      'AskUserQuestion',
+      { questions: [{ question: 'Which approach?', options: [{ label: 'A' }, { label: 'B' }] }] },
+      'toolu_ask_1',
+    );
+
+    // The bridge received the full AskUserQuestion call.
+    expect(request).toHaveBeenCalledWith(
+      'AskUserQuestion',
+      { questions: [{ question: 'Which approach?', options: [{ label: 'A' }, { label: 'B' }] }] },
+      'toolu_ask_1',
+    );
+    // The verdict carries the reason verbatim — the agent reads this and can re-ask.
+    expect(verdict).toEqual({ behavior: 'deny', message: reason });
+  });
+
   it('auto-denies an out-of-worktree write before any auto-allow or escalation (#101)', async () => {
     const request = vi.fn(); // the human must never be asked
     const postAudit = vi.fn();
