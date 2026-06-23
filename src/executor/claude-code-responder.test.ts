@@ -772,7 +772,7 @@ describe('createClaudeCodeResponder — persistent session path (#172)', () => {
     const respond = createClaudeCodeResponder({
       workdir: '/w',
       claudeSessionId: 'stable-sid',
-      createSession: (opts) => { capturedOpts = opts as Record<string, unknown>; return session; },
+      createSession: (opts) => { capturedOpts = opts as unknown as Record<string, unknown>; return session; },
     });
 
     await respond(task);
@@ -788,7 +788,7 @@ describe('createClaudeCodeResponder — persistent session path (#172)', () => {
       workdir: '/w',
       claudeSessionId: 'stable-sid',
       resume: true,
-      createSession: (opts) => { capturedOpts = opts as Record<string, unknown>; return session; },
+      createSession: (opts) => { capturedOpts = opts as unknown as Record<string, unknown>; return session; },
     });
 
     await respond(task);
@@ -986,9 +986,9 @@ describe('createClaudeCodeResponder — persistent session path (#172)', () => {
     respond.closeSession(); // null out `session` in the closure while send() is in flight
     sendReject(new Error('session disconnected'));
 
-    const err = await turnPromise.catch((e: unknown) => e as Error);
+    const err = await turnPromise.catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Error);
-    expect(err.message).toBe('session disconnected');
+    expect((err as Error).message).toBe('session disconnected');
   });
 
   it('spawns a new session with resume:true after closeSession() resets it (#172/#128)', async () => {
