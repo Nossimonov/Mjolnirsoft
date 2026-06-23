@@ -55,6 +55,15 @@ export interface DelegationManager {
    * already-live `id` is a no-op.
    */
   rewire(role: Role, id: string, sub: Channel, delegate: DelegateWiring): void;
+  /**
+   * Close the bridge wiring for `id` (driver seat on the sub-channel + reporter seat
+   * on the spawner's channel) without touching the delegate session or its sub-channel.
+   * The delegate keeps running; only the old generation's forwarding plumbing is
+   * removed. Used by the compaction restart (#204) so a new orchestrator generation
+   * can re-establish bridges via {@link rewire} without the old driver and reporter
+   * causing double-delivery.
+   */
+  detachBridgeForCompaction(id: string): void;
 }
 
 /**
@@ -120,9 +129,11 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
   // Per-manager monotonic counter — cosmetic only (keeps the role legible in logs
   // and gives a human-readable spawn order). Uniqueness comes from `generateToken`.
   let sequence = 0;
-  // Each live delegate keeps its `close` and its `driver` (the spawner's seat on the
-  // sub-channel) — the driver is how a follow-up reaches the delegate (#111).
-  const delegates = new Map<string, { close(): void; driver: Participant }>();
+  // Each live delegate keeps its `close`, its `driver` (the spawner's seat on the
+  // sub-channel), and its `reporter` (the delegate's seat on the spawner's channel).
+  // Storing the reporter alongside the driver enables detachBridgeForCompaction to
+  // close both bridge seats without touching the delegate session (#204).
+  const delegates = new Map<string, { close(): void; driver: Participant; reporter: Participant }>();
 
   return {
     spawn(role, openingTask) {
@@ -169,6 +180,7 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
 
       delegates.set(id, {
         driver,
+        reporter,
         close() {
           driver.close();
           reporter.close();
@@ -209,6 +221,7 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
       });
       delegates.set(id, {
         driver,
+        reporter,
         close() {
           driver.close();
           reporter.close();
@@ -216,6 +229,16 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
           sub.close();
         },
       });
+    },
+
+    detachBridgeForCompaction(id) {
+      const d = delegates.get(id);
+      if (!d) return;
+      delegates.delete(id);
+      d.driver.close();   // stop forwarding messages from the sub-channel
+      d.reporter.close(); // clean up the delegate's seat on the spawner's channel
+      // d.close() is intentionally NOT called: the delegate session and its
+      // sub-channel stay alive so the new orchestrator generation can rewire (#204).
     },
   };
 }

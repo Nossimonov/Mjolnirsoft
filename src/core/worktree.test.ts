@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorktreeManager, currentRemoteBase } from './worktree.ts';
 
+/** Returns the raw porcelain worktree list, useful for checking whether an admin entry survived prune. */
+const worktreeList = (repo: string) =>
+  execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: repo }).toString();
+
 const tempDirs: string[] = [];
 afterAll(() => {
   for (const dir of tempDirs) {
@@ -104,6 +108,50 @@ describe('WorktreeManager', () => {
   it('prune runs cleanly', () => {
     const mgr = new WorktreeManager({ repoDir: initRepo() });
     expect(() => mgr.prune()).not.toThrow();
+  });
+
+  it('prune with empty keepIds behaves identically to prune with no argument', () => {
+    const repo = initRepo();
+    const mgr = new WorktreeManager({ repoDir: repo });
+    expect(() => mgr.prune(new Set())).not.toThrow();
+    expect(() => mgr.prune(undefined)).not.toThrow();
+  });
+
+  it('prune(keepIds) protects a worktree admin entry even when its directory is missing (#204)', () => {
+    const repo = initRepo();
+    const mgr = new WorktreeManager({ repoDir: repo });
+    const wt = mgr.create('protected');
+
+    // Simulate a missing worktree directory (e.g. deleted by a rogue close during compaction).
+    rmSync(wt.path, { recursive: true, force: true });
+    expect(existsSync(wt.path)).toBe(false);
+
+    // With keepIds, the worktree admin entry is locked before pruning and unlocked after.
+    mgr.prune(new Set(['protected']));
+
+    // The admin entry should survive because it was locked during the prune.
+    expect(worktreeList(repo)).toContain('mjolnir/work/protected');
+  });
+
+  it('prune without keepIds removes orphaned admin entries for missing worktrees', () => {
+    const repo = initRepo();
+    const mgr = new WorktreeManager({ repoDir: repo });
+    const wt = mgr.create('orphan');
+
+    rmSync(wt.path, { recursive: true, force: true });
+    expect(existsSync(wt.path)).toBe(false);
+
+    // Without protection, git worktree prune removes the admin entry.
+    mgr.prune();
+
+    expect(worktreeList(repo)).not.toContain('mjolnir/work/orphan');
+  });
+
+  it('prune(keepIds) with an unregistered or invalid id is a graceful no-op', () => {
+    const repo = initRepo();
+    const mgr = new WorktreeManager({ repoDir: repo });
+    // 'nonexistent' is a valid id format but has no registered worktree — lock fails silently.
+    expect(() => mgr.prune(new Set(['nonexistent']))).not.toThrow();
   });
 
   it('reports whether a worktree already exists — the resume signal (#126)', () => {

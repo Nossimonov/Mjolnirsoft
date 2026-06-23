@@ -84,9 +84,44 @@ export class WorktreeManager {
     return existsSync(this.locate(id).path);
   }
 
-  /** Clear stale worktree registrations (e.g. after a killed executor left one behind). */
-  prune(): void {
-    this.git(['worktree', 'prune']);
+  /**
+   * Clear stale worktree registrations (e.g. after a killed executor left one behind).
+   * Worktrees in `keepIds` are locked before pruning and unlocked after, so their
+   * admin entries survive `git worktree prune` even if their directories are
+   * temporarily absent — protecting active-delegation worktrees from being
+   * unregistered during a compaction restart (#204).
+   */
+  prune(keepIds?: ReadonlySet<string>): void {
+    if (!keepIds || keepIds.size === 0) {
+      this.git(['worktree', 'prune']);
+      return;
+    }
+    const locked: string[] = [];
+    for (const id of keepIds) {
+      let path: string;
+      try {
+        ({ path } = this.locate(id));
+      } catch {
+        continue; // invalid id — skip
+      }
+      try {
+        this.git(['worktree', 'lock', path]);
+        locked.push(path);
+      } catch {
+        // Not registered or already locked — best-effort
+      }
+    }
+    try {
+      this.git(['worktree', 'prune']);
+    } finally {
+      for (const path of locked) {
+        try {
+          this.git(['worktree', 'unlock', path]);
+        } catch {
+          // Best-effort unlock
+        }
+      }
+    }
   }
 
   /** The on-disk path and branch name for `id` (validates the id). */
