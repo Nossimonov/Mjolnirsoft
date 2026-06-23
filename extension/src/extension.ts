@@ -125,10 +125,19 @@ export function activate(context: vscode.ExtensionContext): void {
   // cleanup, which can leave stale `git worktree` admin entries behind. Prune them on
   // activate so the worktree list stays tidy; the worktree *directories* themselves are
   // kept — they're how an interrupted session resumes (#126). No repo/git → ignore.
+  // Active-delegation worktrees are excluded from pruning (#204): read the orchestrator's
+  // delegation ledger and lock those worktrees before calling git worktree prune, so a
+  // compaction restart cannot unregister an in-flight delegate's worktree.
   const startupFolder = vscode.workspace.workspaceFolders?.[0];
   if (startupFolder) {
     try {
-      new WorktreeManager({ repoDir: startupFolder.uri.fsPath }).prune();
+      const repoDir = startupFolder.uri.fsPath;
+      const activeDelegateIds = new Set(
+        projectDelegationLedger(storeFor(startupFolder).logPath(ORCHESTRATOR_ID))
+          .filter((e) => e.active)
+          .map((e) => e.delegateId),
+      );
+      new WorktreeManager({ repoDir }).prune(activeDelegateIds);
     } catch {
       /* not a git repo, or git absent — nothing to prune */
     }
@@ -251,6 +260,15 @@ interface ProvisionedSession {
   readonly meter: UsageMeter;
   /** Tear down the agent + delegation host + MCP config, capture and drop the workspace. Returns whether anything was committed. Does NOT close the channel (the caller owns it). */
   close(): boolean;
+  /**
+   * Tear down the orchestrator's own resources for a compaction restart (#204):
+   * closes the agent, usage seat, and MCP config, but calls
+   * {@link DelegationHost.releaseForCompaction} instead of {@link DelegationHost.close},
+   * so live delegate sessions and their worktrees survive. The new generation
+   * re-establishes delegate bridges via the rewire scan. Only meaningful for the
+   * orchestrator (executor sessions use close() only).
+   */
+  closeForCompaction(): void;
 }
 
 /**
@@ -507,6 +525,18 @@ function provisionSession(args: {
         workspace.remove();
         return captured;
       },
+      closeForCompaction(): void {
+        liveSessions.delete(sessionId);
+        usageSeat?.close();
+        // Release the delegation host without shutting down live delegates: detaches
+        // old bridge wiring so there's no double-delivery, but preserves each
+        // delegate's session and worktree for the new orchestrator generation to rewire.
+        delegationHost.releaseForCompaction();
+        agent.close();
+        rmSync(configPath, { force: true });
+        workspace.commit(`Mjolnir ${role} session ${sessionId}`); // no-op for orchestrator
+        workspace.remove(); // no-op for orchestrator
+      },
     };
   } catch (error) {
     // Unwind the partial allocation so a failed provision leaves nothing behind:
@@ -750,9 +780,9 @@ function launchSession(
     // 4. Mark as compacted so onDispose doesn't double-close.
     compacted = true;
 
-    // 5. Tear down the old agent and MCP config (workspace.remove() is a no-op for
-    //    the orchestrator; the channel stays open until we explicitly close it below).
-    provisioned.close();
+    // 5. Tear down the old agent and MCP config, releasing (not closing) delegate
+    //    sessions so their worktrees survive for the new generation to rewire (#204).
+    provisioned.closeForCompaction();
 
     // 6. Close the command-level channel. The panel's own channel handle stays open
     //    (closed by the panel's onDidDispose), so it continues to display history.

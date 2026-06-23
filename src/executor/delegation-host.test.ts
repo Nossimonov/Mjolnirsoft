@@ -392,6 +392,128 @@ describe('createDelegationHost — rewireDelegate (#128)', () => {
   });
 });
 
+describe('createDelegationHost — releaseForCompaction (#204)', () => {
+  it('does not call close() on executor delegate sessions', async () => {
+    const { bridge, host, closedExecutorDelegates } = wire();
+
+    await bridge.spawn('executor', 'do the work');
+    await flush();
+    expect(closedExecutorDelegates()).toBe(0);
+
+    host.releaseForCompaction();
+
+    expect(closedExecutorDelegates()).toBe(0);
+  });
+
+  it('detaches the old bridge so subsequent delegate replies do not reach the spawner', async () => {
+    const { bridge, host, reports, subChannels } = wire({
+      provisionExecutorDelegate: (_role, id, sub) => {
+        const agentSeat = `${id}-executor`;
+        const agent = runExecutor(sub, agentSeat, async (m) => ({ type: 'result', payload: `done: ${m.payload}` }), 'executor');
+        return { reportFrom: agentSeat, close: agent.close };
+      },
+    });
+
+    const { delegateId: id } = await bridge.spawn('executor', 'task');
+    await flush();
+    expect(reports).toHaveLength(1);
+
+    host.releaseForCompaction();
+
+    // Driver is detached; a probe on the sub-channel cannot reach spawner reports.
+    const sub = subChannels.get(id!)!;
+    const probe = sub.join('probe', 'planner', () => {});
+    probe.send({ type: 'result', payload: 'late hand-off' });
+    await flush();
+
+    expect(reports).toHaveLength(1); // no double-delivery
+  });
+
+  it('a subsequent host.close() after releaseForCompaction does not close delegates', async () => {
+    const { bridge, host, closedExecutorDelegates } = wire();
+
+    await bridge.spawn('executor', 'task');
+    await flush();
+
+    host.releaseForCompaction();
+    host.close(); // spawned set is already clear — safe no-op for delegates
+
+    expect(closedExecutorDelegates()).toBe(0);
+  });
+
+  it('a delegate can be rewired after releaseForCompaction and its future replies bridge up', async () => {
+    // Simulate a compaction restart: the old host releases for compaction, then a new
+    // host (new orchestrator generation) wires the same delegate on a new sub-channel.
+    // The new delegate receives a follow-up and its reply bridges up to the spawner.
+    const spawnerChannel = new InMemoryChannel();
+    const reports: Message[] = [];
+    spawnerChannel.join('observer', 'planner', (m) => {
+      if (m.type !== 'delegation-request' && m.type !== 'delegation-response') reports.push(m);
+    });
+
+    const subChannels = new Map<string, InMemoryChannel>();
+    const openSubChannel = (id: string) => {
+      const sub = new InMemoryChannel();
+      subChannels.set(id, sub);
+      return sub;
+    };
+
+    let wiredIds: string[] = [];
+    const provisionExecutorDelegate: DelegationHostDeps['provisionExecutorDelegate'] = (
+      _role, id, sub, resuming,
+    ) => {
+      wiredIds.push(id);
+      const agentSeat = `${id}-executor`;
+      const agent = runExecutor(
+        sub,
+        agentSeat,
+        async (m) => ({ type: 'result', payload: resuming ? `resumed: ${String(m.payload)}` : `new: ${String(m.payload)}` }),
+        'executor',
+      );
+      return { reportFrom: agentSeat, close: agent.close };
+    };
+
+    // Build old host (first generation).
+    const oldHost = createDelegationHost({
+      spawnerChannel, spawnerId: 'orch', spawnerRole: 'orchestrator',
+      hostId: 'orch-delegation-host',
+      openSubChannel,
+      createResponder: (_role) => async (m) => ({ type: 'result', payload: String(m.payload) }),
+      provisionExecutorDelegate,
+    });
+
+    // Spawn a delegate through the old host.
+    const mcp = spawnerChannel.join('orch-delegate', 'orchestrator', (m) => bridge.handleMessage(m));
+    const bridge = createDelegationBridge(mcp.send);
+    const { delegateId: id } = await bridge.spawn('executor', 'initial task');
+    await flush();
+    expect(reports).toHaveLength(1);
+
+    // Compaction: release without closing delegates.
+    oldHost.releaseForCompaction();
+
+    // New orchestrator generation rewires the delegate on the same spawner channel.
+    const newHost = createDelegationHost({
+      spawnerChannel, spawnerId: 'orch', spawnerRole: 'orchestrator',
+      hostId: 'orch-delegation-host-gen2',
+      openSubChannel,
+      createResponder: (_role) => async (m) => ({ type: 'result', payload: String(m.payload) }),
+      provisionExecutorDelegate,
+    });
+    newHost.rewireDelegate('executor', id!);
+
+    // The rewired delegate's sub-channel has a live agent. Drive it via the sub-channel
+    // (simulating the delegate sending its hand-off).
+    const sub = subChannels.get(id!)!;
+    const driver = sub.join('orch-driver', 'orchestrator', () => {});
+    driver.send({ type: 'text', payload: 'follow-up from new generation' });
+    await flush();
+
+    expect(reports).toHaveLength(2);
+    expect(reports[1]).toMatchObject({ from: id, role: 'executor', type: 'result', payload: 'resumed: follow-up from new generation' });
+  });
+});
+
 describe('createDelegationHost — arbitrator-delegate mode (#99)', () => {
   it('provisions an arbitrator on the isolated-worktree path (not the critique responder)', async () => {
     const { bridge, provisioned, seen, subLogs } = wire();
