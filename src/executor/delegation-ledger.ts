@@ -60,19 +60,12 @@ export interface DelegationEntry {
 }
 
 /**
- * Read `logPath` and project every delegation spawned on that session.
- * Returns an empty array if the file is absent or unreadable.
- * Safe to call repeatedly on the same log — each call re-reads from disk,
- * so a reattaching orchestrator always recovers the current picture.
+ * Project every delegation from already-read JSONL content.
+ * The content-based form is the canonical parser; `projectDelegationLedger` wraps
+ * it with a synchronous file read for callers that need that (e.g. extension.ts
+ * reload rewire scan), while async callers pass the content directly.
  */
-export function projectDelegationLedger(logPath: string): DelegationEntry[] {
-  let content: string;
-  try {
-    content = readFileSync(logPath, 'utf8');
-  } catch {
-    return [];
-  }
-
+export function projectDelegationLedgerFromContent(content: string): DelegationEntry[] {
   const messages: Message[] = [];
   for (const line of content.split('\n')) {
     if (!line.trim()) continue;
@@ -161,6 +154,22 @@ export function projectDelegationLedger(logPath: string): DelegationEntry[] {
     reports: b.reports,
     active: b.active,
   }));
+}
+
+/**
+ * Read `logPath` and project every delegation spawned on that session.
+ * Returns an empty array if the file is absent or unreadable.
+ * Safe to call repeatedly on the same log — each call re-reads from disk,
+ * so a reattaching orchestrator always recovers the current picture.
+ */
+export function projectDelegationLedger(logPath: string): DelegationEntry[] {
+  let content: string;
+  try {
+    content = readFileSync(logPath, 'utf8');
+  } catch {
+    return [];
+  }
+  return projectDelegationLedgerFromContent(content);
 }
 
 /** Return the single entry whose delegateId matches exactly, or `undefined`. */

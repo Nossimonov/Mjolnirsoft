@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   projectDelegationLedger,
+  projectDelegationLedgerFromContent,
   findByDelegateId,
   findByTaskKey,
   LEDGER_REPORT_TYPES,
@@ -411,6 +412,55 @@ describe('delegation-ledger (#168)', () => {
 
       // The projected task is exactly what was in the payload — no transformation.
       expect(entries[0].task).toBe('the exact task text from the channel');
+    });
+  });
+
+  describe('projectDelegationLedgerFromContent (#182 — content-based projection)', () => {
+    it('returns empty array for empty string', () => {
+      expect(projectDelegationLedgerFromContent('')).toEqual([]);
+    });
+
+    it('produces identical entries to projectDelegationLedger for the same content', () => {
+      const content =
+        line(spawnRequest('req-1', 'evaluator', 'review for #182')) +
+        line(spawnResponse('req-1', 'orch-evaluator-1-abc')) +
+        line(report('orch-evaluator-1-abc', 'LGTM')) +
+        line(shutdownRequest('req-2', 'orch-evaluator-1-abc')) +
+        line(shutdownResponse('req-2', 'orch-evaluator-1-abc'));
+
+      writeFileSync(logPath, content);
+
+      const fromPath = projectDelegationLedger(logPath);
+      const fromContent = projectDelegationLedgerFromContent(content);
+
+      expect(fromContent).toEqual(fromPath);
+    });
+
+    it('projects a spawn into an active entry from raw content (no file read)', () => {
+      const content =
+        line(spawnRequest('req-1', 'evaluator', 'task from content')) +
+        line(spawnResponse('req-1', 'delegate-content-1'));
+
+      const entries = projectDelegationLedgerFromContent(content);
+
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        delegateId: 'delegate-content-1',
+        role: 'evaluator',
+        task: 'task from content',
+        active: true,
+      });
+    });
+
+    it('skips malformed JSON lines without throwing', () => {
+      const content =
+        line(spawnRequest('req-1', 'evaluator', 'task')) +
+        'not-json\n' +
+        line(spawnResponse('req-1', 'delegate-x'));
+
+      const entries = projectDelegationLedgerFromContent(content);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].delegateId).toBe('delegate-x');
     });
   });
 
