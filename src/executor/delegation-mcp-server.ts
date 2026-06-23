@@ -25,9 +25,10 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { promises as fsPromises } from 'node:fs';
 import { FileChannel } from '../core/file-channel.ts';
 import { createDelegationBridge } from './delegation-bridge.ts';
-import { projectDelegationLedger, findByDelegateId, findByTaskKey } from './delegation-ledger.ts';
+import { projectDelegationLedgerFromContent, findByDelegateId, findByTaskKey } from './delegation-ledger.ts';
 
 const logPath = process.env.MJOLNIR_SESSION_LOG;
 const participantId = process.env.MJOLNIR_DELEGATE_ID ?? 'delegation';
@@ -135,7 +136,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
   if (req.params.name === 'lookup_delegation') {
     const { delegateId, taskKey } = args;
-    const entries = projectDelegationLedger(logPath);
+    let logContent: string;
+    try {
+      logContent = await fsPromises.readFile(logPath, 'utf8');
+    } catch {
+      logContent = '';
+    }
+    const entries = projectDelegationLedgerFromContent(logContent);
     if (delegateId) {
       const entry = findByDelegateId(entries, delegateId);
       const text = entry
