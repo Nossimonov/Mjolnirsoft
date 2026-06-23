@@ -137,7 +137,7 @@ export function activate(context: vscode.ExtensionContext): void {
           .filter((e) => e.active)
           .map((e) => e.delegateId),
       );
-      new WorktreeManager({ repoDir }).prune(activeDelegateIds.size > 0 ? activeDelegateIds : undefined);
+      new WorktreeManager({ repoDir }).prune(activeDelegateIds);
     } catch {
       /* not a git repo, or git absent — nothing to prune */
     }
