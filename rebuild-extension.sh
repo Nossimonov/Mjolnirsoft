@@ -36,6 +36,15 @@ else
   exit 1
 fi
 
+# Type-check the extension workspace before building (mirrors CI's
+# `npm run check-types -w extension`). Resolves tsc via Node's module lookup so
+# npm need not be on the PATH.
+echo "Type-checking extension workspace..."
+TSC="$("$NODE" --input-type=commonjs -e "process.stdout.write(require.resolve('typescript/bin/tsc'))")"
+"$NODE" "$TSC" --noEmit -p extension/tsconfig.json
+echo "Extension workspace type-check passed."
+echo ""
+
 # Build from extension/ — esbuild.mjs uses paths relative to that directory.
 cd extension
 "$NODE" esbuild.mjs "$@"
