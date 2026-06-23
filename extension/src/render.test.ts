@@ -223,6 +223,32 @@ describe('renderInteractionRequest', () => {
     expect(html).not.toContain('<b>');
     expect(html).not.toContain('<i>x</i>');
   });
+
+  it('includes a free-text "can\'t answer" affordance with toggle, textarea, and send (#96)', () => {
+    const html = renderInteractionRequest({
+      requestId: 'q-cant',
+      toolName: 'AskUserQuestion',
+      input: {
+        questions: [{ question: 'Which approach?', options: [{ label: 'A' }, { label: 'B' }], multiSelect: false }],
+      },
+    });
+    // Toggle button — shown alongside Submit in the decision row
+    expect(html).toContain('cant-answer-toggle');
+    // Hidden reveal section keyed by the same request id (section carries its own copy
+    // so cant-answer-send can read it without navigating to .decision)
+    expect(html).toContain('cant-answer-section');
+    expect(html).toContain('data-request-id="q-cant"');
+    // Textarea and send button within the section
+    expect(html).toContain('cant-answer-input');
+    expect(html).toContain('cant-answer-send');
+    // The textarea placeholder signals the field is optional; when left blank the
+    // webview supplies a default: "Can't answer — none of the preset options fit."
+    // (see webview/main.ts: cant-answer-send handler — browser-side, not unit-tested here)
+    expect(html).toContain('(optional)');
+    // Preset options are still present — preset path unchanged
+    expect(html).toContain('data-label="A"');
+    expect(html).toContain('submit-answers');
+  });
 });
 
 describe('renderMessage — AskUserQuestion replay path (#161)', () => {

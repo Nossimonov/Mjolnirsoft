@@ -1023,6 +1023,7 @@ function openSessionPanel(
       requestId?: string;
       behavior?: 'allow' | 'deny' | 'always';
       answers?: Record<string, string | string[]>;
+      message?: string;
     }) => {
       if (event.kind === 'send' && event.text) {
         dispatchSend(event.text);
@@ -1065,11 +1066,16 @@ function openSessionPanel(
           // original input on a bare allow. "Always" is *our* side-effect — we
           // persist a learned allow rule for the action and then send a plain
           // `allow`, so the executor/MCP server never sees "always" (#70).
+          // A deny from a question card (the free-text "can't answer" path, #96)
+          // carries a `message` — pass it through so the agent can read and adapt.
           if (event.behavior === 'always' && request) {
             recordLearnedRule(projectDir, request.toolName, request.input);
           }
           const behavior = event.behavior === 'deny' ? 'deny' : 'allow';
-          participant.send({ type: INTERACTION_DECISION, payload: { requestId: event.requestId, behavior } });
+          participant.send({
+            type: INTERACTION_DECISION,
+            payload: { requestId: event.requestId, behavior, ...(event.message ? { message: event.message } : {}) },
+          });
         }
         // The executor resumes once it has our answer, so show "working" again.
         // (Interaction requests only come from a live executor, but stay honest.)
@@ -1190,6 +1196,21 @@ function renderHtml(
   .submit-answers { border: none; padding: 0.25rem 0.9rem; cursor: pointer; border-radius: 3px;
                     background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .submit-answers:disabled { opacity: 0.5; cursor: default; }
+  .cant-answer-toggle { background: transparent; color: var(--vscode-foreground);
+                        border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+                        border-radius: 3px; padding: 0.25rem 0.6rem; cursor: pointer; opacity: 0.75; font-size: 0.9em; }
+  .cant-answer-toggle:hover { opacity: 1; }
+  .cant-answer-toggle:disabled { opacity: 0.4; cursor: default; }
+  .cant-answer-section { margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.4rem; }
+  .cant-answer-input { background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+                       border: 1px solid var(--vscode-input-border); border-radius: 3px; padding: 0.3rem;
+                       font-family: inherit; font-size: 0.9em; resize: vertical; }
+  .cant-answer-input:disabled { opacity: 0.5; }
+  .cant-answer-send { align-self: flex-start; border: none; padding: 0.25rem 0.9rem; cursor: pointer;
+                      border-radius: 3px;
+                      background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+                      color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground)); }
+  .cant-answer-send:disabled { opacity: 0.5; cursor: default; }
 </style>
 </head>
 <body>

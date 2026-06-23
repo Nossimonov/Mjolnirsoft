@@ -194,6 +194,36 @@ content?.addEventListener('click', (event: MouseEvent) => {
     return;
   }
 
+  // "Can't answer" toggle: show/hide the free-text reply area.
+  if (button.classList.contains('cant-answer-toggle')) {
+    const turn = button.closest('.turn') as HTMLElement | null;
+    const section = turn?.querySelector('.cant-answer-section') as HTMLElement | null;
+    if (!section) return;
+    if (section.hasAttribute('hidden')) {
+      section.removeAttribute('hidden');
+      (section.querySelector('.cant-answer-input') as HTMLTextAreaElement | null)?.focus();
+    } else {
+      section.setAttribute('hidden', '');
+    }
+    return;
+  }
+
+  // Free-text "can't answer" submission: deny with a reason the agent reads (#96).
+  if (button.classList.contains('cant-answer-send')) {
+    const section = button.closest('.cant-answer-section') as HTMLElement | null;
+    const requestId = section?.getAttribute('data-request-id');
+    const textarea = section?.querySelector('.cant-answer-input') as HTMLTextAreaElement | null;
+    if (!section || !requestId) return;
+    const message = textarea?.value.trim() || "Can't answer — none of the preset options fit.";
+    vscode.postMessage({ kind: 'decision', requestId, behavior: 'deny', message });
+    const turn = section.closest('.turn') as HTMLElement | null;
+    const decisionDiv = turn?.querySelector('.decision') as HTMLElement | null;
+    if (decisionDiv) lockCard(decisionDiv, "can't answer — explanation sent");
+    section.querySelectorAll('button').forEach((b) => ((b as HTMLButtonElement).disabled = true));
+    if (textarea) textarea.disabled = true;
+    return;
+  }
+
   // Clarifying-question option: single-select replaces, multi-select toggles.
   if (button.classList.contains('opt')) {
     const question = button.closest('.question') as HTMLElement | null;
@@ -233,6 +263,12 @@ content?.addEventListener('click', (event: MouseEvent) => {
     vscode.postMessage({ kind: 'decision', requestId, behavior: 'allow', answers });
     turn.querySelectorAll('.opt').forEach((opt) => ((opt as HTMLButtonElement).disabled = true));
     lockCard(card, 'answer sent');
+    // Also lock the "can't answer" section if the architect had opened it before
+    // choosing a preset — prevents a stale "Send explanation" from posting a second decision.
+    const cantAnswerSection = turn.querySelector('.cant-answer-section') as HTMLElement | null;
+    cantAnswerSection?.querySelectorAll('button').forEach((b) => ((b as HTMLButtonElement).disabled = true));
+    const cantAnswerTextarea = cantAnswerSection?.querySelector('.cant-answer-input') as HTMLTextAreaElement | null;
+    if (cantAnswerTextarea) cantAnswerTextarea.disabled = true;
     return;
   }
 });
