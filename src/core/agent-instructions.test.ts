@@ -364,6 +364,33 @@ describe('investigator role (#166)', () => {
   });
 });
 
+describe('orchestrator delegate interaction guardrails (#218)', () => {
+  it('ORCHESTRATOR_OPERATIONS prohibits unsolicited delegate shutdown — permanent', () => {
+    expect(ORCHESTRATOR_OPERATIONS).toContain(
+      'Never shut down a delegate unless the architect explicitly instructs it',
+    );
+  });
+
+  it('ORCHESTRATOR_OPERATIONS prohibits unsolicited delegate messages — interim until #172', () => {
+    expect(ORCHESTRATOR_OPERATIONS).toContain('Do not send unsolicited messages to a delegate');
+    expect(ORCHESTRATOR_OPERATIONS).toContain('#172');
+  });
+
+  it('ORCHESTRATOR_OPERATIONS preserves the solicited-question exception in the messaging guardrail', () => {
+    expect(ORCHESTRATOR_OPERATIONS).toContain('solicited operational question');
+  });
+
+  it("ORCHESTRATOR_OPERATIONS states the architect's observations are information, not instructions to act on a delegate", () => {
+    expect(ORCHESTRATOR_OPERATIONS).toContain('not instructions to message a delegate');
+  });
+
+  it('the guardrails are present in the composed orchestrator instructions', () => {
+    const composed = composeAgentInstructions('orchestrator');
+    expect(composed).toContain('Do not send unsolicited messages to a delegate');
+    expect(composed).toContain('Never shut down a delegate unless the architect explicitly instructs it');
+  });
+});
+
 describe('orchestrator architect-directed compaction and drift-safeguard (#165)', () => {
   it('ORCHESTRATOR_OPERATIONS contains the architect-directed compaction clause', () => {
     // The clause still uses mcp__compact__request (the tool is unchanged) and requires
