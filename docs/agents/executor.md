@@ -4,6 +4,12 @@ Project-specific guidance for the executor role. The extension's executor role l
 
 ---
 
+## Local Verification Gate
+
+Before handing off, run `bash rebuild-extension.sh`. The script type-checks the extension workspace (`tsc --noEmit` against `extension/tsconfig.json`) **and then** builds the bundle; it fails fast on type errors, matching what CI runs via `npm run check-types -w extension`.
+
+---
+
 ## No Speculative Design in Artifacts
 
 Every artifact that outlives the conversation — code comments, type signatures, function docstrings, inline notes — reads as endorsed direction once written. Future sessions (and the architect) treat them as real things, and work gets scoped against the invention.
