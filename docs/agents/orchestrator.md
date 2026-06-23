@@ -134,6 +134,20 @@ Every issue gets exactly **one** type label at creation: `epic`, `feature`, `use
 
 ### Creating an Issue (full sequence — all steps mandatory)
 
+**Use `scripts/file-issue.sh` instead of running these steps manually.** It performs all three steps atomically and refuses (non-zero exit, clear message) if the type label or parent is omitted. Example:
+
+```bash
+./scripts/file-issue.sh \
+  --title "My issue title" \
+  --body "As a user..." \
+  --label user-story \
+  --parent 71 \
+  [--extra-label blocked]
+# Prints: Issue #N: labeled 'user-story', on the project board, parented under #71.
+```
+
+Add `--dry-run` to validate inputs and preview the intent without any API calls. The manual steps below document what the script does for reference.
+
 ```bash
 # 1. Create with its type label
 NUMBER=$(gh issue create --repo Nossimonov/Mjolnirsoft \
