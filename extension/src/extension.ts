@@ -758,6 +758,14 @@ function launchSession(
         agentId: provisioned.agentId,
         thresholdMs: idleThresholdMs,
         participantId: `${sessionId}-idle-observer`,
+        // Activity gate (#167): exclude the compaction hand-off message (the first
+        // turn of a freshly-restarted generation) and our own injected prompts, so the
+        // trigger does not re-arm after a compaction whose new generation has only
+        // processed its launch hand-off and gone idle (which would loop indefinitely).
+        internalSenderIds: new Set([
+          `${sessionId}-compaction-handoff`,
+          `${sessionId}-idle-trigger`,
+        ]),
         onFire: () => {
           // Inject a planner-attributed 'text' prompt so the orchestrator's next turn
           // writes its self-hand-off and calls mcp__compact__request. This reuses the

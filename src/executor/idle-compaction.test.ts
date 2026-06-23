@@ -224,3 +224,121 @@ describe('createIdleCompactionTrigger (#167)', () => {
     trigger.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Activity gate (internalSenderIds) — prevents the compact→restart→compact loop (#167)
+// ---------------------------------------------------------------------------
+
+describe('createIdleCompactionTrigger — activity gate (#167)', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  const HANDOFF_ID = 'orchestrator-compaction-handoff';
+  const IDLE_TRIGGER_ID = 'orchestrator-idle-trigger';
+  const INTERNAL_IDS = new Set([HANDOFF_ID, IDLE_TRIGGER_ID]);
+
+  function setupGated(thresholdMs = THRESHOLD_MS) {
+    const channel = new InMemoryChannel();
+    const fired: number[] = [];
+    const trigger = createIdleCompactionTrigger({
+      channel,
+      agentId: AGENT_ID,
+      thresholdMs,
+      participantId: 'idle-observer',
+      internalSenderIds: INTERNAL_IDS,
+      onFire: () => fired.push(Date.now()),
+    });
+    const agentSeat = channel.join(AGENT_ID, 'orchestrator', () => {});
+    const plannerSeat = channel.join('real-planner', 'planner', () => {});
+    const handoffSeat = channel.join(HANDOFF_ID, 'planner', () => {});
+    const idleTriggerSeat = channel.join(IDLE_TRIGGER_ID, 'planner', () => {});
+    const delegateSeat = channel.join('delegate-executor-1', 'executor', () => {});
+    return { channel, trigger, fired, agentSeat, plannerSeat, handoffSeat, idleTriggerSeat, delegateSeat };
+  }
+
+  it('does not fire when generation has only processed its launch hand-off and gone idle', () => {
+    const { fired, agentSeat, handoffSeat, trigger } = setupGated();
+    // Simulate compaction restart: hand-off is the first (and only) turn
+    handoffSeat.send({ type: 'text', payload: 'Your hand-off: current goal is...' });
+    agentSeat.send({ type: 'result', payload: 'picked up hand-off, awaiting next task' });
+    vi.advanceTimersByTime(THRESHOLD_MS + 15_000);
+    expect(fired).toHaveLength(0); // hand-off turn is not real activity
+    trigger.close();
+  });
+
+  it('fires after a subsequent real architect turn following the hand-off', () => {
+    const { fired, agentSeat, handoffSeat, plannerSeat, trigger } = setupGated();
+    // Hand-off turn — does NOT arm the trigger
+    handoffSeat.send({ type: 'text', payload: 'Your hand-off: current goal is...' });
+    agentSeat.send({ type: 'result', payload: 'picked up hand-off' });
+    // Architect returns with a real task — this is the activity that arms the trigger
+    plannerSeat.send({ type: 'text', payload: 'Continue with issue #200' });
+    agentSeat.send({ type: 'result', payload: 'delegated #200' });
+    vi.advanceTimersByTime(THRESHOLD_MS + 15_000);
+    expect(fired).toHaveLength(1);
+    trigger.close();
+  });
+
+  it('a bridged delegate result counts as external activity (dominant delegate-wait case)', () => {
+    const { fired, agentSeat, handoffSeat, delegateSeat, trigger } = setupGated();
+    // Hand-off turn (e.g. "I was waiting for delegate X")
+    handoffSeat.send({ type: 'text', payload: 'Your hand-off: delegate running...' });
+    agentSeat.send({ type: 'result', payload: 'picked up hand-off, delegate bridge re-established' });
+    // Delegate reports back via bridge — this IS real external activity
+    delegateSeat.send({ type: 'result', payload: 'delegate finished task' });
+    agentSeat.send({ type: 'result', payload: 'integrated delegate result' });
+    vi.advanceTimersByTime(THRESHOLD_MS + 15_000);
+    expect(fired).toHaveLength(1);
+    trigger.close();
+  });
+
+  it('the injected idle-trigger prompt itself does not count as activity (prevents double-fire)', () => {
+    const { fired, agentSeat, idleTriggerSeat, trigger } = setupGated();
+    // Simulate the scenario: idle prompt injected but orchestrator produces no handoff call
+    // (edge case — normally compaction follows, but guard the re-arm path regardless)
+    idleTriggerSeat.send({ type: 'text', payload: 'Please compact now...' });
+    agentSeat.send({ type: 'result', payload: 'did something' });
+    vi.advanceTimersByTime(THRESHOLD_MS + 15_000);
+    expect(fired).toHaveLength(0); // idle-trigger prompt is internal — does not arm
+    trigger.close();
+  });
+
+  it('without internalSenderIds, any completed turn arms the trigger (backward-compatible)', () => {
+    // Original behaviour preserved: no gate → any agent result sets lastTurnCompletedAt.
+    const channel = new InMemoryChannel();
+    const fired: number[] = [];
+    const trigger = createIdleCompactionTrigger({
+      channel,
+      agentId: AGENT_ID,
+      thresholdMs: THRESHOLD_MS,
+      participantId: 'idle-observer',
+      // no internalSenderIds
+      onFire: () => fired.push(Date.now()),
+    });
+    const agentSeat = channel.join(AGENT_ID, 'orchestrator', () => {});
+    agentSeat.send({ type: 'result', payload: 'done' }); // no prior external message needed
+    vi.advanceTimersByTime(THRESHOLD_MS + 15_000);
+    expect(fired).toHaveLength(1);
+    trigger.close();
+    channel.close();
+  });
+
+  it('empty internalSenderIds behaves like no gate (backward-compatible)', () => {
+    const channel = new InMemoryChannel();
+    const fired: number[] = [];
+    const trigger = createIdleCompactionTrigger({
+      channel,
+      agentId: AGENT_ID,
+      thresholdMs: THRESHOLD_MS,
+      participantId: 'idle-observer',
+      internalSenderIds: new Set(), // empty set → no gate
+      onFire: () => fired.push(Date.now()),
+    });
+    const agentSeat = channel.join(AGENT_ID, 'orchestrator', () => {});
+    agentSeat.send({ type: 'result', payload: 'done' });
+    vi.advanceTimersByTime(THRESHOLD_MS + 15_000);
+    expect(fired).toHaveLength(1);
+    trigger.close();
+    channel.close();
+  });
+});
