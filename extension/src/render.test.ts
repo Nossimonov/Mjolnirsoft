@@ -467,6 +467,19 @@ describe('linkifySessionIds (#186)', () => {
     expect(html).not.toContain('data-open-session');
   });
 
+  it('correctly linkifies both a shorter and a longer id when both appear in the text', () => {
+    // Both ids are in the session list; each must be independently linkified without
+    // the shorter one matching inside the longer one or its linkified markup.
+    const html = linkifySessionIds(
+      '<p>executor-1 and executor-10 are both running</p>',
+      ['executor-1', 'executor-10'],
+    );
+    expect(html).toContain('data-open-session="executor-1"');
+    expect(html).toContain('data-open-session="executor-10"');
+    expect((html.match(/data-open-session="executor-1"/g) ?? []).length).toBe(1);
+    expect((html.match(/data-open-session="executor-10"/g) ?? []).length).toBe(1);
+  });
+
   it('does not touch attribute values — only inter-tag text is processed', () => {
     // The id inside an existing href or data attribute must not be double-wrapped.
     const html = linkifySessionIds('<a href="executor-1">executor-1</a>', ['executor-1']);
