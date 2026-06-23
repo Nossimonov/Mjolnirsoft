@@ -33,7 +33,7 @@ import { createIdleCompactionTrigger, type IdleCompactionTrigger } from '../../s
 import { inspectSession, orchestratorSessionKey } from '../../src/executor/session-inspector.ts';
 import { projectDelegationLedger } from '../../src/executor/delegation-ledger.ts';
 import { REASONING_DIGEST } from '../../src/executor/reasoning-digest.ts';
-import { renderMessage, renderInteractionRequest, renderReasoningDigestLive } from './render.ts';
+import { renderMessage, renderInteractionRequest, renderReasoningDigestLive, linkifySessionIds } from './render.ts';
 
 // The MCP server is named `perm` in the generated config, so its `approve` tool
 // is addressed as `mcp__perm__approve` to `--permission-prompt-tool`.
@@ -180,6 +180,7 @@ export function activate(context: vscode.ExtensionContext): void {
             meter: live.meter,
             onOpen: () => panelTracker.track(sessionId),
             onDispose: () => panelTracker.untrack(sessionId),
+            openSession: (id) => openSessionById(id, context, startupFolder, restoreStore, liveSessions, panelTracker),
           });
         } else {
           const { role } = inspectSession(restoreStore.logPath(sessionId), sessionId);
@@ -189,6 +190,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // Ended cleanly (or no git repo) — restore as a viewer-only replay (already tracked).
         openSessionPanel(context, restoreStore, sessionId, repoDir, liveSessions, {
           onDispose: () => panelTracker.untrack(sessionId),
+          openSession: (id) => openSessionById(id, context, startupFolder, restoreStore, liveSessions, panelTracker),
         });
       }
     }
@@ -215,43 +217,9 @@ export function activate(context: vscode.ExtensionContext): void {
       await startSession(context, folder, store, 'executor', liveSessions, panelTracker);
       return;
     }
-    // The orchestrator is the singleton front door (#123): attach if live, else resume
-    // its one conversation — it has no worktree, so the worktree-resume path below doesn't apply.
-    if (pick === ORCHESTRATOR_ID) {
-      openOrchestrator(context, folder, store, liveSessions, undefined, panelTracker);
-      return;
-    }
-
-    // Attach to the live session if one is running (its reasoning + agent seat +
-    // role label, #114).
-    const live = liveSessions.get(pick);
-    if (live) {
-      openSessionPanel(context, store, pick, folder.uri.fsPath, liveSessions, {
-        executorAttached: true,
-        executorId: live.agentId,
-        reasoning: live.reasoning,
-        agentLabel: live.role,
-        model: live.model,
-        meter: live.meter,
-        onOpen: () => panelTracker.track(pick),
-        onDispose: () => panelTracker.untrack(pick),
-      });
-      return;
-    }
-
-    // Not live in this host. If its worktree still exists, the session was interrupted
-    // by a reload (a clean close removes the worktree) — resume it live on that
-    // worktree, recovering its role from the log (#126). Otherwise it ended cleanly:
-    // open a viewer-only replay.
-    if (new WorktreeManager({ repoDir: folder.uri.fsPath }).exists(pick)) {
-      const role = inspectSession(store.logPath(pick), pick).role ?? 'executor';
-      launchSession(context, folder, store, pick, role, liveSessions, true, undefined, panelTracker);
-      return;
-    }
-    openSessionPanel(context, store, pick, folder.uri.fsPath, liveSessions, {
-      onOpen: () => panelTracker.track(pick),
-      onDispose: () => panelTracker.untrack(pick),
-    });
+    // Dispatch through the shared open-by-id path (#186): handles orchestrator,
+    // live attach, interrupted resume, and ended viewer all in one place.
+    openSessionById(pick, context, folder, store, liveSessions, panelTracker);
   });
 
   const startExecutor = vscode.commands.registerCommand('mjolnirsoft.startExecutorSession', async () => {
@@ -551,6 +519,53 @@ function provisionSession(args: {
 }
 
 /**
+ * Open a session by id using the same dispatch as the front-door picker (#186/#139):
+ * attach to live wiring if running, resume an interrupted session, or open a viewer
+ * for an ended one. Used by session-link clicks in rendered markdown so the architect
+ * can navigate directly from a summary to the named session.
+ */
+function openSessionById(
+  sessionId: string,
+  context: vscode.ExtensionContext,
+  folder: vscode.WorkspaceFolder,
+  store: SessionStore,
+  liveSessions: LiveSessions,
+  tracker?: PanelTracker,
+): void {
+  if (sessionId === ORCHESTRATOR_ID) {
+    openOrchestrator(context, folder, store, liveSessions, undefined, tracker);
+    return;
+  }
+  if (!store.list().includes(sessionId)) return; // id not known — ignore stale link
+  const openChild = (id: string) => openSessionById(id, context, folder, store, liveSessions, tracker);
+  const live = liveSessions.get(sessionId);
+  if (live) {
+    openSessionPanel(context, store, sessionId, folder.uri.fsPath, liveSessions, {
+      executorAttached: true,
+      executorId: live.agentId,
+      reasoning: live.reasoning,
+      agentLabel: live.role,
+      model: live.model,
+      meter: live.meter,
+      onOpen: () => tracker?.track(sessionId),
+      onDispose: () => tracker?.untrack(sessionId),
+      openSession: openChild,
+    });
+    return;
+  }
+  if (new WorktreeManager({ repoDir: folder.uri.fsPath }).exists(sessionId)) {
+    const role = inspectSession(store.logPath(sessionId), sessionId).role ?? 'executor';
+    launchSession(context, folder, store, sessionId, role, liveSessions, true, undefined, tracker);
+    return;
+  }
+  openSessionPanel(context, store, sessionId, folder.uri.fsPath, liveSessions, {
+    onOpen: () => tracker?.track(sessionId),
+    onDispose: () => tracker?.untrack(sessionId),
+    openSession: openChild,
+  });
+}
+
+/**
  * Open *the* orchestrator (#123): the singleton coordinator, addressed by a fixed id
  * with no name prompt. Attach to it if it's already live in this host; otherwise launch
  * it — resuming its one conversation when it has run before. It works out of the main
@@ -570,6 +585,7 @@ function openOrchestrator(
   tracker?: PanelTracker,
 ): void {
   const live = liveSessions.get(ORCHESTRATOR_ID);
+  const openChild = (id: string) => openSessionById(id, context, folder, store, liveSessions, tracker);
   if (live) {
     openSessionPanel(context, store, ORCHESTRATOR_ID, folder.uri.fsPath, liveSessions, {
       executorAttached: true,
@@ -580,6 +596,7 @@ function openOrchestrator(
       meter: live.meter,
       onOpen: () => tracker?.track(ORCHESTRATOR_ID),
       onDispose: () => tracker?.untrack(ORCHESTRATOR_ID),
+      openSession: openChild,
     });
     return;
   }
@@ -804,6 +821,7 @@ function launchSession(
           : `${capitalize(role)} session "${sessionId}" ended${captured || !provisioned.branch ? '' : ' — it made no changes'}${onBranch}.`,
       );
     },
+    openSession: (id) => openSessionById(id, context, folder, store, liveSessions, tracker),
   });
   const onBranch = provisioned.branch ? ` on branch ${provisioned.branch}` : '';
   void vscode.window.showInformationMessage(
@@ -884,6 +902,8 @@ function openSessionPanel(
     model?: string;
     /** This session's token meter (#116); its running total (incl. sub-agents) shows in the header. */
     meter?: UsageMeter;
+    /** Open a session by id when a session-link in the rendered HTML is clicked (#186). */
+    openSession?: (id: string) => void;
   } = {},
 ): void {
   const executorAttached = options.executorAttached ?? false;
@@ -956,6 +976,10 @@ function openSessionPanel(
   // has no live meter to drive the header. A live session ignores these (its meter,
   // which already counts the same turns plus sub-agents, owns the header).
   let replayedUsage = ZERO_USAGE;
+  // Linkify session ids in rendered HTML (#186): snapshot the known ids at render
+  // time so newly spawned sessions are included without extra state to maintain.
+  const linkify = (html: string): string =>
+    linkifySessionIds(html, [...new Set([...store.list(), ...liveSessions.keys()])]);
   const participant = channel.join('vscode-view', 'planner', (message) => {
     // Delegation control messages (#93) are plumbing between the executor's MCP
     // server and the in-host delegation manager — not conversation. Skip them so
@@ -991,7 +1015,7 @@ function openSessionPanel(
     if (message.type === INTERACTION_REQUEST) {
       const request = message.payload as InteractionRequest;
       pendingRequests.set(request.requestId, request);
-      void panel.webview.postMessage({ kind: 'message', html: renderInteractionRequest(request) });
+      void panel.webview.postMessage({ kind: 'message', html: linkify(renderInteractionRequest(request)) });
       return;
     }
     // The durable reasoning digest (#110) lands just before the turn's result, and
@@ -1007,11 +1031,11 @@ function openSessionPanel(
       } else {
         // Replay/viewer: no live box existed (the stream is per live session), so
         // render the digest as its own collapsed box in the conversation.
-        void panel.webview.postMessage({ kind: 'message', html: renderMessage(message, modelFor(message.from)) });
+        void panel.webview.postMessage({ kind: 'message', html: linkify(renderMessage(message, modelFor(message.from))) });
       }
       return;
     }
-    void panel.webview.postMessage({ kind: 'message', html: renderMessage(message, modelFor(message.from)) });
+    void panel.webview.postMessage({ kind: 'message', html: linkify(renderMessage(message, modelFor(message.from))) });
     // Only the executor's own reply settles a sent turn. A bridged delegate
     // report (#93) — e.g. an evaluator's finding — renders above, but the executor
     // is still mid-turn (about to react to it), so it must not advance the queue or
@@ -1072,6 +1096,7 @@ function openSessionPanel(
       behavior?: 'allow' | 'deny' | 'always';
       answers?: Record<string, string | string[]>;
       message?: string;
+      id?: string;
     }) => {
       if (event.kind === 'send' && event.text) {
         dispatchSend(event.text);
@@ -1130,6 +1155,9 @@ function openSessionPanel(
         if (executorAttached) {
           void panel.webview.postMessage({ kind: 'working', on: true });
         }
+      } else if (event.kind === 'open-session' && event.id && options.openSession) {
+        // Session-link click (#186): open the named session via the front-door dispatch.
+        options.openSession(event.id);
       }
     },
   );
@@ -1211,6 +1239,10 @@ function renderHtml(
   .digest-tool { margin: 0.25rem 0; }
   .digest-tool > summary { cursor: pointer; user-select: none; }
   .digest-label { font-size: 0.8em; opacity: 0.7; margin-top: 0.25rem; }
+  /* Clickable session-id links (#186): styled as links using the VS Code theme colours. */
+  .session-link { cursor: pointer; color: var(--vscode-textLink-foreground, #4daafc);
+                  text-decoration: underline; text-underline-offset: 2px; }
+  .session-link:hover { color: var(--vscode-textLink-activeForeground, #4daafc); }
   #queued { padding: 0.25rem 1rem; font-size: 0.85em; opacity: 0.75; }
   #queued[hidden] { display: none; }
   #notice { padding: 0.25rem 1rem; font-size: 0.85em; color: var(--vscode-inputValidation-warningForeground, #cca700); }

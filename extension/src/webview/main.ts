@@ -164,6 +164,15 @@ function lockCard(card: HTMLElement, note: string): void {
 }
 
 content?.addEventListener('click', (event: MouseEvent) => {
+  // Session-link clicks (#186): a rendered session id opens that session's view.
+  const link = (event.target as HTMLElement).closest('a[data-open-session]') as HTMLElement | null;
+  if (link) {
+    event.preventDefault();
+    const id = link.getAttribute('data-open-session');
+    if (id) vscode.postMessage({ kind: 'open-session', id });
+    return;
+  }
+
   const button = (event.target as HTMLElement).closest('button');
   if (!button) return;
 

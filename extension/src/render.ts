@@ -38,6 +38,11 @@ function createMarkdown(options: ConstructorParameters<typeof MarkdownIt>[0] = {
 const md = createMarkdown();
 const mdComposed = createMarkdown({ breaks: true });
 
+/** Escape a string for literal use inside a regular-expression pattern. */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function escapeHtml(value: string): string {
   // Also escapes quotes so the same helper is safe inside `data-` attributes
   // (question text and option labels are carried there for the webview).
@@ -63,6 +68,30 @@ export function renderMarkdown(markdown: string): string {
  */
 export function renderComposed(markdown: string): string {
   return mdComposed.render(markdown);
+}
+
+/**
+ * Post-process rendered HTML so every known session id in text content becomes
+ * a clickable `<a class="session-link" data-open-session="id">` element (#186).
+ * Only whole ids are matched — a shorter id that is a prefix of a longer one
+ * in the same text won't spuriously linkify inside the longer one. Attribute
+ * values and tag names are left untouched; only text between tags is processed.
+ * The webview intercepts clicks on these elements and posts `open-session` to
+ * the extension host.
+ */
+export function linkifySessionIds(html: string, sessionIds: readonly string[]): string {
+  if (sessionIds.length === 0) return html;
+  const pattern = sessionIds.map(escapeRegex).join('|');
+  // Negative look-around ensures the full session id matches, not a prefix/suffix.
+  // Session ids use [A-Za-z0-9_-], so these characters can't adjoin a real boundary.
+  const re = new RegExp(`(?<![A-Za-z0-9_-])(${pattern})(?![A-Za-z0-9_-])`, 'g');
+  // Split on HTML tags so only inter-tag text is processed; attribute values
+  // (inside <...>) pass through unchanged.
+  return html.replace(/(<[^>]*>)|([^<]+)/g, (_match, tag: string | undefined, text: string | undefined) => {
+    if (tag !== undefined) return tag;
+    if (!text) return text ?? '';
+    return text.replace(re, (id) => `<a class="session-link" data-open-session="${escapeHtml(id)}">${escapeHtml(id)}</a>`);
+  });
 }
 
 /** A stable hue (0–359) for a sender id, so each participant gets a consistent colour. */

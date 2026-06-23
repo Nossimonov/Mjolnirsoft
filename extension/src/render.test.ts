@@ -6,6 +6,7 @@ import {
   hueForSender,
   renderInteractionRequest,
   renderReasoningDigestLive,
+  linkifySessionIds,
 } from './render.ts';
 import type { Message } from '../../src/core/channel.ts';
 import type { InteractionRequest } from '../../src/core/interaction.ts';
@@ -444,5 +445,83 @@ describe('renderMessage — reasoning digest (#110)', () => {
     expect(html).toContain('💭 Reasoning…'); // in-progress label, not the final counts
     expect(html).toContain('class="digest-thinking"');
     expect(html).toContain('⚙ Bash'); // same entry markup as the persisted render
+  });
+});
+
+describe('linkifySessionIds (#186)', () => {
+  it('wraps a known session id in a clickable element with data-open-session', () => {
+    const html = linkifySessionIds('<p>executor-1 is running</p>', ['executor-1']);
+    expect(html).toContain('class="session-link"');
+    expect(html).toContain('data-open-session="executor-1"');
+    expect(html).toContain('>executor-1<');
+  });
+
+  it('returns the html unchanged when the session list is empty', () => {
+    const html = '<p>executor-1</p>';
+    expect(linkifySessionIds(html, [])).toBe(html);
+  });
+
+  it('does not linkify an id that is a prefix of a longer id in the text', () => {
+    // "executor-1" must not match inside "executor-10"
+    const html = linkifySessionIds('<p>executor-10 started</p>', ['executor-1']);
+    expect(html).not.toContain('data-open-session');
+  });
+
+  it('correctly linkifies both a shorter and a longer id when both appear in the text', () => {
+    // Both ids are in the session list; each must be independently linkified without
+    // the shorter one matching inside the longer one or its linkified markup.
+    const html = linkifySessionIds(
+      '<p>executor-1 and executor-10 are both running</p>',
+      ['executor-1', 'executor-10'],
+    );
+    expect(html).toContain('data-open-session="executor-1"');
+    expect(html).toContain('data-open-session="executor-10"');
+    expect((html.match(/data-open-session="executor-1"/g) ?? []).length).toBe(1);
+    expect((html.match(/data-open-session="executor-10"/g) ?? []).length).toBe(1);
+  });
+
+  it('does not touch attribute values — only inter-tag text is processed', () => {
+    // The id inside an existing href or data attribute must not be double-wrapped.
+    const html = linkifySessionIds('<a href="executor-1">executor-1</a>', ['executor-1']);
+    // The text node "executor-1" is linkified; the href value is left alone.
+    expect(html).toContain('data-open-session="executor-1"');
+    // Confirm the href is not mangled (still contains the raw value, not wrapped HTML).
+    expect(html).toContain('href="executor-1"');
+  });
+
+  it('linkifies multiple occurrences of the same id', () => {
+    const html = linkifySessionIds('<p>executor-1 and executor-1 again</p>', ['executor-1']);
+    const matches = html.match(/data-open-session="executor-1"/g);
+    expect(matches).toHaveLength(2);
+  });
+
+  it('linkifies multiple different ids in the same text', () => {
+    const html = linkifySessionIds(
+      '<p>executor-1 and executor-2 started</p>',
+      ['executor-1', 'executor-2'],
+    );
+    expect(html).toContain('data-open-session="executor-1"');
+    expect(html).toContain('data-open-session="executor-2"');
+  });
+
+  it('does not linkify unknown text that happens to look like a session id', () => {
+    const html = linkifySessionIds('<p>my-random-id appeared</p>', ['known-session']);
+    expect(html).not.toContain('data-open-session');
+    expect(html).toContain('my-random-id'); // unchanged
+  });
+
+  it('HTML-escapes special characters in a session id used in the element', () => {
+    // Session ids can only use [A-Za-z0-9_-], so this is a defensive test that
+    // confirms the escaping path is exercised even for normal ids.
+    const html = linkifySessionIds('<p>my-session</p>', ['my-session']);
+    expect(html).toContain('data-open-session="my-session"');
+    expect(html).toContain('>my-session<');
+  });
+
+  it('linkifies a session id that appears in a markdown-rendered paragraph', () => {
+    const rendered = renderMarkdown('The delegate **executor-abc** is in-flight.');
+    const linkified = linkifySessionIds(rendered, ['executor-abc']);
+    expect(linkified).toContain('data-open-session="executor-abc"');
+    expect(linkified).toContain('<strong>'); // Markdown rendering unchanged
   });
 });
