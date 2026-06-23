@@ -88,4 +88,18 @@ describe('decisionToVerdict', () => {
     const verdict = decisionToVerdict(request, { requestId: 'r1', behavior: 'deny' });
     expect(verdict).toEqual({ behavior: 'deny', message: 'Denied by the architect.' });
   });
+
+  it('passes a free-text reason through on deny — the "can\'t answer" question-card path (#96)', () => {
+    // The architect typed a reason in the free-text field; it must reach the agent verbatim
+    // so the agent can re-ask with the context the architect said was missing.
+    const verdict = decisionToVerdict(request, {
+      requestId: 'r1',
+      behavior: 'deny',
+      message: "I can't see the referenced content — please include it directly in the question.",
+    });
+    expect(verdict).toEqual({
+      behavior: 'deny',
+      message: "I can't see the referenced content — please include it directly in the question.",
+    });
+  });
 });

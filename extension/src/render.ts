@@ -288,6 +288,11 @@ function renderQuestionCard(request: InteractionRequest): string {
     questionsHtml +
     `<div class="decision" data-request-id="${escapeHtml(request.requestId)}">` +
     `<button class="submit-answers">Submit</button>` +
+    `<button class="cant-answer-toggle">Can&#39;t answer / none of the above</button>` +
+    `</div>` +
+    `<div class="cant-answer-section" data-request-id="${escapeHtml(request.requestId)}" hidden>` +
+    `<textarea class="cant-answer-input" rows="2" placeholder="Describe what&#39;s missing or unclear (optional)…"></textarea>` +
+    `<button class="cant-answer-send">Send explanation</button>` +
     `</div></div>`
   );
 }
