@@ -56,7 +56,7 @@ describe('runExecutor', () => {
     ]);
   });
 
-  it('serializes turns: a message arriving mid-turn runs only after the first settles (AC5)', async () => {
+  it('allows mid-turn injection: a message arriving while a turn is in flight starts immediately (#172)', async () => {
     const channel = new InMemoryChannel();
     const inbox: Message[] = [];
     const orchestrator = channel.join('orchestrator', 'planner', (m) => inbox.push(m));
@@ -69,29 +69,33 @@ describe('runExecutor', () => {
     runExecutor(channel, 'executor-1', async (task) => {
       const payload = task.payload as string;
       events.push(`start:${payload}`);
-      // The first turn parks on a gate while in-flight (modelling a pending
-      // permission card / a long claude run); the second must not start until released.
+      // Turn A parks on a gate (models a long running tool). #172 removes the old
+      // tail-chain barrier so B starts and completes while A is still in flight —
+      // the persistent session's FIFO queue owns result ordering in production.
       if (payload === 'A') await firstGate;
       events.push(`end:${payload}`);
       return { type: 'result', payload: `done: ${payload}` };
     });
 
-    // Both messages land while turn A is still in-flight.
+    // Both messages arrive while turn A is in-flight.
     orchestrator.send({ type: 'text', payload: 'A' });
     orchestrator.send({ type: 'text', payload: 'B' });
     await flush();
 
-    // A has started but is parked; B has NOT started — no concurrent turn.
-    expect(events).toEqual(['start:A']);
+    // A is parked; B has already started and completed — concurrent turns enabled.
+    expect(events).toContain('start:B');
+    expect(events).toContain('end:B');
+    expect(inbox).toEqual([
+      { from: 'executor-1', role: 'executor', type: 'result', payload: 'done: B' },
+    ]);
 
     releaseFirst();
     await flush();
 
-    // Strict order: A fully settles before B begins, and replies arrive in order.
-    expect(events).toEqual(['start:A', 'end:A', 'start:B', 'end:B']);
+    // After A is released its reply also lands on the channel.
     expect(inbox).toEqual([
-      { from: 'executor-1', role: 'executor', type: 'result', payload: 'done: A' },
       { from: 'executor-1', role: 'executor', type: 'result', payload: 'done: B' },
+      { from: 'executor-1', role: 'executor', type: 'result', payload: 'done: A' },
     ]);
   });
 

@@ -267,6 +267,33 @@ export function createStreamReader(handlers: StreamReaderHandlers): {
 export type RunClaudeCode = (prompt: string, options: { cwd: string } & ClaudeRunArgs) => Promise<string>;
 
 /**
+ * Per-turn callbacks forwarded into a persistent session's {@link StreamSession.send}
+ * (#172). Mirrors the per-turn subset of {@link ClaudeRunArgs} callbacks.
+ */
+export interface StreamTurnHandlers {
+  readonly onReasoningChange?: (digest: ReasoningDigest) => void;
+  readonly onUsage?: (usage: Usage) => void;
+  readonly onDigest?: (digest: ReasoningDigest) => void;
+}
+
+/**
+ * A persistent streaming `claude` session (#172): push one user message, get back
+ * the result text. The process stays alive between calls (stdin kept open); a new
+ * message is pushed to stdin for each turn. `close()` terminates the session
+ * (closes stdin, letting claude exit cleanly).
+ */
+export interface StreamSession {
+  send(prompt: string, handlers: StreamTurnHandlers): Promise<string>;
+  close(): void;
+}
+
+/**
+ * Factory that creates a {@link StreamSession} for the given session options (#172).
+ * Injectable so tests can provide a mock session without spawning the real CLI.
+ */
+export type CreateStreamSession = (options: { cwd: string } & ClaudeRunArgs) => StreamSession;
+
+/**
  * The `--settings` payload for the executor's headless `claude`. Two parts:
  *
  * 1. `permissions` — no prompts for what a normal dev task needs (reads, cwd-scoped
@@ -432,6 +459,33 @@ export function buildClaudeArgs(prompt: string, options: ClaudeRunArgs = {}): st
 }
 
 /**
+ * Build the `claude` argv for a persistent streaming session (#172): the same flags
+ * as {@link buildClaudeArgs} but with `--input-format stream-json` (stdin becomes
+ * an NDJSON message pipe) instead of a prompt argv element. `--print` replaces `-p`
+ * (equivalent; long form is clearer in this context). No prompt argument — messages
+ * are pushed to stdin as `{"type":"user","message":{"role":"user","content":"…"}}` lines.
+ */
+export function buildStreamSessionArgs(options: ClaudeRunArgs = {}): string[] {
+  const args = [
+    '--print',
+    '--input-format',
+    'stream-json',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--include-partial-messages',
+    '--settings',
+    options.settings ?? EXECUTOR_PERMISSIONS,
+  ];
+  if (options.model) args.push('--model', options.model);
+  if (options.appendSystemPrompt) args.push('--append-system-prompt', options.appendSystemPrompt);
+  if (options.sessionId) args.push(options.resume ? '--resume' : '--session-id', options.sessionId);
+  if (options.permissionPromptTool) args.push('--permission-prompt-tool', options.permissionPromptTool);
+  if (options.mcpConfigPath) args.push('--mcp-config', options.mcpConfigPath);
+  return args;
+}
+
+/**
  * The `claude` executable to spawn. Resolved at call time (not module load) so a
  * `.local.env`-supplied `CLAUDE_BIN` loaded during startup is honored. `CLAUDE_BIN`
  * is the escape hatch when `claude` isn't on the subprocess PATH (a common
@@ -503,6 +557,32 @@ export function extractUsage(resultRaw: string): Usage | undefined {
     cacheReadTokens: n('cache_read_input_tokens'),
     cacheCreationTokens: n('cache_creation_input_tokens'),
   };
+}
+
+/**
+ * Extracts per-turn {@link Usage} from the `iterations[i]` entry of a multi-turn
+ * combined result line (#172). When `--input-format stream-json` bundles N pushed
+ * messages into one `result` line, the `iterations` array carries one usage record
+ * per turn. Each entry's usage may be nested as `iter.usage` or at the top level.
+ * Returns undefined when the iteration is absent or carries no token counts.
+ */
+export function extractIterationUsage(iterations: unknown[], i: number): Usage | undefined {
+  const iter = iterations[i];
+  if (!iter || typeof iter !== 'object') return undefined;
+  const iterObj = iter as Record<string, unknown>;
+  // Usage may be nested as iter.usage (likely) or at the top level of the iter object.
+  const u = (iterObj.usage && typeof iterObj.usage === 'object')
+    ? iterObj.usage as Record<string, unknown>
+    : iterObj;
+  const n = (k: string): number => (typeof u[k] === 'number' ? (u[k] as number) : 0);
+  const tally: Usage = {
+    inputTokens: n('input_tokens'),
+    outputTokens: n('output_tokens'),
+    cacheReadTokens: n('cache_read_input_tokens'),
+    cacheCreationTokens: n('cache_creation_input_tokens'),
+  };
+  return (tally.inputTokens || tally.outputTokens || tally.cacheReadTokens || tally.cacheCreationTokens)
+    ? tally : undefined;
 }
 
 /**
@@ -589,6 +669,194 @@ export const runClaudeCodeCli: RunClaudeCode = (
     });
   });
 
+/** One in-flight `send()` call waiting for its turn's result from the stream. */
+export interface PendingEntry {
+  resolve(v: string): void;
+  reject(e: Error): void;
+  handlers: StreamTurnHandlers;
+  digestAssembler?: ReturnType<typeof createReasoningDigestAssembler>;
+}
+
+/**
+ * Manages the FIFO pending-entry queue for {@link createPersistentCli} (#172).
+ *
+ * **Combined envelope:** when `--input-format stream-json` bundles N pushed messages
+ * into one `result` line (e.g. message B pushed while a tool is running for A),
+ * `num_turns>1` and `result.result` is the *last* turn's text only. Intermediate
+ * answers live in the `assistant` message events in the stream. This multiplexer
+ * tracks turn boundaries by watching for injected user-message echoes in the stream
+ * (`{"type":"user","message":{"role":"user","content":"<string>"}}`), captures the
+ * preceding assistant text per turn, and resolves all N entries when the single
+ * result line arrives: entries 0..N-2 from the captured text, entry N-1 from
+ * `result.result`. Per-turn usage comes from `result.iterations[i]` (#116).
+ *
+ * Extracted from `createPersistentCli` for unit-testability: the turn-boundary
+ * logic is pure (no I/O) and can be driven by feeding raw stream lines.
+ */
+export function createTurnMultiplexer(getStderr: () => string): {
+  add(entry: PendingEntry): void;
+  onResult(raw: string): void;
+  onLine(line: string): void;
+  drain(err: Error): void;
+} {
+  const pending: PendingEntry[] = [];
+  // Intermediate turn answers committed as the stream crosses each turn boundary.
+  // committed[i].text = turn i's answer (all turns except the last).
+  const committed: Array<{ text: string }> = [];
+  let lastAssistantText = '';
+  // Number of injected user-message echoes seen so far (each marks a new turn start).
+  let userTurnsSeen = 0;
+
+  const onLine = (line: string): void => {
+    // Feed the currently-active turn's digest assembler. committed.length is the index
+    // of the active turn: entries 0..committed.length-1 are already captured; the next
+    // entry is still accumulating stream events.
+    // Note: the turn-boundary user-echo line is fed to the PRIOR turn's assembler
+    // (committed.length hasn't incremented yet when this runs). That is harmless:
+    // createReasoningDigestAssembler's handleToolResults guards `!Array.isArray(content)`
+    // and user-echo content is a string, so the line is silently ignored by the assembler.
+    pending[committed.length]?.digestAssembler?.feed(line);
+
+    let obj: unknown;
+    try { obj = JSON.parse(line.trim()); } catch { return; }
+    if (typeof obj !== 'object' || obj === null) return;
+    const rec = obj as { type?: unknown; message?: unknown };
+
+    if (rec.type === 'assistant') {
+      // Capture the text of the most recent complete assistant message. It will be
+      // committed as the current turn's answer when the next user echo arrives.
+      const msg = rec.message as { content?: unknown } | null;
+      if (Array.isArray(msg?.content)) {
+        const text = (msg!.content as Array<{ type?: string; text?: string }>)
+          .filter(b => b.type === 'text').map(b => b.text ?? '').join('');
+        if (text) lastAssistantText = text;
+      }
+      return;
+    }
+
+    if (rec.type === 'user') {
+      const msg = rec.message as { role?: unknown; content?: unknown } | null;
+      // Injected messages have string content; tool results have array content — skip those.
+      if (msg?.role === 'user' && typeof msg.content === 'string') {
+        userTurnsSeen++;
+        if (userTurnsSeen > 1) {
+          // A new turn is starting: the previous turn's assistant text is now final.
+          committed.push({ text: lastAssistantText });
+          lastAssistantText = '';
+        }
+      }
+    }
+  };
+
+  const onResult = (raw: string): void => {
+    let parsed: { num_turns?: number; iterations?: unknown[]; is_error?: boolean } | undefined;
+    try { parsed = JSON.parse(raw) as typeof parsed; } catch {}
+    const numTurns = Math.max(1, parsed?.num_turns ?? 1);
+    const iterations = Array.isArray(parsed?.iterations) ? parsed!.iterations : [];
+    // is_error is session-level, not turn-specific: if any turn produced an error the
+    // whole run is marked failed. Resolving intermediate entries as success while only
+    // rejecting the last would give callers a spurious partial success. Route all entries
+    // through interpretClaudeResult (which throws on is_error) so all are rejected.
+    const isErrorResult = !!parsed?.is_error;
+
+    const toResolve = pending.splice(0, numTurns);
+    for (let i = 0; i < toResolve.length; i++) {
+      const entry = toResolve[i]!;
+      const isLast = i === toResolve.length - 1;
+      if (entry.handlers.onUsage) {
+        // Per-turn usage from iterations[i]; fall back to aggregate for single-turn results.
+        const usage = extractIterationUsage(iterations, i) ?? (numTurns === 1 ? extractUsage(raw) : undefined);
+        if (usage) entry.handlers.onUsage(usage);
+      }
+      if (entry.digestAssembler && entry.handlers.onDigest) {
+        entry.handlers.onDigest(entry.digestAssembler.build());
+      }
+      try {
+        // Intermediate turns use the assistant text captured from the stream. If
+        // committed[i] is absent (fewer turn boundaries seen than num_turns claims),
+        // this resolves with ''; buildReply('') → undefined, so the turn produces no
+        // channel message. This is a protocol mismatch from the CLI; in practice it
+        // should not occur.
+        entry.resolve((!isLast && !isErrorResult)
+          ? (committed[i]?.text?.trim() ?? '')
+          : interpretClaudeResult(raw, getStderr(), 0),
+        );
+      } catch (err) {
+        entry.reject(err as Error);
+      }
+    }
+    // Reset per-run state so a subsequent run starts clean.
+    committed.splice(0);
+    lastAssistantText = '';
+    userTurnsSeen = 0;
+  };
+
+  const drain = (err: Error): void => {
+    const drained = pending.splice(0);
+    for (const entry of drained) entry.reject(err);
+  };
+
+  return { add: (entry) => { pending.push(entry); }, onResult, onLine, drain };
+}
+
+/**
+ * Persistent streaming session factory: spawn `claude --print --input-format
+ * stream-json` once, keep stdin open, and push each user message as an NDJSON
+ * line (#172). Messages arriving while a turn is in flight are pushed immediately
+ * to stdin so claude can consume them at the next tool boundary within the same
+ * running turn — not deferred to a separate later turn.
+ *
+ * **Combined envelope:** when a message is injected while a tool is running, claude
+ * bundles both turns into one `result` line with `num_turns>1`. {@link createTurnMultiplexer}
+ * handles this: it tracks turn boundaries in the stream, captures each turn's
+ * assistant text, and resolves all N pending entries when the single result arrives.
+ *
+ * Concurrent sends ARE possible (#172): executor-runtime fires respond() immediately
+ * for each incoming channel message. The multiplexer's FIFO queue + per-result reset
+ * guarantee correct per-turn attribution regardless of how many messages are in flight.
+ */
+export const createPersistentCli: CreateStreamSession = ({ cwd, ...runArgs }) => {
+  const args = buildStreamSessionArgs(runArgs);
+  const child = spawn(resolveClaudeBin(), args, {
+    cwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  const decoder = new StringDecoder('utf8');
+  let stderrBuf = '';
+  child.stderr.on('data', (chunk) => { stderrBuf += String(chunk); });
+
+  const mux = createTurnMultiplexer(() => stderrBuf);
+  const reader = createStreamReader({ onResult: mux.onResult, onLine: mux.onLine });
+
+  child.stdout.on('data', (chunk) => { reader.feed(decoder.write(chunk as Buffer)); });
+  child.on('error', (err) => { mux.drain(err); });
+  child.on('close', (code) => {
+    const tail = decoder.end();
+    if (tail) reader.feed(tail);
+    reader.flush(); // parses any trailing result line emitted without a terminating \n
+    // Reject remaining entries (process exited before all results were emitted).
+    const detail = stderrBuf.trim() || `exited with code ${code ?? 1}`;
+    mux.drain(new Error(`claude failed (exit ${code ?? 1}): ${detail}`));
+  });
+
+  return {
+    send(prompt, handlers) {
+      return new Promise<string>((resolve, reject) => {
+        const { onReasoningChange, onDigest, onUsage } = handlers;
+        const digestAssembler = (onDigest || onReasoningChange)
+          ? createReasoningDigestAssembler({ onChange: onReasoningChange })
+          : undefined;
+        mux.add({ resolve, reject, handlers: { onReasoningChange, onDigest, onUsage }, digestAssembler });
+        child.stdin!.write(
+          JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } }) + '\n',
+        );
+      });
+    },
+    close() { child.stdin!.end(); },
+  };
+};
+
 /**
  * Default instructions appended to an executor's system prompt (not replacing
  * Claude Code's own): the extension's shared model + the executor role insert +
@@ -627,8 +895,14 @@ export interface ClaudeCodeResponderOptions {
    * default. Set per role so executors/evaluators can run a cheaper tier (#119).
    */
   readonly model?: string;
-  /** Override how Claude Code is run (tests inject a fake; default spawns the CLI). */
+  /** Override how Claude Code is run (tests inject a fake; default spawns the CLI). When set, uses the legacy per-turn process model instead of the persistent session. */
   readonly run?: RunClaudeCode;
+  /**
+   * Override the persistent session factory (#172). When set (and `run` is not),
+   * used to create the long-lived streaming session. Tests inject a mock session
+   * here; production uses {@link createPersistentCli}. Ignored when `run` is set.
+   */
+  readonly createSession?: CreateStreamSession;
   /** Delay used between transient-overload retries (#141); injected as a no-op in tests. Default: real `setTimeout`. */
   readonly sleep?: (ms: number) => Promise<void>;
   /**
@@ -701,7 +975,23 @@ const MAX_TURN_ATTEMPTS = 6;
 /** Exponential backoff (capped) before retrying a transient overload. */
 const transientBackoffMs = (attempt: number): number => Math.min(1000 * 2 ** attempt, 30_000);
 
-export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): Respond {
+/**
+ * An executor {@link Respond} backed by Claude Code (#172): a persistent `claude`
+ * streaming session (one process per responder lifetime) with messages pushed to
+ * stdin as NDJSON lines. The `Respond` seam is preserved — callers see the same
+ * `(message) => Promise<Reply|Reply[]>` contract; only the internals change from
+ * per-process to per-session.
+ *
+ * Returns a `Respond` function augmented with `closeSession()` so the caller can
+ * terminate the persistent claude process when the session ends (#215). The function
+ * is still directly callable as a plain `Respond` (structural subtype).
+ *
+ * **Legacy `run` path:** when `run` is provided in options, the old per-turn CLI
+ * model is used unchanged. This preserves existing tests that inject a fake `run`.
+ */
+export function createClaudeCodeResponder(
+  options: ClaudeCodeResponderOptions,
+): Respond & { closeSession(): void } {
   const {
     workdir,
     appendSystemPrompt = DEFAULT_EXECUTOR_ROLE,
@@ -710,106 +1000,173 @@ export function createClaudeCodeResponder(options: ClaudeCodeResponderOptions): 
     mcpConfigPath,
     settings,
     model,
-    run = runClaudeCodeCli,
+    run,
+    createSession: createSessionFn,
     sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
     onReasoningChange,
     onUsage,
     resume = false,
     getContextNote,
   } = options;
-  // The pinned Claude session id is stable for this responder's life (#126): the first
-  // turn creates it (`--session-id`), later turns resume it (`--resume`). It is never
-  // rotated — a turn that hits a transient overload or a session-id collision recovers
-  // *within* the turn (retry / switch create↔resume, in the loop below) rather than
-  // abandoning the conversation for a fresh id (#90/#141).
   const sessionId = claudeSessionId;
-  // `started` gates create vs resume across turns: a re-attached session (#126) starts
-  // already-`started` so its first turn resumes; a fresh one creates, then resumes.
-  let started = resume;
-  return async (message) => {
-    // Only conversation reaches here: infrastructure (permission/delegation control,
-    // per-turn usage, reasoning digests) is filtered upstream by the agent runtime's
-    // allowlist (`deliversToAgent` in executor-runtime), so the responder no longer
-    // keeps its own denylist of side-channel types — a new infra type can't reach an
-    // agent by default, rather than relying on this list being kept current (#116).
+
+  // Shared prompt-building: same for both paths.
+  const buildPrompt = (message: Parameters<Respond>[0]): string => {
     const body = typeof message.payload === 'string' ? message.payload : JSON.stringify(message.payload);
-    // Prefix the sender's identity + role so the agent reads who it's hearing
-    // from — the authoritative architect vs. a peer/subordinate agent (#86).
-    // The optional context note (#165) is injected between attribution and body
-    // so the orchestrator can perceive its running context size mid-conversation.
     const contextNote = getContextNote?.();
-    const prompt = contextNote
+    return contextNote
       ? `${senderAttribution(message)}\n\n${contextNote}\n\n${body}`
       : `${senderAttribution(message)}\n\n${body}`;
+  };
+
+  // Shared reply-building: same for both paths.
+  const buildReply = (result: string, digest: ReasoningDigest | undefined): Awaited<ReturnType<Respond>> => {
+    if (!result) return undefined;
+    if (digest && digest.entries.length > 0) {
+      return [{ type: REASONING_DIGEST, payload: digest }, { type: 'result', payload: result }];
+    }
+    return { type: 'result', payload: result };
+  };
+
+  if (run) {
+    // Legacy per-turn path: preserve exact behavior for tests that inject `run`.
+    // Each message spawns a new one-shot `claude` process with the appropriate
+    // --session-id / --resume flag. Tests using this path are sequential so
+    // concurrent-send concerns do not apply here.
+    let started = resume;
+    const respond: Respond = async (message) => {
+      const prompt = buildPrompt(message);
+      let result: string;
+      let digest: ReasoningDigest | undefined;
+      const runTurn = (useResume: boolean) =>
+        run(prompt, {
+          cwd: workdir,
+          appendSystemPrompt,
+          sessionId,
+          resume: useResume,
+          permissionPromptTool,
+          mcpConfigPath,
+          settings,
+          model,
+          onReasoningChange,
+          onUsage,
+          onDigest: (d) => { digest = d; },
+        });
+      let resuming = started;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          result = (await runTurn(resuming)).trim();
+          break;
+        } catch (error) {
+          if (attempt >= MAX_TURN_ATTEMPTS) throw error;
+          if (isTransient(error)) {
+            if (!resuming) resuming = true;
+            await sleep(transientBackoffMs(attempt));
+            continue;
+          }
+          if (resuming && isNoConversation(error)) { resuming = false; continue; }
+          if (!resuming && isAlreadyInUse(error)) { resuming = true; continue; }
+          throw error;
+        }
+      }
+      started = true;
+      return buildReply(result!, digest);
+    };
+    return Object.assign(respond, { closeSession: (): void => {} });
+  }
+
+  // Persistent session path (#172): one `claude --print --input-format stream-json`
+  // process for the responder's lifetime. Messages are pushed to stdin as NDJSON
+  // lines; each send() resolves when the matching result line arrives. Session is
+  // created lazily on the first respond() call and reused across turns.
+  // Concurrent sends ARE possible (#172): executor-runtime fires respond() immediately
+  // for each incoming channel message without waiting for the prior result. The
+  // session's FIFO pending queue (in createPersistentCli) guarantees that result N
+  // resolves turn N — claude processes stdin in order and emits one result per message.
+  const factory = createSessionFn ?? createPersistentCli;
+  let session: StreamSession | null = null;
+  let started = resume;
+
+  const respond: Respond = async (message) => {
+    const prompt = buildPrompt(message);
     let result: string;
-    // The turn's assembled reasoning trail (#110), captured from the run's stream;
-    // posted to the channel alongside the result so it survives reload/replay.
     let digest: ReasoningDigest | undefined;
-    const runTurn = (useResume: boolean) =>
-      run(prompt, {
-        cwd: workdir,
-        appendSystemPrompt,
-        sessionId,
-        resume: useResume,
-        permissionPromptTool,
-        mcpConfigPath,
-        settings,
-        model,
-        onReasoningChange,
-        onUsage,
-        onDigest: (d) => {
-          digest = d;
-        },
-      });
-    // Run the turn, recovering in place rather than failing it (#141). `resuming`
-    // tracks whether this attempt resumes (`--resume`) or creates (`--session-id`);
-    // it starts from the cross-turn `started` state and may flip during recovery.
-    // Re-running always re-sends the same `prompt`, so the task is never lost.
+    // `resuming` tracks the create vs resume strategy for session spawns, mirroring
+    // the cross-turn `started` state. Errors may flip it: "no conversation" → create;
+    // "already in use" → resume; transient → retry same strategy after backoff.
     let resuming = started;
+
     for (let attempt = 0; ; attempt++) {
+      // Spawn a new session if none is live (first turn, or prior session died).
+      if (!session) {
+        session = factory({
+          cwd: workdir,
+          appendSystemPrompt,
+          sessionId,
+          resume: resuming,
+          permissionPromptTool,
+          mcpConfigPath,
+          settings,
+          model,
+        });
+      }
+      digest = undefined; // reset per attempt so a partial prior attempt's digest isn't kept
       try {
-        result = (await runTurn(resuming)).trim();
+        result = (await session.send(prompt, {
+          onReasoningChange,
+          onUsage,
+          onDigest: (d) => { digest = d; },
+        })).trim();
         break;
       } catch (error) {
-        if (attempt >= MAX_TURN_ATTEMPTS) throw error; // budget spent — give up; the id is intact for a later retry
+        // Session may be dead after any error — discard it so the next attempt spawns fresh.
+        // Use optional chaining: closeSession() may have already nulled `session` (race with
+        // dispose while a turn is in flight), in which case `dead` is null and close() would
+        // throw a TypeError instead of surfacing the real error (#172).
+        //
+        // Concurrent-turn note: if two turns share this session and both catch a session-startup
+        // error (isNoConversation / isAlreadyInUse), they may race to null/replace `session` in
+        // a compounding way: Turn A creates session[1] and yields at await; Turn B catches, closes
+        // session[1] (the one A is using), creates session[2]; session[1]'s close handler rejects
+        // A's pending send; A's retry closes session[2] (B's current session), etc. Each recovery
+        // attempt can trigger the other, burning MAX_TURN_ATTEMPTS across both turns. Practical
+        // impact is bounded: this window only opens before `started` is true (startup errors
+        // don't arise for established sessions), and transient overloads always sleep before retry
+        // (preventing the cascade entirely). Both turns eventually exhaust attempts and post error
+        // messages to the channel; no data corruption or infinite loop results.
+        const dead = session;
+        session = null;
+        dead?.close();
+
+        if (attempt >= MAX_TURN_ATTEMPTS) throw error;
         if (isTransient(error)) {
-          // A transient server overload (529/503/429): ride it out with backoff rather
-          // than failing the turn. After a create attempt the id may now be registered,
-          // so switch to resume on the retry to avoid colliding with it.
+          // A transient server overload: close the dead session and retry after backoff.
+          // After a create attempt the id may now be registered, so switch to resume.
           if (!resuming) resuming = true;
           await sleep(transientBackoffMs(attempt));
           continue;
         }
         if (resuming && isNoConversation(error)) {
-          // Nothing to resume — an old session from before stable ids, or one
-          // interrupted before its first turn — so create it fresh and retry (#126).
+          // --resume found nothing: create the session fresh (#126).
           resuming = false;
           continue;
         }
         if (!resuming && isAlreadyInUse(error)) {
-          // A create collided with an id `claude` already registered (e.g. a prior
-          // failed attempt) — resume that session instead of failing (#90, generalized).
+          // --session-id collided with an already-registered id: resume it (#90/#141).
           resuming = true;
           continue;
         }
-        throw error; // not retryable (e.g. an auth failure — surfaced for the view's #90 re-login)
+        throw error; // not retryable (auth failure, etc.) — surface for the view's re-login card (#90)
       }
     }
     started = true;
-    // A resultless turn replies with nothing, exactly as before — the digest rides
-    // *with* a result, never alone: a lone digest message wouldn't settle the
-    // turn's "working" indicator (only the `result` does, #100), so it would spin.
-    if (!result) return undefined;
-    // Post the durable digest *before* the result so the view renders the
-    // (collapsed) reasoning trail above the clean result, matching the live
-    // layout. Skip an empty digest (a turn with no thinking/tools) — no log noise;
-    // then the reply is the bare result object, exactly as a non-streaming run (#110).
-    if (digest && digest.entries.length > 0) {
-      return [
-        { type: REASONING_DIGEST, payload: digest },
-        { type: 'result', payload: result },
-      ];
-    }
-    return { type: 'result', payload: result };
+    return buildReply(result!, digest);
   };
+
+  const closeSession = (): void => {
+    session?.close();
+    session = null;
+  };
+
+  return Object.assign(respond, { closeSession });
 }

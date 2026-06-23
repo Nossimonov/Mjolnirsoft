@@ -3,22 +3,30 @@ import {
   createClaudeCodeResponder,
   resolveClaudeBin,
   buildClaudeArgs,
+  buildStreamSessionArgs,
   senderAttribution,
   interpretClaudeResult,
   extractUsage,
+  extractIterationUsage,
   addUsage,
   weightedUsage,
   claudeSessionIdFor,
   permissionPolicyFor,
   parseStreamEvent,
   createStreamReader,
+  createTurnMultiplexer,
   DEFAULT_EXECUTOR_ROLE,
   EXECUTOR_PERMISSIONS,
   READONLY_PERMISSIONS,
   type ViewEvent,
+  type StreamSession,
+  type StreamTurnHandlers,
+  type PendingEntry,
+  type Usage,
 } from './claude-code-responder.ts';
 import { isAuthError } from './auth-error.ts';
 import { SHARED_CORE, EXECUTOR_INSERT } from '../core/agent-instructions.ts';
+import type { Message } from '../core/channel.ts';
 import type { ReasoningDigest } from './reasoning-digest.ts';
 
 const task = { from: 'orchestrator', role: 'planner', type: 'text', payload: 'write a haiku to haiku.md' } as const;
@@ -685,5 +693,591 @@ describe('resolveClaudeBin', () => {
   it('falls back to a PATH-resolved command when CLAUDE_BIN is unset', () => {
     delete process.env.CLAUDE_BIN;
     expect(resolveClaudeBin()).toBe(process.platform === 'win32' ? 'claude.exe' : 'claude');
+  });
+});
+
+describe('buildStreamSessionArgs (#172)', () => {
+  it('uses --print + --input-format stream-json instead of -p <prompt>', () => {
+    const args = buildStreamSessionArgs();
+    // Starts with --print (headless mode, no prompt text arg follows)
+    expect(args.slice(0, 4)).toEqual(['--print', '--input-format', 'stream-json', '--output-format']);
+    // No legacy -p flag (which expects a following prompt text)
+    expect(args).not.toContain('-p');
+  });
+
+  it('keeps --output-format stream-json, --verbose, --include-partial-messages', () => {
+    const args = buildStreamSessionArgs();
+    expect(args).toContain('--output-format');
+    expect(args[args.indexOf('--output-format') + 1]).toBe('stream-json');
+    expect(args).toContain('--verbose');
+    expect(args).toContain('--include-partial-messages');
+  });
+
+  it('passes --session-id for a new session and --resume for an existing one (#126)', () => {
+    expect(buildStreamSessionArgs({ sessionId: 'sid' }).slice(-2)).toEqual(['--session-id', 'sid']);
+    expect(buildStreamSessionArgs({ sessionId: 'sid', resume: true }).slice(-2)).toEqual(['--resume', 'sid']);
+  });
+
+  it('passes --model, --append-system-prompt, --permission-prompt-tool, --mcp-config when given', () => {
+    const args = buildStreamSessionArgs({
+      model: 'sonnet',
+      appendSystemPrompt: 'be executor',
+      permissionPromptTool: 'mcp__perm__approve',
+      mcpConfigPath: '/cfg.json',
+    });
+    expect(args[args.indexOf('--model') + 1]).toBe('sonnet');
+    expect(args[args.indexOf('--append-system-prompt') + 1]).toBe('be executor');
+    expect(args[args.indexOf('--permission-prompt-tool') + 1]).toBe('mcp__perm__approve');
+    expect(args[args.indexOf('--mcp-config') + 1]).toBe('/cfg.json');
+  });
+});
+
+/** Build a mock {@link StreamSession} whose send() calls are controlled by a vi.fn(). */
+function makeMockSession(sendImpl?: (prompt: string, handlers: StreamTurnHandlers) => Promise<string>) {
+  const defaultSend = vi.fn(
+    sendImpl ?? (async () => 'ok'),
+  );
+  const session: StreamSession & { sends: string[]; closed: boolean } = {
+    sends: [],
+    closed: false,
+    send: async (prompt, handlers) => {
+      session.sends.push(prompt);
+      return defaultSend(prompt, handlers);
+    },
+    close: vi.fn(() => { session.closed = true; }),
+  };
+  return session;
+}
+
+describe('createClaudeCodeResponder — persistent session path (#172)', () => {
+  it('creates the session once and reuses it for subsequent turns', async () => {
+    let created = 0;
+    const session = makeMockSession();
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'sid',
+      createSession: () => { created++; return session; },
+    });
+
+    await respond(task);
+    await respond(task);
+
+    expect(created).toBe(1); // one persistent session, not two
+    expect(session.sends).toHaveLength(2);
+  });
+
+  it('creates the session with resume:false on the first turn', async () => {
+    let capturedOpts: Record<string, unknown> | undefined;
+    const session = makeMockSession();
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'stable-sid',
+      createSession: (opts) => { capturedOpts = opts as unknown as Record<string, unknown>; return session; },
+    });
+
+    await respond(task);
+
+    expect(capturedOpts?.sessionId).toBe('stable-sid');
+    expect(capturedOpts?.resume).toBe(false);
+  });
+
+  it('creates with resume:true when the responder is started already-resumed (#126)', async () => {
+    let capturedOpts: Record<string, unknown> | undefined;
+    const session = makeMockSession();
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'stable-sid',
+      resume: true,
+      createSession: (opts) => { capturedOpts = opts as unknown as Record<string, unknown>; return session; },
+    });
+
+    await respond(task);
+
+    expect(capturedOpts?.resume).toBe(true);
+  });
+
+  it('falls back to create (resume:false) when session reports "no conversation" (#126)', async () => {
+    const createdWith: boolean[] = [];
+    const failSession = makeMockSession(async () => {
+      throw new Error('claude failed (exit 1): No conversation found with session ID: sid');
+    });
+    const okSession = makeMockSession();
+    let call = 0;
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'sid',
+      resume: true, // start as "already resumed"
+      sleep: () => Promise.resolve(),
+      createSession: (opts) => {
+        createdWith.push((opts as { resume: boolean }).resume);
+        return call++ === 0 ? failSession : okSession;
+      },
+    });
+
+    await respond(task);
+
+    expect(createdWith[0]).toBe(true);  // first try: --resume
+    expect(createdWith[1]).toBe(false); // retry: --session-id (create)
+    expect(failSession.closed).toBe(true); // dead session was closed
+  });
+
+  it('switches to resume when session reports "already in use" (#90/#141)', async () => {
+    const createdWith: boolean[] = [];
+    const failSession = makeMockSession(async () => {
+      throw new Error('claude failed (exit 1): Session ID sid is already in use');
+    });
+    const okSession = makeMockSession();
+    let call = 0;
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'sid',
+      sleep: () => Promise.resolve(),
+      createSession: (opts) => {
+        createdWith.push((opts as { resume: boolean }).resume);
+        return call++ === 0 ? failSession : okSession;
+      },
+    });
+
+    await respond(task);
+
+    expect(createdWith[0]).toBe(false); // first try: --session-id
+    expect(createdWith[1]).toBe(true);  // retry: --resume
+    expect(failSession.closed).toBe(true);
+  });
+
+  it('retries a transient overload (529) within the turn, creating a new session each time (#141)', async () => {
+    const sessions: ReturnType<typeof makeMockSession>[] = [];
+    let call = 0;
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'sid',
+      sleep: () => Promise.resolve(),
+      createSession: () => {
+        const s = call++ < 2
+          ? makeMockSession(async () => { throw new Error('claude failed (exit 1): 529 Overloaded'); })
+          : makeMockSession();
+        sessions.push(s);
+        return s;
+      },
+    });
+
+    await respond(task);
+
+    expect(sessions).toHaveLength(3); // two failures + one success
+    expect(sessions[0].closed).toBe(true);
+    expect(sessions[1].closed).toBe(true);
+    expect(sessions[2].sends).toHaveLength(1);
+  });
+
+  it('forwards per-turn reasoning digest and usage through session.send handlers (#110/#116)', async () => {
+    const digest: ReasoningDigest = { entries: [{ kind: 'thinking', text: 'hm' }] };
+    const session = makeMockSession(async (_p, h) => {
+      h.onDigest?.(digest);
+      h.onUsage?.({ inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0 });
+      return 'result text';
+    });
+    const usages: unknown[] = [];
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      createSession: () => session,
+      onUsage: (u) => usages.push(u),
+    });
+
+    const reply = await respond(task);
+
+    expect(reply).toEqual([
+      { type: 'reasoning-digest', payload: digest },
+      { type: 'result', payload: 'result text' },
+    ]);
+    expect(usages).toEqual([{ inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0 }]);
+  });
+
+  it('returns undefined for a resultless turn (empty result) — digest not posted alone (#110)', async () => {
+    const digest: ReasoningDigest = { entries: [{ kind: 'thinking', text: 'hm' }] };
+    const session = makeMockSession(async (_p, h) => {
+      h.onDigest?.(digest);
+      return '   '; // trims to empty
+    });
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession: () => session });
+    expect(await respond(task)).toBeUndefined();
+  });
+
+  it('exposes closeSession() that closes the active session process (#172/#215)', async () => {
+    const session = makeMockSession();
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession: () => session });
+    await respond(task);
+
+    respond.closeSession();
+
+    expect(session.closed).toBe(true);
+  });
+
+  it('closeSession() is a no-op before any turn starts (session not yet created)', () => {
+    const createSession = vi.fn(() => makeMockSession());
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession });
+
+    // No turn started — closeSession() must not throw
+    expect(() => respond.closeSession()).not.toThrow();
+    expect(createSession).not.toHaveBeenCalled(); // session never created
+  });
+
+  it('pushes a second message to the session mid-turn without waiting for the first result (#172 AC)', async () => {
+    // Acceptance criterion: a message arriving while a turn is in flight is pushed
+    // to the session's stdin immediately — not queued until the current result arrives.
+    // In production this means claude sees the message at its next tool boundary.
+    let resolveFirst!: (v: string) => void;
+    const session = makeMockSession((prompt) => {
+      // First send parks (simulates an in-flight turn with a running tool).
+      // Second send resolves immediately (the mid-turn injection).
+      if (session.sends.length === 1) {
+        return new Promise<string>((r) => { resolveFirst = r; });
+      }
+      return Promise.resolve('mid-turn reply');
+    });
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession: () => session });
+
+    const task2: Message = { from: 'orchestrator', role: 'planner', type: 'text', payload: 'mid-turn message' };
+
+    const turn1 = respond(task);   // starts; session.send() called synchronously → pending
+    const turn2 = respond(task2);  // called before turn1 resolves — pushes mid-turn
+
+    // Both messages are already in the session's send queue (no tail-chain blocking).
+    expect(session.sends).toHaveLength(2);
+
+    // Resolve the first turn
+    resolveFirst('first reply');
+
+    const [reply1, reply2] = await Promise.all([turn1, turn2]);
+    expect(reply1).toEqual({ type: 'result', payload: 'first reply' });
+    expect(reply2).toEqual({ type: 'result', payload: 'mid-turn reply' });
+  });
+
+  it('closeSession() while a turn is in-flight: turn still completes, session is marked closed (#172)', async () => {
+    let sendResolve!: (v: string) => void;
+    const session = makeMockSession(
+      () => new Promise<string>((resolve) => { sendResolve = resolve; }),
+    );
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession: () => session });
+
+    const turnPromise = respond(task);
+
+    // Session is live while turn is in flight
+    expect(session.closed).toBe(false);
+    respond.closeSession();
+    expect(session.closed).toBe(true);
+
+    // Resolve the in-flight send — turn completes normally despite closeSession()
+    sendResolve('result text');
+    const reply = await turnPromise;
+    expect(reply).toEqual({ type: 'result', payload: 'result text' });
+  });
+
+  it('surfaces the original error (not a TypeError) when closeSession() races with in-flight rejection (#172)', async () => {
+    // Regression for: `dead.close()` NPE when session is nulled by closeSession() before
+    // the catch block runs. Without the dead?.close() fix the rejection would be:
+    // "Cannot read properties of null (reading 'close')" instead of the real error.
+    let sendReject!: (e: Error) => void;
+    const session = makeMockSession(
+      () => new Promise<string>((_, reject) => { sendReject = reject; }),
+    );
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession: () => session });
+
+    const turnPromise = respond(task);
+    respond.closeSession(); // null out `session` in the closure while send() is in flight
+    sendReject(new Error('session disconnected'));
+
+    const err = await turnPromise.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('session disconnected');
+  });
+
+  it('spawns a new session with resume:true after closeSession() resets it (#172/#128)', async () => {
+    const spawned: Array<{ resume: boolean }> = [];
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'sid',
+      createSession: (opts) => {
+        spawned.push({ resume: !!opts.resume });
+        return makeMockSession();
+      },
+    });
+
+    await respond(task);     // turn 1: spawns session[0] with resume:false
+    respond.closeSession();  // close the session; `started` closure remains true
+    await respond(task);     // turn 2: session is null → spawns session[1] with resume:true
+
+    expect(spawned).toHaveLength(2);
+    expect(spawned[0]!.resume).toBe(false);
+    expect(spawned[1]!.resume).toBe(true);
+  });
+
+  it('sends the formatted prompt with sender attribution and context note as the message content', async () => {
+    const session = makeMockSession();
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      createSession: () => session,
+      getContextNote: () => '[ctx: 50K tokens]',
+    });
+
+    await respond(task);
+
+    expect(session.sends[0]).toContain('[Message from architect — authoritative (id: orchestrator)]');
+    expect(session.sends[0]).toContain('[ctx: 50K tokens]');
+    expect(session.sends[0]).toContain('write a haiku to haiku.md');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Helpers for createTurnMultiplexer tests
+// ---------------------------------------------------------------------------
+
+/** Make a PendingEntry whose resolution is captured for assertions. */
+function makeEntry(handlerOverrides: Partial<StreamTurnHandlers> = {}): {
+  entry: PendingEntry;
+  resolved: string | null;
+  rejected: Error | null;
+} {
+  let resolved: string | null = null;
+  let rejected: Error | null = null;
+  const entry: PendingEntry = {
+    resolve: (v) => { resolved = v; },
+    reject: (e) => { rejected = e; },
+    handlers: handlerOverrides,
+    digestAssembler: undefined,
+  };
+  return {
+    entry,
+    get resolved() { return resolved; },
+    get rejected() { return rejected; },
+  };
+}
+
+const userEcho = (content: string) =>
+  JSON.stringify({ type: 'user', message: { role: 'user', content } });
+const assistantMsg = (text: string) =>
+  JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+const resultLine = (opts: { num_turns?: number; result?: string; is_error?: boolean; iterations?: unknown[]; usage?: unknown } = {}) =>
+  JSON.stringify({
+    type: 'result',
+    num_turns: opts.num_turns ?? 1,
+    result: opts.result ?? 'ok',
+    is_error: opts.is_error ?? false,
+    ...(opts.iterations !== undefined ? { iterations: opts.iterations } : {}),
+    ...(opts.usage !== undefined ? { usage: opts.usage } : {}),
+  });
+
+describe('extractIterationUsage (#172 combined envelope)', () => {
+  it('extracts usage from iter.usage when present', () => {
+    const iters = [{ usage: { input_tokens: 60, output_tokens: 20, cache_read_input_tokens: 5, cache_creation_input_tokens: 3 } }];
+    expect(extractIterationUsage(iters, 0)).toEqual({ inputTokens: 60, outputTokens: 20, cacheReadTokens: 5, cacheCreationTokens: 3 });
+  });
+
+  it('extracts usage from top-level iter keys when no nested .usage', () => {
+    const iters = [{ input_tokens: 40, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }];
+    expect(extractIterationUsage(iters, 0)).toEqual({ inputTokens: 40, outputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0 });
+  });
+
+  it('returns undefined for a missing iteration index', () => {
+    expect(extractIterationUsage([], 0)).toBeUndefined();
+    expect(extractIterationUsage([{ usage: { output_tokens: 5 } }], 1)).toBeUndefined();
+  });
+
+  it('returns undefined when all token counts are zero (no usage info)', () => {
+    const iters = [{ usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }];
+    expect(extractIterationUsage(iters, 0)).toBeUndefined();
+  });
+});
+
+describe('createTurnMultiplexer (#172 combined envelope)', () => {
+  it('resolves a single-turn result to the lone pending entry (baseline)', () => {
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    mux.add(a.entry);
+    mux.onLine(userEcho('prompt'));
+    mux.onLine(assistantMsg('answer'));
+    mux.onResult(resultLine({ result: 'answer' }));
+    expect(a.resolved).toBe('answer');
+    expect(a.rejected).toBeNull();
+  });
+
+  it('resolves both entries from a combined envelope (num_turns=2) (#172 combined-envelope AC)', () => {
+    // The common mid-turn injection case: B pushed while a tool is running for A.
+    // Claude bundles both into ONE result line with num_turns=2; result.result is B's
+    // text only; A's text lives in the assistant stream before B's user echo.
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    const b = makeEntry();
+    mux.add(a.entry);
+    mux.add(b.entry);
+    mux.onLine(userEcho('prompt-A'));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onLine(userEcho('prompt-B'));   // turn boundary: commits A's text
+    mux.onLine(assistantMsg('answer-B'));
+    mux.onResult(resultLine({ num_turns: 2, result: 'answer-B' }));
+    expect(a.resolved).toBe('answer-A');
+    expect(b.resolved).toBe('answer-B');
+    expect(a.rejected).toBeNull();
+    expect(b.rejected).toBeNull();
+  });
+
+  it('resolves all three entries from a three-turn envelope', () => {
+    const mux = createTurnMultiplexer(() => '');
+    const [a, b, c] = [makeEntry(), makeEntry(), makeEntry()];
+    [a, b, c].forEach(e => mux.add(e.entry));
+    mux.onLine(userEcho('A'));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onLine(userEcho('B'));
+    mux.onLine(assistantMsg('answer-B'));
+    mux.onLine(userEcho('C'));
+    mux.onLine(assistantMsg('answer-C'));
+    mux.onResult(resultLine({ num_turns: 3, result: 'answer-C' }));
+    expect(a.resolved).toBe('answer-A');
+    expect(b.resolved).toBe('answer-B');
+    expect(c.resolved).toBe('answer-C');
+  });
+
+  it('rejects all pending entries on drain (process-level error)', () => {
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    const b = makeEntry();
+    mux.add(a.entry);
+    mux.add(b.entry);
+    mux.drain(new Error('process died'));
+    expect(a.rejected?.message).toBe('process died');
+    expect(b.rejected?.message).toBe('process died');
+    expect(a.resolved).toBeNull();
+    expect(b.resolved).toBeNull();
+  });
+
+  it('feeds onLine events to the active turn\'s digestAssembler, not others (#110 digest isolation)', () => {
+    const feedA = vi.fn();
+    const feedB = vi.fn();
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    const b = makeEntry();
+    a.entry.digestAssembler = { feed: feedA, build: vi.fn(() => ({ entries: [] })) } as unknown as PendingEntry['digestAssembler'];
+    b.entry.digestAssembler = { feed: feedB, build: vi.fn(() => ({ entries: [] })) } as unknown as PendingEntry['digestAssembler'];
+    mux.add(a.entry);
+    mux.add(b.entry);
+
+    const aEvent = '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"A thinks"}}}';
+    const bEvent = '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"B thinks"}}}';
+
+    mux.onLine(userEcho('prompt-A'));  // turn 0 starts
+    mux.onLine(aEvent);                // → assemblerA
+    mux.onLine(assistantMsg('A'));
+    mux.onLine(userEcho('prompt-B'));  // turn boundary → commits A; subsequent lines → assemblerB
+    mux.onLine(bEvent);                // → assemblerB
+    mux.onResult(resultLine({ num_turns: 2, result: 'B' }));
+
+    expect(feedA).toHaveBeenCalledWith(aEvent);
+    expect(feedB).toHaveBeenCalledWith(bEvent);
+    expect(feedB).not.toHaveBeenCalledWith(aEvent);
+  });
+
+  it('attributes per-turn usage from iterations[i] (#116)', () => {
+    const usagesA: Usage[] = [];
+    const usagesB: Usage[] = [];
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry({ onUsage: (u) => usagesA.push(u) });
+    const b = makeEntry({ onUsage: (u) => usagesB.push(u) });
+    mux.add(a.entry);
+    mux.add(b.entry);
+    mux.onLine(userEcho('A'));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onLine(userEcho('B'));
+    mux.onLine(assistantMsg('answer-B'));
+    mux.onResult(resultLine({
+      num_turns: 2,
+      result: 'answer-B',
+      iterations: [
+        { usage: { input_tokens: 60, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+        { usage: { input_tokens: 40, output_tokens: 30, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+      ],
+    }));
+    expect(usagesA).toEqual([{ inputTokens: 60, outputTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0 }]);
+    expect(usagesB).toEqual([{ inputTokens: 40, outputTokens: 30, cacheReadTokens: 0, cacheCreationTokens: 0 }]);
+  });
+
+  it('falls back to aggregate usage for single-turn result when iterations[] absent (#116)', () => {
+    const usages: Usage[] = [];
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry({ onUsage: (u) => usages.push(u) });
+    mux.add(a.entry);
+    mux.onLine(userEcho('A'));
+    mux.onLine(assistantMsg('A answer'));
+    mux.onResult(resultLine({
+      num_turns: 1,
+      result: 'A answer',
+      usage: { input_tokens: 50, output_tokens: 25, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    }));
+    expect(usages).toEqual([{ inputTokens: 50, outputTokens: 25, cacheReadTokens: 0, cacheCreationTokens: 0 }]);
+  });
+
+  it('resets between runs: sequential combined runs do not bleed state', () => {
+    // Regression guard: committed[] and userTurnsSeen must be reset after each result
+    // so the second combined run resolves with its OWN texts, not the first run's.
+    const mux = createTurnMultiplexer(() => '');
+
+    // First run: A+B combined
+    const a = makeEntry();
+    const b = makeEntry();
+    mux.add(a.entry);
+    mux.add(b.entry);
+    mux.onLine(userEcho('A'));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onLine(userEcho('B'));
+    mux.onLine(assistantMsg('answer-B'));
+    mux.onResult(resultLine({ num_turns: 2, result: 'answer-B' }));
+    expect(a.resolved).toBe('answer-A');
+    expect(b.resolved).toBe('answer-B');
+
+    // Second run: C+D combined — must not inherit stale state from first run
+    const c = makeEntry();
+    const d = makeEntry();
+    mux.add(c.entry);
+    mux.add(d.entry);
+    mux.onLine(userEcho('C'));
+    mux.onLine(assistantMsg('answer-C'));
+    mux.onLine(userEcho('D'));
+    mux.onLine(assistantMsg('answer-D'));
+    mux.onResult(resultLine({ num_turns: 2, result: 'answer-D' }));
+    expect(c.resolved).toBe('answer-C');
+    expect(d.resolved).toBe('answer-D');
+  });
+
+  it('rejects ALL entries on is_error — not just the last turn (#172 combined-envelope)', () => {
+    // is_error is session-level: if true, resolving intermediate entries as success
+    // while rejecting only the last would give callers a spurious partial success.
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    const b = makeEntry();
+    mux.add(a.entry);
+    mux.add(b.entry);
+    mux.onLine(userEcho('A'));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onLine(userEcho('B'));
+    mux.onLine(assistantMsg('answer-B'));
+    mux.onResult(resultLine({ num_turns: 2, result: 'Not logged in · Please run /login', is_error: true }));
+    // Both must be rejected, not A=resolved/B=rejected
+    expect(a.resolved).toBeNull();
+    expect(b.resolved).toBeNull();
+    expect(a.rejected).toBeInstanceOf(Error);
+    expect(b.rejected).toBeInstanceOf(Error);
+  });
+
+  it('ignores tool-result user events (array content) as turn boundaries', () => {
+    // Tool results appear as {"type":"user","message":{"content":[{"type":"tool_result",...}]}}.
+    // Only injected messages with string content mark a new turn.
+    const mux = createTurnMultiplexer(() => '');
+    const a = makeEntry();
+    mux.add(a.entry);
+    mux.onLine(userEcho('prompt-A'));
+    // Simulate a tool_result user event (array content, not string) — must NOT trigger turn boundary
+    mux.onLine(JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'output' }] } }));
+    mux.onLine(assistantMsg('answer-A'));
+    mux.onResult(resultLine({ num_turns: 1, result: 'answer-A' }));
+    expect(a.resolved).toBe('answer-A');
+    expect(a.rejected).toBeNull();
   });
 });
