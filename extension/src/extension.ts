@@ -434,25 +434,22 @@ function provisionSession(args: {
 
     // Run the agent in-process: it joins the session in its role and answers each
     // message by running a headless Claude Code agent with the worktree as workspace.
+    // Capture the responder so its persistent session can be closed on teardown (#172).
     const agentId = `${sessionId}-executor`;
-    const agent = runExecutor(
-      channel,
-      agentId,
-      createClaudeCodeResponder({
-        workdir: workspace.path,
-        appendSystemPrompt: composeAgentInstructions(role),
-        claudeSessionId, // stable id (#126/#165): generation-indexed for the orchestrator
-        resume: resuming, // first turn --resume the interrupted conversation rather than create (#126)
-        permissionPromptTool: PERMISSION_PROMPT_TOOL,
-        mcpConfigPath,
-        settings: permissionPolicyFor(role), // the orchestrator may push + open PRs (#137); executors can't
-        model,
-        onReasoningChange: reasoning.emit,
-        onUsage: recordTurnUsage, // accumulate the running total *and* log this turn (#116)
-        getContextNote, // inject context-size note for the orchestrator (#165)
-      }),
-      role,
-    );
+    const responder = createClaudeCodeResponder({
+      workdir: workspace.path,
+      appendSystemPrompt: composeAgentInstructions(role),
+      claudeSessionId, // stable id (#126/#165): generation-indexed for the orchestrator
+      resume: resuming, // first turn --resume the interrupted conversation rather than create (#126)
+      permissionPromptTool: PERMISSION_PROMPT_TOOL,
+      mcpConfigPath,
+      settings: permissionPolicyFor(role), // the orchestrator may push + open PRs (#137); executors can't
+      model,
+      onReasoningChange: reasoning.emit,
+      onUsage: recordTurnUsage, // accumulate the running total *and* log this turn (#116)
+      getContextNote, // inject context-size note for the orchestrator (#165)
+    });
+    const agent = runExecutor(channel, agentId, responder, role);
 
     // Host the live side of delegation (#93/#114): answer this agent's spawn/shutdown
     // requests. An `executor` spawn provisions a *full executor delegate* — a fresh
@@ -525,6 +522,7 @@ function provisionSession(args: {
         usageSeat?.close();
         delegationHost.close();
         agent.close();
+        responder.closeSession(); // terminate the persistent claude process (#172)
         rmSync(configPath, { force: true });
         // System capture: commit whatever the session changed onto its branch, then
         // drop the worktree (the branch survives for review).
@@ -540,6 +538,7 @@ function provisionSession(args: {
         // delegate's session and worktree for the new orchestrator generation to rewire.
         delegationHost.releaseForCompaction();
         agent.close();
+        responder.closeSession(); // terminate the persistent claude process (#172)
         rmSync(configPath, { force: true });
         workspace.commit(`Mjolnir ${role} session ${sessionId}`); // no-op for orchestrator
         workspace.remove(); // no-op for orchestrator

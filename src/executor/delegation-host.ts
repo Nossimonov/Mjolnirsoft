@@ -123,7 +123,16 @@ export function createDelegationHost(deps: DelegationHostDeps): DelegationHost {
     // responder on the spawner's worktree.
     createDelegate: (role, id, sub) => {
       if (ISOLATED_WORKTREE_ROLES.has(role)) return deps.provisionExecutorDelegate(role as AgentRole, id, sub, false);
-      return { close: runExecutor(sub, id, deps.createResponder(role as AgentRole, id), role).close };
+      // Critique-role delegates (evaluator, etc.) run a shared-worktree responder.
+      // Close the responder's persistent session when the delegate shuts down (#172).
+      const responder = deps.createResponder(role as AgentRole, id);
+      const seat = runExecutor(sub, id, responder, role);
+      return {
+        close(): void {
+          seat.close();
+          (responder as { closeSession?: () => void }).closeSession?.();
+        },
+      };
     },
     generateToken: deps.generateToken,
   });

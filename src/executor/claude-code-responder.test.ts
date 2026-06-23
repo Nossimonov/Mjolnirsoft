@@ -3,6 +3,7 @@ import {
   createClaudeCodeResponder,
   resolveClaudeBin,
   buildClaudeArgs,
+  buildStreamSessionArgs,
   senderAttribution,
   interpretClaudeResult,
   extractUsage,
@@ -16,6 +17,8 @@ import {
   EXECUTOR_PERMISSIONS,
   READONLY_PERMISSIONS,
   type ViewEvent,
+  type StreamSession,
+  type StreamTurnHandlers,
 } from './claude-code-responder.ts';
 import { isAuthError } from './auth-error.ts';
 import { SHARED_CORE, EXECUTOR_INSERT } from '../core/agent-instructions.ts';
@@ -685,5 +688,305 @@ describe('resolveClaudeBin', () => {
   it('falls back to a PATH-resolved command when CLAUDE_BIN is unset', () => {
     delete process.env.CLAUDE_BIN;
     expect(resolveClaudeBin()).toBe(process.platform === 'win32' ? 'claude.exe' : 'claude');
+  });
+});
+
+describe('buildStreamSessionArgs (#172)', () => {
+  it('uses --print + --input-format stream-json instead of -p <prompt>', () => {
+    const args = buildStreamSessionArgs();
+    // Starts with --print (headless mode, no prompt text arg follows)
+    expect(args.slice(0, 4)).toEqual(['--print', '--input-format', 'stream-json', '--output-format']);
+    // No legacy -p flag (which expects a following prompt text)
+    expect(args).not.toContain('-p');
+  });
+
+  it('keeps --output-format stream-json, --verbose, --include-partial-messages', () => {
+    const args = buildStreamSessionArgs();
+    expect(args).toContain('--output-format');
+    expect(args[args.indexOf('--output-format') + 1]).toBe('stream-json');
+    expect(args).toContain('--verbose');
+    expect(args).toContain('--include-partial-messages');
+  });
+
+  it('passes --session-id for a new session and --resume for an existing one (#126)', () => {
+    expect(buildStreamSessionArgs({ sessionId: 'sid' }).slice(-2)).toEqual(['--session-id', 'sid']);
+    expect(buildStreamSessionArgs({ sessionId: 'sid', resume: true }).slice(-2)).toEqual(['--resume', 'sid']);
+  });
+
+  it('passes --model, --append-system-prompt, --permission-prompt-tool, --mcp-config when given', () => {
+    const args = buildStreamSessionArgs({
+      model: 'sonnet',
+      appendSystemPrompt: 'be executor',
+      permissionPromptTool: 'mcp__perm__approve',
+      mcpConfigPath: '/cfg.json',
+    });
+    expect(args[args.indexOf('--model') + 1]).toBe('sonnet');
+    expect(args[args.indexOf('--append-system-prompt') + 1]).toBe('be executor');
+    expect(args[args.indexOf('--permission-prompt-tool') + 1]).toBe('mcp__perm__approve');
+    expect(args[args.indexOf('--mcp-config') + 1]).toBe('/cfg.json');
+  });
+});
+
+/** Build a mock {@link StreamSession} whose send() calls are controlled by a vi.fn(). */
+function makeMockSession(sendImpl?: (prompt: string, handlers: StreamTurnHandlers) => Promise<string>) {
+  const defaultSend = vi.fn(
+    sendImpl ?? (async () => 'ok'),
+  );
+  const session: StreamSession & { sends: string[]; closed: boolean } = {
+    sends: [],
+    closed: false,
+    send: async (prompt, handlers) => {
+      session.sends.push(prompt);
+      return defaultSend(prompt, handlers);
+    },
+    close: vi.fn(() => { session.closed = true; }),
+  };
+  return session;
+}
+
+describe('createClaudeCodeResponder — persistent session path (#172)', () => {
+  it('creates the session once and reuses it for subsequent turns', async () => {
+    let created = 0;
+    const session = makeMockSession();
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'sid',
+      createSession: () => { created++; return session; },
+    });
+
+    await respond(task);
+    await respond(task);
+
+    expect(created).toBe(1); // one persistent session, not two
+    expect(session.sends).toHaveLength(2);
+  });
+
+  it('creates the session with resume:false on the first turn', async () => {
+    let capturedOpts: Record<string, unknown> | undefined;
+    const session = makeMockSession();
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'stable-sid',
+      createSession: (opts) => { capturedOpts = opts as Record<string, unknown>; return session; },
+    });
+
+    await respond(task);
+
+    expect(capturedOpts?.sessionId).toBe('stable-sid');
+    expect(capturedOpts?.resume).toBe(false);
+  });
+
+  it('creates with resume:true when the responder is started already-resumed (#126)', async () => {
+    let capturedOpts: Record<string, unknown> | undefined;
+    const session = makeMockSession();
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'stable-sid',
+      resume: true,
+      createSession: (opts) => { capturedOpts = opts as Record<string, unknown>; return session; },
+    });
+
+    await respond(task);
+
+    expect(capturedOpts?.resume).toBe(true);
+  });
+
+  it('falls back to create (resume:false) when session reports "no conversation" (#126)', async () => {
+    const createdWith: boolean[] = [];
+    const failSession = makeMockSession(async () => {
+      throw new Error('claude failed (exit 1): No conversation found with session ID: sid');
+    });
+    const okSession = makeMockSession();
+    let call = 0;
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'sid',
+      resume: true, // start as "already resumed"
+      sleep: () => Promise.resolve(),
+      createSession: (opts) => {
+        createdWith.push((opts as { resume: boolean }).resume);
+        return call++ === 0 ? failSession : okSession;
+      },
+    });
+
+    await respond(task);
+
+    expect(createdWith[0]).toBe(true);  // first try: --resume
+    expect(createdWith[1]).toBe(false); // retry: --session-id (create)
+    expect(failSession.closed).toBe(true); // dead session was closed
+  });
+
+  it('switches to resume when session reports "already in use" (#90/#141)', async () => {
+    const createdWith: boolean[] = [];
+    const failSession = makeMockSession(async () => {
+      throw new Error('claude failed (exit 1): Session ID sid is already in use');
+    });
+    const okSession = makeMockSession();
+    let call = 0;
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'sid',
+      sleep: () => Promise.resolve(),
+      createSession: (opts) => {
+        createdWith.push((opts as { resume: boolean }).resume);
+        return call++ === 0 ? failSession : okSession;
+      },
+    });
+
+    await respond(task);
+
+    expect(createdWith[0]).toBe(false); // first try: --session-id
+    expect(createdWith[1]).toBe(true);  // retry: --resume
+    expect(failSession.closed).toBe(true);
+  });
+
+  it('retries a transient overload (529) within the turn, creating a new session each time (#141)', async () => {
+    const sessions: ReturnType<typeof makeMockSession>[] = [];
+    let call = 0;
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'sid',
+      sleep: () => Promise.resolve(),
+      createSession: () => {
+        const s = call++ < 2
+          ? makeMockSession(async () => { throw new Error('claude failed (exit 1): 529 Overloaded'); })
+          : makeMockSession();
+        sessions.push(s);
+        return s;
+      },
+    });
+
+    await respond(task);
+
+    expect(sessions).toHaveLength(3); // two failures + one success
+    expect(sessions[0].closed).toBe(true);
+    expect(sessions[1].closed).toBe(true);
+    expect(sessions[2].sends).toHaveLength(1);
+  });
+
+  it('forwards per-turn reasoning digest and usage through session.send handlers (#110/#116)', async () => {
+    const digest: ReasoningDigest = { entries: [{ kind: 'thinking', text: 'hm' }] };
+    const session = makeMockSession(async (_p, h) => {
+      h.onDigest?.(digest);
+      h.onUsage?.({ inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0 });
+      return 'result text';
+    });
+    const usages: unknown[] = [];
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      createSession: () => session,
+      onUsage: (u) => usages.push(u),
+    });
+
+    const reply = await respond(task);
+
+    expect(reply).toEqual([
+      { type: 'reasoning-digest', payload: digest },
+      { type: 'result', payload: 'result text' },
+    ]);
+    expect(usages).toEqual([{ inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0 }]);
+  });
+
+  it('returns undefined for a resultless turn (empty result) — digest not posted alone (#110)', async () => {
+    const digest: ReasoningDigest = { entries: [{ kind: 'thinking', text: 'hm' }] };
+    const session = makeMockSession(async (_p, h) => {
+      h.onDigest?.(digest);
+      return '   '; // trims to empty
+    });
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession: () => session });
+    expect(await respond(task)).toBeUndefined();
+  });
+
+  it('exposes closeSession() that closes the active session process (#172/#215)', async () => {
+    const session = makeMockSession();
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession: () => session });
+    await respond(task);
+
+    respond.closeSession();
+
+    expect(session.closed).toBe(true);
+  });
+
+  it('closeSession() is a no-op before any turn starts (session not yet created)', () => {
+    const createSession = vi.fn(() => makeMockSession());
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession });
+
+    // No turn started — closeSession() must not throw
+    expect(() => respond.closeSession()).not.toThrow();
+    expect(createSession).not.toHaveBeenCalled(); // session never created
+  });
+
+  it('closeSession() while a turn is in-flight: turn still completes, session is marked closed (#172)', async () => {
+    let sendResolve!: (v: string) => void;
+    const session = makeMockSession(
+      () => new Promise<string>((resolve) => { sendResolve = resolve; }),
+    );
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession: () => session });
+
+    const turnPromise = respond(task);
+
+    // Session is live while turn is in flight
+    expect(session.closed).toBe(false);
+    respond.closeSession();
+    expect(session.closed).toBe(true);
+
+    // Resolve the in-flight send — turn completes normally despite closeSession()
+    sendResolve('result text');
+    const reply = await turnPromise;
+    expect(reply).toEqual({ type: 'result', payload: 'result text' });
+  });
+
+  it('surfaces the original error (not a TypeError) when closeSession() races with in-flight rejection (#172)', async () => {
+    // Regression for: `dead.close()` NPE when session is nulled by closeSession() before
+    // the catch block runs. Without the dead?.close() fix the rejection would be:
+    // "Cannot read properties of null (reading 'close')" instead of the real error.
+    let sendReject!: (e: Error) => void;
+    const session = makeMockSession(
+      () => new Promise<string>((_, reject) => { sendReject = reject; }),
+    );
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession: () => session });
+
+    const turnPromise = respond(task);
+    respond.closeSession(); // null out `session` in the closure while send() is in flight
+    sendReject(new Error('session disconnected'));
+
+    const err = await turnPromise.catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toBe('session disconnected');
+  });
+
+  it('spawns a new session with resume:true after closeSession() resets it (#172/#128)', async () => {
+    const spawned: Array<{ resume: boolean }> = [];
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      claudeSessionId: 'sid',
+      createSession: (opts) => {
+        spawned.push({ resume: !!opts.resume });
+        return makeMockSession();
+      },
+    });
+
+    await respond(task);     // turn 1: spawns session[0] with resume:false
+    respond.closeSession();  // close the session; `started` closure remains true
+    await respond(task);     // turn 2: session is null → spawns session[1] with resume:true
+
+    expect(spawned).toHaveLength(2);
+    expect(spawned[0]!.resume).toBe(false);
+    expect(spawned[1]!.resume).toBe(true);
+  });
+
+  it('sends the formatted prompt with sender attribution and context note as the message content', async () => {
+    const session = makeMockSession();
+    const respond = createClaudeCodeResponder({
+      workdir: '/w',
+      createSession: () => session,
+      getContextNote: () => '[ctx: 50K tokens]',
+    });
+
+    await respond(task);
+
+    expect(session.sends[0]).toContain('[Message from architect — authoritative (id: orchestrator)]');
+    expect(session.sends[0]).toContain('[ctx: 50K tokens]');
+    expect(session.sends[0]).toContain('write a haiku to haiku.md');
   });
 });
