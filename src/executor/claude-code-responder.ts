@@ -646,19 +646,21 @@ export const runClaudeCodeCli: RunClaudeCode = (
 /**
  * Persistent streaming session factory: spawn `claude --print --input-format
  * stream-json` once, keep stdin open, and push each user message as an NDJSON
- * line (#172). Each {@link StreamSession.send} call pushes one line and resolves
- * when the matching `result` line arrives on stdout — never before the preceding
- * turn's result (enforced by the caller's serialization guard in
- * `executor-runtime.ts`). The process lives until `close()` is called (stdin.end()).
+ * line (#172). Messages arriving while a turn is in flight are pushed immediately
+ * to stdin so claude can consume them at the next tool boundary within the same
+ * running turn — not deferred to a separate later turn.
  *
- * Multi-result / num_turns>1 handling: the caller's serialization guard ensures
- * message N+1 is never pushed before result N arrives, so each invocation sees at
- * most one result line per pushed message. The combined `num_turns>1` envelope only
- * appears when messages are pushed concurrently, which our model prevents.
+ * Ordering: claude processes messages in the order they arrive on stdin and emits
+ * one `result` line per message, also in order. A FIFO pending queue maps each
+ * pushed message to its resolver: `onResult` always shifts the oldest entry, so
+ * each send() promise resolves to the correct result regardless of how many
+ * messages are in flight simultaneously.
  *
- * Intermediate-turn answers: since we always wait for the result before pushing the
- * next message, there are no intermediate turns in the assistant stream — no
- * extraction is needed beyond the normal result line.
+ * Digest and usage per turn: each pending entry owns its own `digestAssembler`.
+ * Stream events (onLine) always feed the front-of-queue entry's assembler because
+ * events appear in stream order: turn-N events, result-N, turn-N+1 events, ...
+ * When `onResult` fires, the assembler is `build()`-called before shifting,
+ * so the digest is complete for that turn.
  */
 export const createPersistentCli: CreateStreamSession = ({ cwd, ...runArgs }) => {
   const args = buildStreamSessionArgs(runArgs);
@@ -671,74 +673,70 @@ export const createPersistentCli: CreateStreamSession = ({ cwd, ...runArgs }) =>
   let stderrBuf = '';
   child.stderr.on('data', (chunk) => { stderrBuf += String(chunk); });
 
-  // Per-turn state: set by send(), cleared when result arrives or process closes.
-  interface Turn {
+  // FIFO queue of in-flight sends. Results arrive in push order so pending[0]
+  // always corresponds to the next result line (#172 multi-result envelope).
+  interface PendingEntry {
     resolve(v: string): void;
     reject(e: Error): void;
-    reader: ReturnType<typeof createStreamReader>;
-    stdout: string;
-    resultRaw: string;
+    handlers: StreamTurnHandlers;
+    digestAssembler?: ReturnType<typeof createReasoningDigestAssembler>;
   }
-  let turn: Turn | null = null;
+  const pending: PendingEntry[] = [];
+
+  // Single stream reader for the whole process lifetime. onLine taps the
+  // front-of-queue entry's assembler; onResult shifts it, extracts usage/digest,
+  // and resolves or rejects that entry's promise.
+  const reader = createStreamReader({
+    onResult(raw) {
+      const entry = pending.shift();
+      if (!entry) return; // spurious result with no pending send (shouldn't happen)
+      const { resolve, reject, handlers, digestAssembler } = entry;
+      if (handlers.onUsage) { const u = extractUsage(raw); if (u) handlers.onUsage(u); }
+      if (digestAssembler && handlers.onDigest) handlers.onDigest(digestAssembler.build());
+      try {
+        resolve(interpretClaudeResult(raw, stderrBuf, 0));
+      } catch (err) {
+        reject(err as Error);
+      }
+    },
+    // Events appear in order: turn-N events → result-N → turn-N+1 events → ...
+    // pending[0] is the current-in-flight entry until its result shifts it off.
+    onLine: (line) => pending[0]?.digestAssembler?.feed(line),
+  });
 
   child.stdout.on('data', (chunk) => {
-    const text = decoder.write(chunk as Buffer);
-    if (turn) {
-      turn.stdout += text;
-      turn.reader.feed(text);
-    }
+    reader.feed(decoder.write(chunk as Buffer));
   });
 
   child.on('error', (err) => {
-    const t = turn; turn = null;
-    t?.reject(err);
+    const drained = pending.splice(0);
+    for (const entry of drained) entry.reject(err);
   });
 
   child.on('close', (code) => {
     const tail = decoder.end();
-    if (tail && turn) { turn.stdout += tail; turn.reader.feed(tail); }
-    if (turn) turn.reader.flush();
-    const t = turn; turn = null;
-    if (t) {
-      try {
-        t.resolve(interpretClaudeResult(t.resultRaw || t.stdout, stderrBuf, code));
-      } catch (err) {
-        t.reject(err as Error);
-      }
+    if (tail) reader.feed(tail);
+    reader.flush(); // parses any trailing result line without a terminating \n
+    // Reject any entries still waiting after flush() (process exited without results).
+    const drained = pending.splice(0);
+    if (drained.length > 0) {
+      const detail = stderrBuf.trim() || `exited with code ${code ?? 1}`;
+      const exitErr = new Error(`claude failed (exit ${code ?? 1}): ${detail}`);
+      for (const entry of drained) entry.reject(exitErr);
     }
   });
 
   return {
     send(prompt, handlers) {
       return new Promise<string>((resolve, reject) => {
-        if (turn) {
-          reject(new Error('session: send() called while a turn is already in flight'));
-          return;
-        }
         const { onReasoningChange, onDigest, onUsage } = handlers;
-        const digestAssembler = onDigest || onReasoningChange
+        const digestAssembler = (onDigest || onReasoningChange)
           ? createReasoningDigestAssembler({ onChange: onReasoningChange })
           : undefined;
-
-        const t: Turn = {
-          resolve, reject, stdout: '', resultRaw: '',
-          reader: createStreamReader({
-            onResult(raw) {
-              t.resultRaw = raw;
-              if (onUsage) { const u = extractUsage(raw); if (u) onUsage(u); }
-              if (digestAssembler && onDigest) onDigest(digestAssembler.build());
-              turn = null; // stop feeding further stdout to this reader
-              try {
-                t.resolve(interpretClaudeResult(raw, stderrBuf, 0));
-              } catch (err) {
-                t.reject(err as Error);
-              }
-            },
-            onLine: digestAssembler ? (line) => digestAssembler.feed(line) : undefined,
-          }),
-        };
-        turn = t;
-        child.stdin!.write(JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } }) + '\n');
+        pending.push({ resolve, reject, handlers: { onReasoningChange, onDigest, onUsage }, digestAssembler });
+        child.stdin!.write(
+          JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } }) + '\n',
+        );
       });
     },
 
@@ -911,7 +909,7 @@ export function createClaudeCodeResponder(
   };
 
   // Shared reply-building: same for both paths.
-  const buildReply = (result: string, digest: ReasoningDigest | undefined): ReturnType<Respond> => {
+  const buildReply = (result: string, digest: ReasoningDigest | undefined): Awaited<ReturnType<Respond>> => {
     if (!result) return undefined;
     if (digest && digest.entries.length > 0) {
       return [{ type: REASONING_DIGEST, payload: digest }, { type: 'result', payload: result }];
@@ -922,8 +920,8 @@ export function createClaudeCodeResponder(
   if (run) {
     // Legacy per-turn path: preserve exact behavior for tests that inject `run`.
     // Each message spawns a new one-shot `claude` process with the appropriate
-    // --session-id / --resume flag. The `tail` chain in executor-runtime serializes
-    // these turns exactly as before.
+    // --session-id / --resume flag. Tests using this path are sequential so
+    // concurrent-send concerns do not apply here.
     let started = resume;
     const respond: Respond = async (message) => {
       const prompt = buildPrompt(message);
@@ -969,9 +967,11 @@ export function createClaudeCodeResponder(
   // Persistent session path (#172): one `claude --print --input-format stream-json`
   // process for the responder's lifetime. Messages are pushed to stdin as NDJSON
   // lines; each send() resolves when the matching result line arrives. Session is
-  // created lazily on the first respond() call and reused across turns. The
-  // executor-runtime tail chain already serializes turns (push N+1 only after
-  // result N), so concurrent sends never occur.
+  // created lazily on the first respond() call and reused across turns.
+  // Concurrent sends ARE possible (#172): executor-runtime fires respond() immediately
+  // for each incoming channel message without waiting for the prior result. The
+  // session's FIFO pending queue (in createPersistentCli) guarantees that result N
+  // resolves turn N — claude processes stdin in order and emits one result per message.
   const factory = createSessionFn ?? createPersistentCli;
   let session: StreamSession | null = null;
   let started = resume;
@@ -1012,6 +1012,14 @@ export function createClaudeCodeResponder(
         // Use optional chaining: closeSession() may have already nulled `session` (race with
         // dispose while a turn is in flight), in which case `dead` is null and close() would
         // throw a TypeError instead of surfacing the real error (#172).
+        //
+        // Concurrent-turn note: if two turns share this session and both catch the same
+        // session-startup error (isNoConversation / isAlreadyInUse), they may race to null/
+        // replace `session`. That window is bounded by MAX_TURN_ATTEMPTS and practically only
+        // arises on the very first turn pair — once `started` is true a healthy session is
+        // shared and these errors never occur. Transient overloads always sleep before retry,
+        // preventing the race entirely. The failure mode is both turns erroring out on startup,
+        // not an infinite cascade or data corruption.
         const dead = session;
         session = null;
         dead?.close();

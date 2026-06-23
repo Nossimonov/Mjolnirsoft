@@ -67,14 +67,16 @@ export function runExecutor(
   role: Role = 'executor',
 ): Participant {
   let executor: Participant;
-  // Serialize turns: the Claude responder pins one session id, so two concurrent
-  // `claude --resume <same id>` runs collide ("Session ID … is already in use").
-  // This most often bites while a turn is blocked on a permission/question card —
-  // a message arriving then would otherwise start a second, overlapping run. We
-  // chain each turn on a tail promise so the turn for message N+1 begins only
-  // after N's turn settles. The tail must always resolve (the catch swallows the
-  // failure) so one failed turn can't wedge the queue (#100).
-  let tail = Promise.resolve();
+  // Mid-turn delivery (#172): each incoming message starts its respond() call
+  // immediately, without waiting for the previous turn to settle. The persistent
+  // streaming session (`createPersistentCli`) pushes messages to claude's stdin as
+  // they arrive and uses an internal FIFO queue to guarantee result ordering, so
+  // replies reach the channel in message-arrival order even with concurrent calls.
+  //
+  // The old per-process model (#100) serialized turns to prevent two concurrent
+  // `claude --resume <id>` processes from colliding on the pinned session id.
+  // The persistent session eliminates that risk: there is exactly one process whose
+  // stdin accepts any number of in-flight pushes.
   executor = channel.join(id, role, (message) => {
     // Default-deny routing (#116): only conversation becomes a turn. Infrastructure
     // (usage tallies, permission/delegation control, reasoning digests) shares this
@@ -83,7 +85,7 @@ export function runExecutor(
     // The allowlist makes that structurally impossible; new infra types stay out by
     // default. So gated, infra never even enters the turn queue. See AGENT_PROMPT_TYPES.
     if (!deliversToAgent(message)) return;
-    tail = tail.then(async () => {
+    void (async () => {
       try {
         const reply = await respond(message);
         // A turn may reply with several messages in order (e.g. a reasoning digest
@@ -101,7 +103,7 @@ export function runExecutor(
         process.stderr.write(`${failure}\n`);
         executor.send({ type: 'error', payload: failure });
       }
-    });
+    })();
   });
   return executor;
 }

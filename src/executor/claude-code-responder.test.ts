@@ -22,6 +22,7 @@ import {
 } from './claude-code-responder.ts';
 import { isAuthError } from './auth-error.ts';
 import { SHARED_CORE, EXECUTOR_INSERT } from '../core/agent-instructions.ts';
+import type { Message } from '../core/channel.ts';
 import type { ReasoningDigest } from './reasoning-digest.ts';
 
 const task = { from: 'orchestrator', role: 'planner', type: 'text', payload: 'write a haiku to haiku.md' } as const;
@@ -914,6 +915,37 @@ describe('createClaudeCodeResponder — persistent session path (#172)', () => {
     // No turn started — closeSession() must not throw
     expect(() => respond.closeSession()).not.toThrow();
     expect(createSession).not.toHaveBeenCalled(); // session never created
+  });
+
+  it('pushes a second message to the session mid-turn without waiting for the first result (#172 AC)', async () => {
+    // Acceptance criterion: a message arriving while a turn is in flight is pushed
+    // to the session's stdin immediately — not queued until the current result arrives.
+    // In production this means claude sees the message at its next tool boundary.
+    let resolveFirst!: (v: string) => void;
+    const session = makeMockSession((prompt) => {
+      // First send parks (simulates an in-flight turn with a running tool).
+      // Second send resolves immediately (the mid-turn injection).
+      if (session.sends.length === 1) {
+        return new Promise<string>((r) => { resolveFirst = r; });
+      }
+      return Promise.resolve('mid-turn reply');
+    });
+    const respond = createClaudeCodeResponder({ workdir: '/w', createSession: () => session });
+
+    const task2: Message = { from: 'orchestrator', role: 'planner', type: 'text', payload: 'mid-turn message' };
+
+    const turn1 = respond(task);   // starts; session.send() called synchronously → pending
+    const turn2 = respond(task2);  // called before turn1 resolves — pushes mid-turn
+
+    // Both messages are already in the session's send queue (no tail-chain blocking).
+    expect(session.sends).toHaveLength(2);
+
+    // Resolve the first turn
+    resolveFirst('first reply');
+
+    const [reply1, reply2] = await Promise.all([turn1, turn2]);
+    expect(reply1).toEqual({ type: 'result', payload: 'first reply' });
+    expect(reply2).toEqual({ type: 'result', payload: 'mid-turn reply' });
   });
 
   it('closeSession() while a turn is in-flight: turn still completes, session is marked closed (#172)', async () => {
