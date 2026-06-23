@@ -29,6 +29,7 @@ import {
   type CompactionRequest,
   type CompactionResponse,
 } from '../../src/core/compaction-protocol.ts';
+import { createIdleCompactionTrigger, type IdleCompactionTrigger } from '../../src/executor/idle-compaction.ts';
 import { inspectSession, orchestratorSessionKey } from '../../src/executor/session-inspector.ts';
 import { projectDelegationLedger } from '../../src/executor/delegation-ledger.ts';
 import { REASONING_DIGEST } from '../../src/executor/reasoning-digest.ts';
@@ -55,6 +56,17 @@ interface PanelTracker {
 // orchestrator per workspace, so it's opened directly under this id — no name prompt —
 // and re-opening attaches to it (if live) or resumes its one conversation.
 const ORCHESTRATOR_ID = 'orchestrator';
+
+// Prompt injected by the idle-compaction trigger (#167). Sent as a planner-attributed
+// 'text' message when the orchestrator has been idle long enough that the prompt cache
+// is about to expire, instructing it to write a self-hand-off and call mcp__compact__request.
+const IDLE_COMPACTION_PROMPT =
+  'Your session has been idle long enough that the prompt cache is about to expire. ' +
+  'To avoid an expensive full-context cache miss on the next turn, write a comprehensive ' +
+  'self-hand-off now — include the current goal, any active delegates and their status, ' +
+  'recent integrations (issue/PR ids), and pointers to the sources you will need next — ' +
+  'then call mcp__compact__request. This is a proactive idle self-compaction (#167); ' +
+  'act on this immediately and do not defer.';
 
 // USAGE_MESSAGE (#116) is the channel message type carrying one turn's usage. It's
 // posted per turn as the turn completes (not on close), so a long-lived session's
@@ -672,6 +684,7 @@ function launchSession(
   let compactionPending = false;
   let compactionObserver: Participant | undefined;
   let compacted = false; // set when compaction takes over lifecycle; suppresses onDispose cleanup
+  let idleTrigger: IdleCompactionTrigger | undefined; // set below for the orchestrator (#167)
   const isOrchestrator = role === 'orchestrator';
 
   const compactionHost = isOrchestrator
@@ -713,8 +726,9 @@ function launchSession(
       payload: { generation: nextGeneration },
     });
 
-    // 3. Close the compaction host seat (no more requests on the old session).
+    // 3. Close the compaction host seat and idle trigger (no more activity on old session).
     compactionHost?.close();
+    idleTrigger?.close();
 
     // 4. Mark as compacted so onDispose doesn't double-close.
     compacted = true;
@@ -732,6 +746,31 @@ function launchSession(
     openOrchestrator(context, folder, store, liveSessions, handoff, tracker);
   }
 
+  // Idle-triggered compaction (#167, orchestrator only): proactively compact when the
+  // orchestrator has been idle long enough that the prompt cache is about to expire,
+  // so the hand-off turn is still cache-warm and the eventual post-idle resume is cheap.
+  if (isOrchestrator) {
+    const idleThresholdMs =
+      loadProjectConfig(join(folder.uri.fsPath, 'mjolnir.config.json')).compaction.idleThresholdSeconds * 1000;
+    if (idleThresholdMs > 0) {
+      idleTrigger = createIdleCompactionTrigger({
+        channel,
+        agentId: provisioned.agentId,
+        thresholdMs: idleThresholdMs,
+        participantId: `${sessionId}-idle-observer`,
+        onFire: () => {
+          // Inject a planner-attributed 'text' prompt so the orchestrator's next turn
+          // writes its self-hand-off and calls mcp__compact__request. This reuses the
+          // existing compaction flow — the host's compactionHost listener picks up the
+          // resulting COMPACTION_REQUEST and performs the restart.
+          const seat = channel.join(`${sessionId}-idle-trigger`, 'planner', () => {});
+          seat.send({ type: 'text', payload: IDLE_COMPACTION_PROMPT });
+          seat.close();
+        },
+      });
+    }
+  }
+
   openSessionPanel(context, store, sessionId, folder.uri.fsPath, liveSessions, {
     executorAttached: true,
     executorId: provisioned.agentId,
@@ -745,6 +784,7 @@ function launchSession(
       if (compacted) return; // compaction already cleaned up; don't double-close
       compactionObserver?.close();
       compactionHost?.close();
+      idleTrigger?.close();
       const captured = provisioned.close();
       channel.close();
       // The orchestrator has no branch (it works out of the main repo, #123), so only
