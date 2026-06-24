@@ -168,7 +168,6 @@ describe('relaunch while prior generation is registered (#215)', () => {
       compacted = true;
       evicted.push('compactionObserver-close');
       evicted.push('compactionHost-close');
-      evicted.push('idleTrigger-close');
       evicted.push('provisioned-closeForCompaction');
       evicted.push('channel-close');
     });
@@ -181,7 +180,6 @@ describe('relaunch while prior generation is registered (#215)', () => {
     expect(evicted).toEqual([
       'compactionObserver-close',
       'compactionHost-close',
-      'idleTrigger-close',
       'provisioned-closeForCompaction',
       'channel-close',
     ]);

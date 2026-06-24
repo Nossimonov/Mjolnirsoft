@@ -11,11 +11,9 @@ export interface StorageConfig {
 }
 
 /**
- * Compaction settings for the orchestrator (#165/#167). After integrating a task the
+ * Compaction settings for the orchestrator (#165). After integrating a task the
  * orchestrator checks its context size; if it exceeds the threshold it writes a
- * self-hand-off and requests a context rotation. Separately, the host triggers an
- * idle-time compaction when the orchestrator has been inactive long enough that the
- * prompt cache is about to expire (#167).
+ * self-hand-off and requests a context rotation.
  */
 export interface CompactionConfig {
   /**
@@ -28,14 +26,6 @@ export interface CompactionConfig {
    * The architect tunes this in mjolnir.config.json ("compaction.thresholdContextPercent").
    */
   readonly thresholdContextPercent: number;
-  /**
-   * Seconds of orchestrator idle time before the host proactively triggers a
-   * self-compaction (#167). Must be ≥ 0; 0 disables the idle trigger. Default: 210
-   * (3.5 min — fires well before the 300s prompt-cache TTL so the hand-off turn
-   * itself is still cache-warm). The architect tunes this in mjolnir.config.json
-   * ("compaction.idleThresholdSeconds").
-   */
-  readonly idleThresholdSeconds: number;
 }
 
 /** The committed, machine-readable project strategy (see `mjolnir.config.json`). */
@@ -47,7 +37,7 @@ export interface ProjectConfig {
 /** Default when no committed config is present: the dependency-free local backend. */
 export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   storage: { backend: 'local' },
-  compaction: { thresholdContextPercent: 0.75, idleThresholdSeconds: 210 },
+  compaction: { thresholdContextPercent: 0.75 },
 };
 
 /**
@@ -96,19 +86,7 @@ export function loadProjectConfig(path = resolve(process.cwd(), 'mjolnir.config.
       `invalid mjolnir.config.json: compaction.thresholdContextPercent must be between 0 (exclusive) and 1 (inclusive), got ${thresholdContextPercent}`,
     );
   }
-  const idleThresholdSeconds =
-    compaction?.idleThresholdSeconds ?? DEFAULT_PROJECT_CONFIG.compaction.idleThresholdSeconds;
-  if (typeof idleThresholdSeconds !== 'number') {
-    throw new Error(
-      `invalid mjolnir.config.json: compaction.idleThresholdSeconds must be a number, got ${describeJson(idleThresholdSeconds)}`,
-    );
-  }
-  if (idleThresholdSeconds < 0) {
-    throw new Error(
-      `invalid mjolnir.config.json: compaction.idleThresholdSeconds must be ≥ 0 (0 = disabled), got ${idleThresholdSeconds}`,
-    );
-  }
-  return { storage: { backend }, compaction: { thresholdContextPercent, idleThresholdSeconds } };
+  return { storage: { backend }, compaction: { thresholdContextPercent } };
 }
 
 /** A non-null, non-array object — the only valid shape for the config and its `storage`. */
