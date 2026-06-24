@@ -620,6 +620,45 @@ describe('buildClaudeArgs', () => {
     expect(deny('orchestrator')).toEqual(expect.arrayContaining(['Agent', 'Bash(rm -rf *)', 'Bash(git reset --hard *)']));
   });
 
+  it('orchestrator settings carry autoCompactEnabled:true + model-derived autoCompactWindow (#224)', () => {
+    // Default model (undefined → 1M window); default factor 0.5 → window = 500_000.
+    const defaultPolicy = JSON.parse(permissionPolicyFor('orchestrator')) as {
+      autoCompactEnabled: boolean;
+      autoCompactWindow: number;
+    };
+    expect(defaultPolicy.autoCompactEnabled).toBe(true);
+    expect(defaultPolicy.autoCompactWindow).toBe(500_000); // Math.round(1_000_000 * 0.5)
+
+    // Haiku model (200K window); factor 0.5 → window = 100_000.
+    const haikuPolicy = JSON.parse(permissionPolicyFor('orchestrator', 'claude-haiku-4-5', 0.5)) as {
+      autoCompactEnabled: boolean;
+      autoCompactWindow: number;
+    };
+    expect(haikuPolicy.autoCompactEnabled).toBe(true);
+    expect(haikuPolicy.autoCompactWindow).toBe(100_000); // Math.round(200_000 * 0.5)
+
+    // Custom factor 0.6 with 1M-window model → 600_000.
+    const customPolicy = JSON.parse(permissionPolicyFor('orchestrator', 'claude-opus-4-8', 0.6)) as {
+      autoCompactEnabled: boolean;
+      autoCompactWindow: number;
+    };
+    expect(customPolicy.autoCompactEnabled).toBe(true);
+    expect(customPolicy.autoCompactWindow).toBe(600_000); // Math.round(1_000_000 * 0.6)
+  });
+
+  it('executor and evaluator settings carry autoCompactEnabled:false (#224)', () => {
+    const executorPolicy = JSON.parse(permissionPolicyFor('executor')) as { autoCompactEnabled: boolean };
+    expect(executorPolicy.autoCompactEnabled).toBe(false);
+
+    const evaluatorPolicy = JSON.parse(permissionPolicyFor('evaluator')) as { autoCompactEnabled: boolean };
+    expect(evaluatorPolicy.autoCompactEnabled).toBe(false);
+  });
+
+  it('orchestrator settings do NOT include mcp__compact__request in allow list (#224)', () => {
+    const policy = JSON.parse(permissionPolicyFor('orchestrator')) as { permissions: { allow: string[] } };
+    expect(policy.permissions.allow).not.toContain('mcp__compact__request');
+  });
+
   it('routes evaluator and investigator through READONLY_PERMISSIONS — denied edits, executor/orchestrator unchanged (#185)', () => {
     // Read-only roles get READONLY_PERMISSIONS, not EXECUTOR_PERMISSIONS.
     expect(permissionPolicyFor('evaluator')).toBe(READONLY_PERMISSIONS);
@@ -1011,18 +1050,16 @@ describe('createClaudeCodeResponder — persistent session path (#172)', () => {
     expect(spawned[1]!.resume).toBe(true);
   });
 
-  it('sends the formatted prompt with sender attribution and context note as the message content', async () => {
+  it('sends the formatted prompt with sender attribution as the message content', async () => {
     const session = makeMockSession();
     const respond = createClaudeCodeResponder({
       workdir: '/w',
       createSession: () => session,
-      getContextNote: () => '[ctx: 50K tokens]',
     });
 
     await respond(task);
 
     expect(session.sends[0]).toContain('[Message from architect — authoritative (id: orchestrator)]');
-    expect(session.sends[0]).toContain('[ctx: 50K tokens]');
     expect(session.sends[0]).toContain('write a haiku to haiku.md');
   });
 });

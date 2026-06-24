@@ -359,8 +359,10 @@ describe('investigator role (#166)', () => {
     expect(composed).toContain('AGENTS.md');
   });
 
-  it('investigator instructions do NOT carry the compaction clause (orchestrator-only)', () => {
-    expect(composeAgentInstructions('investigator')).not.toContain('mcp__compact__request');
+  it('investigator instructions carry the drift safeguard via the orchestrator operational layer check (investigator is read-only)', () => {
+    // The investigator does not compose ORCHESTRATOR_OPERATIONS, so it does not carry
+    // the drift safeguard — that is orchestrator-specific context hygiene.
+    expect(composeAgentInstructions('investigator')).not.toContain('drift safeguard');
   });
 });
 
@@ -391,48 +393,22 @@ describe('orchestrator delegate interaction guardrails (#218)', () => {
   });
 });
 
-describe('orchestrator architect-directed compaction and drift-safeguard (#165)', () => {
-  it('ORCHESTRATOR_OPERATIONS contains the architect-directed compaction clause', () => {
-    // The clause still uses mcp__compact__request (the tool is unchanged) and requires
-    // a complete self-hand-off and no live delegate — but now fires only when the
-    // architect directs it, not automatically from the context-size note.
-    expect(ORCHESTRATOR_OPERATIONS).toContain('mcp__compact__request');
-    expect(ORCHESTRATOR_OPERATIONS).toContain('self-hand-off');
-    expect(ORCHESTRATOR_OPERATIONS).toContain('no live delegate');
-    expect(ORCHESTRATOR_OPERATIONS).toContain('Context size');
-  });
-
-  it('ORCHESTRATOR_OPERATIONS: context-size note is advisory only — no auto-call directive (#213)', () => {
-    // The note must not instruct the orchestrator to compact based on the value.
-    expect(ORCHESTRATOR_OPERATIONS).toContain('advisory only');
-    expect(ORCHESTRATOR_OPERATIONS).toContain('only when the architect');
-    // Compaction is still at a clean task boundary, not mid-delegation.
-    expect(ORCHESTRATOR_OPERATIONS).toContain('task boundary');
-    expect(ORCHESTRATOR_OPERATIONS).toContain('no live delegate');
-  });
-
-  it('ORCHESTRATOR_OPERATIONS describes the metric as raw current-context occupancy, not weighted/accumulated (#213)', () => {
-    // The metric is raw prompt-side token count — not an "accumulated weighted-token total".
-    expect(ORCHESTRATOR_OPERATIONS).toContain('raw current-context-window occupancy');
-    expect(ORCHESTRATOR_OPERATIONS).not.toContain('accumulated weighted-token total');
-  });
-
-  it('ORCHESTRATOR_OPERATIONS contains the compaction-drift safeguard', () => {
-    // After a compaction, recalled details must be verified against primary sources.
+describe('orchestrator context-summary drift-safeguard (#224)', () => {
+  it('ORCHESTRATOR_OPERATIONS contains the context-summary drift safeguard', () => {
+    // Built-in auto-compaction may summarize context; recalled details should be
+    // re-verified against primary sources before acting on them.
     expect(ORCHESTRATOR_OPERATIONS).toContain('drift safeguard');
     expect(ORCHESTRATOR_OPERATIONS).toContain('primary source');
     expect(ORCHESTRATOR_OPERATIONS).toContain('re-verification');
   });
 
-  it('the composed orchestrator instructions carry both compaction clauses', () => {
-    const composed = composeAgentInstructions('orchestrator');
-    expect(composed).toContain('mcp__compact__request');
-    expect(composed).toContain('drift safeguard');
+  it('ORCHESTRATOR_OPERATIONS does NOT contain mcp__compact__request (custom tool removed, #224)', () => {
+    expect(ORCHESTRATOR_OPERATIONS).not.toContain('mcp__compact__request');
   });
 
-  it('executor and evaluator instructions do NOT carry the compaction clause (orchestrator-only)', () => {
-    // Compaction is an orchestrator concern — no other role has context longevity.
-    expect(composeAgentInstructions('executor')).not.toContain('mcp__compact__request');
-    expect(composeAgentInstructions('evaluator')).not.toContain('mcp__compact__request');
+  it('the composed orchestrator instructions carry the drift safeguard', () => {
+    const composed = composeAgentInstructions('orchestrator');
+    expect(composed).toContain('drift safeguard');
+    expect(composed).not.toContain('mcp__compact__request');
   });
 });

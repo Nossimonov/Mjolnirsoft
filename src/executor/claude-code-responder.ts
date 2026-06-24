@@ -3,6 +3,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import type { Message } from '../core/channel.ts';
 import { composeAgentInstructions } from '../core/agent-instructions.ts';
+import { contextWindowFor } from '../core/model-context-window.ts';
 import { createReasoningDigestAssembler, REASONING_DIGEST, type ReasoningDigest } from './reasoning-digest.ts';
 import type { Respond } from './executor-runtime.ts';
 
@@ -353,6 +354,11 @@ export const EXECUTOR_PERMISSION_POLICY = {
   // hand-off. Auto-memory is a built-in (no tool to deny); this settings toggle is the
   // off switch, read from `--settings` like the rest of this policy.
   autoMemoryEnabled: false,
+  // Turn off built-in auto-compaction for short-lived executor/evaluator sessions (#224).
+  // They have no longevity problem, so the overhead of compaction (which fires on token
+  // count alone, ignoring task boundaries) is pure waste. The orchestrator opts in
+  // separately via permissionPolicyFor('orchestrator', model, factor).
+  autoCompactEnabled: false,
 };
 
 /**
@@ -397,25 +403,29 @@ export const READONLY_PERMISSIONS = JSON.stringify(READONLY_PERMISSION_POLICY);
  * - **executor / arbitrator** — base {@link EXECUTOR_PERMISSIONS}: full cwd-scoped edits.
  * - **orchestrator** — extends the base with `git push` and `gh` so it can integrate
  *   delegate work by pushing the branch and opening a PR (#137); force-push still denied.
+ *   Also enables Claude Code's built-in auto-compaction (#224): `autoCompactEnabled: true`
+ *   and `autoCompactWindow` derived from the model's context window × `autoCompactFactor`.
  *
- * Everything else (`Agent` deny #131, auto-memory off #132, CLAUDE.md excludes #121)
- * is inherited by all roles from the base policy.
+ * Everything else (`Agent` deny #131, auto-memory off #132, CLAUDE.md excludes #121,
+ * `autoCompactEnabled: false` for executors/evaluators #224) is inherited from the base.
+ *
+ * @param model — the orchestrator's model (used to derive `autoCompactWindow`); omit to
+ *   use the default 1M-window assumption (safe — `min(configured, model_max)` applies).
+ * @param autoCompactFactor — fraction of the model window to set as the compaction
+ *   threshold (default 0.5). Drive from `mjolnir.config.json` when available.
  */
-export function permissionPolicyFor(role: string): string {
+export function permissionPolicyFor(role: string, model?: string, autoCompactFactor = 0.5): string {
   if (role === 'evaluator' || role === 'investigator') return READONLY_PERMISSIONS;
   if (role !== 'orchestrator') return EXECUTOR_PERMISSIONS;
   const base = EXECUTOR_PERMISSION_POLICY;
+  // autoCompactWindow is an absolute token count; effective threshold = min(configured, model_max).
+  const autoCompactWindow = Math.round(contextWindowFor(model) * autoCompactFactor);
   return JSON.stringify({
     ...base,
+    autoCompactEnabled: true,   // override the base false for the long-lived orchestrator
+    autoCompactWindow,
     permissions: {
       ...base.permissions,
-      allow: [
-        ...base.permissions.allow,
-        // The compaction tool (#165): the orchestrator requests a context rotation at task
-        // boundaries when its weighted-token total exceeds the configured threshold.
-        // Pre-allowed so the call never dead-ends on a permission prompt.
-        'mcp__compact__request',
-      ],
       // Lift the blanket git-push deny (so a normal push is allowed) but keep
       // force-push off-limits — the orchestrator proposes via a PR, never rewrites history.
       deny: [
@@ -922,14 +932,6 @@ export interface ClaudeCodeResponderOptions {
    * id matches the conversation left behind.
    */
   readonly resume?: boolean;
-  /**
-   * Optional callback called before each turn to supply a context note injected
-   * between the sender attribution and the message body (#165). Used by the
-   * orchestrator to surface its current weighted-token total and whether it has
-   * passed the compaction threshold, so the threshold clause in its instructions
-   * is actionable ("self-judged" compaction). Omit for sessions that don't need it.
-   */
-  readonly getContextNote?: () => string;
 }
 
 /**
@@ -1006,17 +1008,13 @@ export function createClaudeCodeResponder(
     onReasoningChange,
     onUsage,
     resume = false,
-    getContextNote,
   } = options;
   const sessionId = claudeSessionId;
 
   // Shared prompt-building: same for both paths.
   const buildPrompt = (message: Parameters<Respond>[0]): string => {
     const body = typeof message.payload === 'string' ? message.payload : JSON.stringify(message.payload);
-    const contextNote = getContextNote?.();
-    return contextNote
-      ? `${senderAttribution(message)}\n\n${contextNote}\n\n${body}`
-      : `${senderAttribution(message)}\n\n${body}`;
+    return `${senderAttribution(message)}\n\n${body}`;
   };
 
   // Shared reply-building: same for both paths.

@@ -42,17 +42,6 @@ await esbuild.build({
   outfile: 'dist/delegation-mcp-server.js',
 });
 
-// Compaction MCP server: a third standalone Node process Claude Code spawns for the
-// orchestrator (#165). Exposes mcp__compact__request so the orchestrator can request
-// a context rotation at task boundaries. Bundled like the other MCP servers.
-await esbuild.build({
-  ...common,
-  entryPoints: ['../src/executor/compaction-mcp-server.ts'],
-  format: 'cjs',
-  platform: 'node',
-  outfile: 'dist/compaction-mcp-server.js',
-});
-
 // Webview: browser bundle that pulls in mermaid.
 await esbuild.build({
   ...common,

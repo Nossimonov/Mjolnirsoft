@@ -69,16 +69,6 @@ export interface DelegationHost {
    * no persistent worktree and are never passed here. Idempotent for already-wired ids.
    */
   rewireDelegate(role: AgentRole, id: string): void;
-  /**
-   * Release this host's bridge wiring for a compaction restart (#204): detaches the
-   * driver+reporter for every live delegate (stopping old-generation message forwarding)
-   * without shutting down the delegate sessions or their worktrees. Closes the host
-   * seat so no new delegation requests are processed on the old channel. After this,
-   * the new orchestrator generation re-establishes bridges via {@link rewireDelegate}.
-   * If `close()` is called later (e.g. from `onDispose`), it is a safe no-op for
-   * delegates (the spawned set is cleared here) and only closes the host seat again.
-   */
-  releaseForCompaction(): void;
 }
 
 /**
@@ -187,12 +177,6 @@ export function createDelegationHost(deps: DelegationHostDeps): DelegationHost {
   return {
     close() {
       for (const id of spawned) manager.shutdown(id);
-      spawned.clear();
-      host.close();
-    },
-
-    releaseForCompaction() {
-      for (const id of spawned) manager.detachBridgeForCompaction(id);
       spawned.clear();
       host.close();
     },

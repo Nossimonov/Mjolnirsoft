@@ -2,8 +2,8 @@
  * Tests for the singleton orchestrator lifecycle guard (#215):
  *   - createOrchestratorSingleton basic behaviour (evict/register)
  *   - Integration: relaunch while a prior generation is registered closes the predecessor
- *   - Compaction relaunch: eviction is a safe no-op after closeForCompaction already ran
- *   - Abort + relaunch: eviction closes remaining resources after onDispose ran
+ *   - Pre-evicted relaunch: eviction is a safe no-op after onDispose already ran (evicted=true)
+ *   - Abort + relaunch: eviction closes remaining resources when onDispose has not yet run
  *   - Reload: fresh singleton (no registration) → evict is a no-op for the new generation
  */
 import { describe, it, expect } from 'vitest';
@@ -92,10 +92,10 @@ describe('relaunch while prior generation is registered (#215)', () => {
     gen1Agent.close = () => { gen1AgentClosed = true; gen1AgentClose(); };
 
     // Register gen1's teardown (mirrors what launchSession does after wiring).
-    let gen1Compacted = false;
+    let gen1Evicted = false;
     singleton.register((): void => {
-      if (gen1Compacted) return; // idempotent: already cleaned up by compaction
-      gen1Compacted = true;
+      if (gen1Evicted) return; // idempotent: already cleaned up by onDispose
+      gen1Evicted = true;
       gen1Agent.close();
       gen1ChannelClosed = true;
       channel1.close();
@@ -131,64 +131,56 @@ describe('relaunch while prior generation is registered (#215)', () => {
     expect(gen2Inbox).toHaveLength(1); // only the one we just sent
   });
 
-  it('compaction relaunch: eviction is a safe no-op when closeForCompaction already ran', () => {
-    // Mirrors performCompaction() → provisioned.closeForCompaction() → channel.close()
-    // happening BEFORE openOrchestrator() calls launchSession() which calls evict().
+  it('pre-evicted relaunch: eviction is a safe no-op when onDispose already ran (evicted=true)', () => {
+    // Mirrors the path where the panel's onDispose fires (user closes panel) and sets
+    // evicted=true before a relaunch calls launchSession() → evict(). The registration
+    // function must be a no-op because the resources were already released by onDispose.
     const singleton = createOrchestratorSingleton();
 
     let closeCalled = 0;
-    let compacted = false;
+    let evicted = false;
 
-    // Registration: the eviction function is idempotent via the compacted flag.
     singleton.register((): void => {
-      if (compacted) return; // performCompaction already cleaned up
-      compacted = true;
+      if (evicted) return; // onDispose already cleaned up
+      evicted = true;
       closeCalled++;
     });
 
-    // Simulate performCompaction: sets compacted=true, does cleanup, then relaunches.
-    compacted = true; // ← performCompaction sets this before calling openOrchestrator
-    // ... performCompaction closes agent, channel, etc. ...
+    // Simulate onDispose running first: sets evicted=true.
+    evicted = true; // ← onDispose sets this before the user triggers a relaunch
 
     // New launchSession calls evict() — must be a safe no-op.
     singleton.evict();
-    expect(closeCalled).toBe(0); // eviction bailed out early because compacted=true
+    expect(closeCalled).toBe(0); // eviction bailed out because evicted=true
   });
 
-  it('abort + relaunch: eviction closes remaining resources after onDispose ran', () => {
-    // Mirrors: user closes panel → onDispose → provisioned.close() + channel.close()
-    // Then user relaunches → launchSession evict() catches any residual state.
+  it('abort + relaunch: eviction closes remaining resources when onDispose has not yet run', () => {
+    // Mirrors: user aborts the orchestrator and relaunches before the panel's onDispose
+    // fires. launchSession calls evict() — must close provisioned session + channel.
     const singleton = createOrchestratorSingleton();
 
-    const evicted: string[] = [];
-    let compacted = false;
+    const closed: string[] = [];
+    let evicted = false;
 
     singleton.register((): void => {
-      if (compacted) return;
-      compacted = true;
-      evicted.push('compactionObserver-close');
-      evicted.push('compactionHost-close');
-      evicted.push('provisioned-closeForCompaction');
-      evicted.push('channel-close');
+      if (evicted) return;
+      evicted = true;
+      closed.push('provisioned-close');
+      closed.push('channel-close');
     });
 
-    // onDispose fires (panel closed by user): compacted stays false, resources cleaned up.
-    // The singleton still holds the registration.
+    // onDispose has NOT fired (panel still open or abort path bypasses it).
+    // The singleton holds the registration.
 
     // Relaunch: launchSession calls evict() — must run the teardown.
     singleton.evict();
-    expect(evicted).toEqual([
-      'compactionObserver-close',
-      'compactionHost-close',
-      'provisioned-closeForCompaction',
-      'channel-close',
-    ]);
-    expect(compacted).toBe(true);
+    expect(closed).toEqual(['provisioned-close', 'channel-close']);
+    expect(evicted).toBe(true);
 
-    // A second evict (e.g. the same launchSession accidentally called twice) is a no-op.
-    evicted.length = 0;
+    // A second evict (e.g. the same launchSession called twice) is a no-op.
+    closed.length = 0;
     singleton.evict();
-    expect(evicted).toHaveLength(0);
+    expect(closed).toHaveLength(0);
   });
 
   it('two consecutive relaunches: only the immediately-prior generation is evicted', () => {
