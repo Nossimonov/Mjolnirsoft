@@ -11,21 +11,20 @@ export interface StorageConfig {
 }
 
 /**
- * Compaction settings for the orchestrator (#165). After integrating a task the
- * orchestrator checks its context size; if it exceeds the threshold it writes a
- * self-hand-off and requests a context rotation.
+ * Compaction settings for the orchestrator (#224). Controls Claude Code's built-in
+ * auto-compaction threshold via `autoCompactWindow` in the orchestrator's `--settings`.
  */
 export interface CompactionConfig {
   /**
-   * Fraction of the running model's context window above which the orchestrator
-   * is invited to compact its context after a task boundary. Must be between 0
-   * (exclusive) and 1 (inclusive). Combined with a per-model window lookup, this
-   * resolves to an absolute token threshold at runtime.
+   * Fraction of the running model's context window at which Claude Code's built-in
+   * auto-compaction fires. Must be between 0 (exclusive) and 1 (inclusive). Resolved
+   * to an absolute token count as `Math.round(contextWindowFor(model) * factor)` and
+   * passed as `autoCompactWindow` in the orchestrator's `--settings`.
    *
-   * Default: 0.75 (75% of the model's context window).
-   * The architect tunes this in mjolnir.config.json ("compaction.thresholdContextPercent").
+   * Default: 0.5 (50% of the model's context window).
+   * The architect tunes this in mjolnir.config.json ("compaction.autoCompactFactor").
    */
-  readonly thresholdContextPercent: number;
+  readonly autoCompactFactor: number;
 }
 
 /** The committed, machine-readable project strategy (see `mjolnir.config.json`). */
@@ -37,7 +36,7 @@ export interface ProjectConfig {
 /** Default when no committed config is present: the dependency-free local backend. */
 export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   storage: { backend: 'local' },
-  compaction: { thresholdContextPercent: 0.75 },
+  compaction: { autoCompactFactor: 0.5 },
 };
 
 /**
@@ -74,19 +73,19 @@ export function loadProjectConfig(path = resolve(process.cwd(), 'mjolnir.config.
   if (compaction !== undefined && !isJsonObject(compaction)) {
     throw new Error(`invalid mjolnir.config.json: "compaction" must be an object, got ${describeJson(compaction)}`);
   }
-  const thresholdContextPercent =
-    compaction?.thresholdContextPercent ?? DEFAULT_PROJECT_CONFIG.compaction.thresholdContextPercent;
-  if (typeof thresholdContextPercent !== 'number') {
+  const autoCompactFactor =
+    compaction?.autoCompactFactor ?? DEFAULT_PROJECT_CONFIG.compaction.autoCompactFactor;
+  if (typeof autoCompactFactor !== 'number') {
     throw new Error(
-      `invalid mjolnir.config.json: compaction.thresholdContextPercent must be a number, got ${describeJson(thresholdContextPercent)}`,
+      `invalid mjolnir.config.json: compaction.autoCompactFactor must be a number, got ${describeJson(autoCompactFactor)}`,
     );
   }
-  if (thresholdContextPercent <= 0 || thresholdContextPercent > 1) {
+  if (autoCompactFactor <= 0 || autoCompactFactor > 1) {
     throw new Error(
-      `invalid mjolnir.config.json: compaction.thresholdContextPercent must be between 0 (exclusive) and 1 (inclusive), got ${thresholdContextPercent}`,
+      `invalid mjolnir.config.json: compaction.autoCompactFactor must be between 0 (exclusive) and 1 (inclusive), got ${autoCompactFactor}`,
     );
   }
-  return { storage: { backend }, compaction: { thresholdContextPercent } };
+  return { storage: { backend }, compaction: { autoCompactFactor } };
 }
 
 /** A non-null, non-array object — the only valid shape for the config and its `storage`. */

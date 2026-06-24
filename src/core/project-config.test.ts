@@ -25,7 +25,7 @@ describe('loadProjectConfig', () => {
 
   it('reads the declared storage backend', () => {
     expect(loadProjectConfig(tempConfig('{ "storage": { "backend": "git" } }')))
-      .toEqual({ storage: { backend: 'git' }, compaction: { thresholdContextPercent: 0.75 } });
+      .toEqual({ storage: { backend: 'git' }, compaction: { autoCompactFactor: 0.5 } });
   });
 
   it('defaults the backend when storage is omitted', () => {
@@ -55,20 +55,20 @@ describe('loadProjectConfig', () => {
   });
 });
 
-describe('loadProjectConfig — compaction config (#165/#180)', () => {
-  it('uses the default threshold when compaction is omitted', () => {
+describe('loadProjectConfig — compaction config (#224)', () => {
+  it('uses the default autoCompactFactor when compaction is omitted', () => {
     const cfg = loadProjectConfig(tempConfig('{}'));
-    expect(cfg.compaction.thresholdContextPercent).toBe(0.75);
+    expect(cfg.compaction.autoCompactFactor).toBe(0.5);
   });
 
-  it('reads a custom threshold percent', () => {
-    const cfg = loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": 0.5 } }'));
-    expect(cfg.compaction.thresholdContextPercent).toBe(0.5);
+  it('reads a custom autoCompactFactor', () => {
+    const cfg = loadProjectConfig(tempConfig('{ "compaction": { "autoCompactFactor": 0.6 } }'));
+    expect(cfg.compaction.autoCompactFactor).toBe(0.6);
   });
 
-  it('defaults the threshold when compaction is present but thresholdContextPercent is absent', () => {
+  it('defaults the factor when compaction is present but autoCompactFactor is absent', () => {
     const cfg = loadProjectConfig(tempConfig('{ "compaction": {} }'));
-    expect(cfg.compaction.thresholdContextPercent).toBe(0.75);
+    expect(cfg.compaction.autoCompactFactor).toBe(0.5);
   });
 
   it('throws when compaction is not an object', () => {
@@ -76,27 +76,27 @@ describe('loadProjectConfig — compaction config (#165/#180)', () => {
       .toThrow(/"compaction" must be an object/);
   });
 
-  it('throws when thresholdContextPercent is not a number', () => {
-    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": "big" } }')))
+  it('throws when autoCompactFactor is not a number', () => {
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "autoCompactFactor": "big" } }')))
       .toThrow(/must be a number/);
   });
 
-  it('throws when thresholdContextPercent is out of range', () => {
-    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": 0 } }')))
+  it('throws when autoCompactFactor is out of range', () => {
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "autoCompactFactor": 0 } }')))
       .toThrow(/between 0.*and 1/);
-    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": 1.5 } }')))
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "autoCompactFactor": 1.5 } }')))
       .toThrow(/between 0.*and 1/);
-    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": -0.1 } }')))
+    expect(() => loadProjectConfig(tempConfig('{ "compaction": { "autoCompactFactor": -0.1 } }')))
       .toThrow(/between 0.*and 1/);
   });
 
-  it('accepts thresholdContextPercent of exactly 1', () => {
-    const cfg = loadProjectConfig(tempConfig('{ "compaction": { "thresholdContextPercent": 1 } }'));
-    expect(cfg.compaction.thresholdContextPercent).toBe(1);
+  it('accepts autoCompactFactor of exactly 1', () => {
+    const cfg = loadProjectConfig(tempConfig('{ "compaction": { "autoCompactFactor": 1 } }'));
+    expect(cfg.compaction.autoCompactFactor).toBe(1);
   });
 
   it('DEFAULT_PROJECT_CONFIG has the compaction field with the named default', () => {
     expect(DEFAULT_PROJECT_CONFIG.compaction).toBeDefined();
-    expect(DEFAULT_PROJECT_CONFIG.compaction.thresholdContextPercent).toBe(0.75);
+    expect(DEFAULT_PROJECT_CONFIG.compaction.autoCompactFactor).toBe(0.5);
   });
 });
