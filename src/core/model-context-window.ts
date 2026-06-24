@@ -1,7 +1,6 @@
 /**
  * Context window sizes (tokens) per Claude model, sourced from the claude-api skill
- * (cached 2026-06-04). Used to translate a fractional compaction threshold into an
- * absolute token count for the orchestrator's context-size note (#180).
+ * (cached 2026-06-04). Used to compute `autoCompactWindow` for orchestrator sessions (#224).
  */
 const CONTEXT_WINDOWS: Record<string, number> = {
   'claude-fable-5':            1_000_000,
@@ -20,10 +19,10 @@ const CONTEXT_WINDOWS: Record<string, number> = {
  * - Full model IDs (e.g. `'claude-sonnet-4-6'`)
  * - Claude Code CLI shorthand aliases (e.g. `'sonnet'`, `'opus'`, `'haiku'`)
  * - `undefined` — orchestrator inherits the user's Claude Code default, which in
- *   this project is invariably an Opus-class model (1M window); using 1M avoids
- *   false "PAST THRESHOLD" alerts at normal orchestrator context sizes (~300K).
+ *   this project is invariably an Opus-class model (1M window); using 1M gives a
+ *   sensible `autoCompactWindow` without over-triggering compaction.
  * - Unrecognised strings — conservative 200K fallback (smallest known production
- *   window) so compaction triggers early rather than letting context overflow.
+ *   window); compaction triggers earlier than necessary rather than late.
  */
 export function contextWindowFor(model: string | undefined): number {
   if (model === undefined) return 1_000_000;

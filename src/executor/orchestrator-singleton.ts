@@ -3,8 +3,8 @@
  *
  * At most one orchestrator generation may be bound to the session channel at a
  * time. This module tracks the active generation's teardown function and calls
- * it before a new generation binds, covering the compaction-relaunch,
- * window-reload, and abort + relaunch paths.
+ * it before a new generation binds, covering the window-reload and abort +
+ * relaunch paths.
  *
  * The enforcement point is `evict()`, called at the start of every new
  * orchestrator launch (before the new channel is opened). The current
@@ -24,10 +24,9 @@ export interface OrchestratorSingleton {
   /**
    * Register the teardown function for the just-launched generation. Call
    * this AFTER all channel participants for the new generation are wired
-   * (compaction host, idle trigger, agent) so the eviction function is
-   * complete when the next generation calls `evict()`. The close function
-   * must be idempotent — it may be called after the normal `onDispose` path
-   * has already cleaned up.
+   * (agent, delegation host) so the eviction function is complete when the
+   * next generation calls `evict()`. The close function must be idempotent —
+   * it may be called after the normal `onDispose` path has already cleaned up.
    */
   register(close: () => void): void;
 }

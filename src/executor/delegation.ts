@@ -55,15 +55,6 @@ export interface DelegationManager {
    * already-live `id` is a no-op.
    */
   rewire(role: Role, id: string, sub: Channel, delegate: DelegateWiring): void;
-  /**
-   * Close the bridge wiring for `id` (driver seat on the sub-channel + reporter seat
-   * on the spawner's channel) without touching the delegate session or its sub-channel.
-   * The delegate keeps running; only the old generation's forwarding plumbing is
-   * removed. Used by the compaction restart (#204) so a new orchestrator generation
-   * can re-establish bridges via {@link rewire} without the old driver and reporter
-   * causing double-delivery.
-   */
-  detachBridgeForCompaction(id: string): void;
 }
 
 /**
@@ -231,14 +222,5 @@ export function createDelegationManager(deps: DelegationDeps): DelegationManager
       });
     },
 
-    detachBridgeForCompaction(id) {
-      const d = delegates.get(id);
-      if (!d) return;
-      delegates.delete(id);
-      d.driver.close();   // stop forwarding messages from the sub-channel
-      d.reporter.close(); // clean up the delegate's seat on the spawner's channel
-      // d.close() is intentionally NOT called: the delegate session and its
-      // sub-channel stay alive so the new orchestrator generation can rewire (#204).
-    },
   };
 }
