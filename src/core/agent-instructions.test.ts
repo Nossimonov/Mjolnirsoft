@@ -94,6 +94,14 @@ describe('composeAgentInstructions (#57)', () => {
     expect(SHARED_CORE).toContain('hand-off');
   });
 
+  it('tells the executor to keep context lean across dev rounds — lean-context discipline (#236)', () => {
+    // The lean-context bullet: don't re-read whole diffs/files already in a summary or
+    // prior hand-off; reach for the source only for specific unresolved questions.
+    expect(EXECUTOR_OPERATIONS).toContain('Keep context lean across dev rounds');
+    expect(EXECUTOR_OPERATIONS).toContain("don't re-read whole diffs or files already captured");
+    expect(composeAgentInstructions('executor')).toContain('Keep context lean across dev rounds');
+  });
+
   it('makes the executor self-sufficient without CLAUDE.md: test the change, stay in scope, route discoveries up (#121)', () => {
     // Spawned with --bare (no project CLAUDE.md), the executor's layer must carry
     // the slice it needs itself: cover its change with a test, and treat any
