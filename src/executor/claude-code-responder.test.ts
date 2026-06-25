@@ -608,15 +608,18 @@ describe('buildClaudeArgs', () => {
     expect(policy.autoMemoryEnabled).toBe(false);
   });
 
-  it('static EXECUTOR_PERMISSIONS and READONLY_PERMISSIONS carry autoCompactEnabled:false — explicit opt-out for arbitrator/investigator (#236)', () => {
-    // The base policy keeps autoCompactEnabled:false so arbitrator and investigator (which
-    // return these constants directly) have an explicit opt-out rather than relying on an
-    // unknown CLI default. The compactOverlay in permissionPolicyFor overrides this false
-    // to true for executor, evaluator, and orchestrator.
+  it('static base constants keep autoCompactEnabled:false; compactOverlay overrides it to true for all roles (#236)', () => {
+    // The base policy keeps autoCompactEnabled:false as an explicit on-record default.
+    // permissionPolicyFor overrides it to true for all five roles via compactOverlay.
     const execBase = JSON.parse(EXECUTOR_PERMISSIONS) as { autoCompactEnabled: boolean };
     expect(execBase.autoCompactEnabled).toBe(false);
     const readonlyBase = JSON.parse(READONLY_PERMISSIONS) as { autoCompactEnabled: boolean };
     expect(readonlyBase.autoCompactEnabled).toBe(false);
+    // All five roles get autoCompactEnabled:true from permissionPolicyFor.
+    for (const role of ['executor', 'evaluator', 'orchestrator', 'arbitrator', 'investigator']) {
+      const policy = JSON.parse(permissionPolicyFor(role)) as { autoCompactEnabled: boolean };
+      expect(policy.autoCompactEnabled).toBe(true);
+    }
   });
 
   it('lets the orchestrator git push (to open PRs) but not force-push; executors keep the no-push base (#137)', () => {
@@ -657,7 +660,7 @@ describe('buildClaudeArgs', () => {
   });
 
   it('omits autoCompactWindow for unknown model IDs so CLI uses its server-tuned default (#188)', () => {
-    for (const role of ['orchestrator', 'executor', 'evaluator']) {
+    for (const role of ['orchestrator', 'executor', 'evaluator', 'arbitrator', 'investigator']) {
       const policy = JSON.parse(permissionPolicyFor(role, 'unknown-model-9999')) as {
         autoCompactEnabled: boolean;
         autoCompactWindow?: number;
@@ -667,9 +670,9 @@ describe('buildClaudeArgs', () => {
     }
   });
 
-  it('executor and evaluator settings carry autoCompactEnabled:true + model-derived autoCompactWindow (#236)', () => {
+  it('all five roles carry autoCompactEnabled:true + model-derived autoCompactWindow (#236)', () => {
     // Default model (undefined → 1M window); default factor 0.5 → window = 500_000.
-    for (const role of ['executor', 'evaluator']) {
+    for (const role of ['executor', 'evaluator', 'arbitrator', 'investigator']) {
       const defaultPolicy = JSON.parse(permissionPolicyFor(role)) as {
         autoCompactEnabled: boolean;
         autoCompactWindow: number;
@@ -701,27 +704,28 @@ describe('buildClaudeArgs', () => {
   });
 
   it('routes evaluator and investigator through read-only permission base — denied edits (#185/#236)', () => {
-    // investigator keeps the static READONLY_PERMISSIONS constant.
-    expect(permissionPolicyFor('investigator')).toBe(READONLY_PERMISSIONS);
-    // arbitrator keeps the static EXECUTOR_PERMISSIONS constant.
-    expect(permissionPolicyFor('arbitrator')).toBe(EXECUTOR_PERMISSIONS);
-    // evaluator gets a computed policy built on the read-only base (Edit/Write still denied) plus
-    // auto-compact (#236); executor gets a computed policy built on the executor base plus auto-compact.
-    const evaluatorPolicy = JSON.parse(permissionPolicyFor('evaluator')) as {
-      permissions: { allow: string[]; deny: string[] };
-      autoCompactEnabled: boolean;
-    };
-    expect(evaluatorPolicy.permissions.allow).not.toContain('Edit(./**)');
-    expect(evaluatorPolicy.permissions.allow).not.toContain('Write(./**)');
-    expect(evaluatorPolicy.permissions.deny).toContain('Edit');
-    expect(evaluatorPolicy.permissions.deny).toContain('Write');
-    expect(evaluatorPolicy.autoCompactEnabled).toBe(true);
-    const executorPolicy = JSON.parse(permissionPolicyFor('executor')) as {
-      permissions: { allow: string[] };
-      autoCompactEnabled: boolean;
-    };
-    expect(executorPolicy.permissions.allow).toContain('Edit(./**)');
-    expect(executorPolicy.autoCompactEnabled).toBe(true);
+    // evaluator and investigator both get a computed policy built on the read-only base:
+    // Edit/Write denied at the policy level (hard enforcement, #185) + auto-compact overlay (#236).
+    for (const role of ['evaluator', 'investigator']) {
+      const policy = JSON.parse(permissionPolicyFor(role)) as {
+        permissions: { allow: string[]; deny: string[] };
+        autoCompactEnabled: boolean;
+      };
+      expect(policy.permissions.allow).not.toContain('Edit(./**)');
+      expect(policy.permissions.allow).not.toContain('Write(./**)');
+      expect(policy.permissions.deny).toContain('Edit');
+      expect(policy.permissions.deny).toContain('Write');
+      expect(policy.autoCompactEnabled).toBe(true);
+    }
+    // executor and arbitrator get the base executor policy + auto-compact overlay.
+    for (const role of ['executor', 'arbitrator']) {
+      const policy = JSON.parse(permissionPolicyFor(role)) as {
+        permissions: { allow: string[] };
+        autoCompactEnabled: boolean;
+      };
+      expect(policy.permissions.allow).toContain('Edit(./**)');
+      expect(policy.autoCompactEnabled).toBe(true);
+    }
   });
 
   it('READONLY_PERMISSIONS denies Edit and Write but keeps read/search/inspection tools (#185)', () => {
