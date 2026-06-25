@@ -8,6 +8,7 @@ describe('contextWindowFor', () => {
 
   it('returns correct sizes for known full model IDs', () => {
     expect(contextWindowFor('claude-fable-5')).toBe(1_000_000);
+    expect(contextWindowFor('claude-mythos-5')).toBe(1_000_000);
     expect(contextWindowFor('claude-opus-4-8')).toBe(1_000_000);
     expect(contextWindowFor('claude-opus-4-7')).toBe(1_000_000);
     expect(contextWindowFor('claude-opus-4-6')).toBe(1_000_000);
@@ -21,10 +22,11 @@ describe('contextWindowFor', () => {
     expect(contextWindowFor('sonnet')).toBe(1_000_000);
     expect(contextWindowFor('haiku')).toBe(200_000);
     expect(contextWindowFor('fable')).toBe(1_000_000);
+    expect(contextWindowFor('mythos')).toBe(1_000_000);
   });
 
-  it('falls back to 200K for completely unrecognised model strings', () => {
-    expect(contextWindowFor('unknown-model-9999')).toBe(200_000);
-    expect(contextWindowFor('')).toBe(200_000);
+  it('returns undefined for completely unrecognised model strings (#188)', () => {
+    expect(contextWindowFor('unknown-model-9999')).toBeUndefined();
+    expect(contextWindowFor('')).toBeUndefined();
   });
 });

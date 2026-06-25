@@ -419,11 +419,13 @@ export function permissionPolicyFor(role: string, model?: string, autoCompactFac
   if (role !== 'orchestrator') return EXECUTOR_PERMISSIONS;
   const base = EXECUTOR_PERMISSION_POLICY;
   // autoCompactWindow is an absolute token count; effective threshold = min(configured, model_max).
-  const autoCompactWindow = Math.round(contextWindowFor(model) * autoCompactFactor);
+  // Omit when the model window is unknown — a wrong static guess (e.g. 200K for a 1M model) would
+  // cap compaction at 10% of the real window; omitting lets the CLI use its server-tuned default (#188).
+  const contextWindow = contextWindowFor(model);
   return JSON.stringify({
     ...base,
     autoCompactEnabled: true,   // override the base false for the long-lived orchestrator
-    autoCompactWindow,
+    ...(contextWindow !== undefined && { autoCompactWindow: Math.round(contextWindow * autoCompactFactor) }),
     permissions: {
       ...base.permissions,
       // Lift the blanket git-push deny (so a normal push is allowed) but keep
