@@ -646,6 +646,15 @@ describe('buildClaudeArgs', () => {
     expect(customPolicy.autoCompactWindow).toBe(600_000); // Math.round(1_000_000 * 0.6)
   });
 
+  it('omits autoCompactWindow for unknown model IDs so CLI uses its server-tuned default (#188)', () => {
+    const policy = JSON.parse(permissionPolicyFor('orchestrator', 'unknown-model-9999')) as {
+      autoCompactEnabled: boolean;
+      autoCompactWindow?: number;
+    };
+    expect(policy.autoCompactEnabled).toBe(true);
+    expect(policy.autoCompactWindow).toBeUndefined();
+  });
+
   it('executor and evaluator settings carry autoCompactEnabled:false (#224)', () => {
     const executorPolicy = JSON.parse(permissionPolicyFor('executor')) as { autoCompactEnabled: boolean };
     expect(executorPolicy.autoCompactEnabled).toBe(false);

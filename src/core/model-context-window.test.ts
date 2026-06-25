@@ -23,8 +23,8 @@ describe('contextWindowFor', () => {
     expect(contextWindowFor('fable')).toBe(1_000_000);
   });
 
-  it('falls back to 200K for completely unrecognised model strings', () => {
-    expect(contextWindowFor('unknown-model-9999')).toBe(200_000);
-    expect(contextWindowFor('')).toBe(200_000);
+  it('returns undefined for completely unrecognised model strings (#188)', () => {
+    expect(contextWindowFor('unknown-model-9999')).toBeUndefined();
+    expect(contextWindowFor('')).toBeUndefined();
   });
 });
