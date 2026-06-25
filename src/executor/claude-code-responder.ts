@@ -354,6 +354,11 @@ export const EXECUTOR_PERMISSION_POLICY = {
   // hand-off. Auto-memory is a built-in (no tool to deny); this settings toggle is the
   // off switch, read from `--settings` like the rest of this policy.
   autoMemoryEnabled: false,
+  // Default auto-compaction to off. permissionPolicyFor overrides this to true for
+  // executor, evaluator, and orchestrator via the shared compactOverlay (#236/#224);
+  // investigator and arbitrator return the static constants directly and keep this false,
+  // preserving an explicit opt-out rather than relying on an unknown CLI default.
+  autoCompactEnabled: false,
 };
 
 /**
@@ -393,18 +398,21 @@ export const READONLY_PERMISSIONS = JSON.stringify(READONLY_PERMISSION_POLICY);
 
 /**
  * The serialized `--settings` policy for an agent of `role`.
- * - **evaluator / investigator** — {@link READONLY_PERMISSIONS}: reads/search/inspection
+ * - **investigator** — static {@link READONLY_PERMISSIONS}: reads/search/inspection
  *   allowed; `Edit` and `Write` denied at the policy level (hard enforcement, #185).
- * - **executor / arbitrator** — base {@link EXECUTOR_PERMISSIONS}: full cwd-scoped edits.
- * - **orchestrator** — extends the base with `git push` and `gh` so it can integrate
- *   delegate work by pushing the branch and opening a PR (#137); force-push still denied.
+ * - **evaluator** — computed from the same read-only base as the investigator, but with
+ *   the model-derived auto-compact overlay applied (#236); `Edit` and `Write` still denied.
+ * - **arbitrator** — static {@link EXECUTOR_PERMISSIONS}: full cwd-scoped edits.
+ * - **executor** — computed from the base executor policy with the auto-compact overlay (#236).
+ * - **orchestrator** — computed from the base, auto-compact overlay, plus `git push` and
+ *   `gh` allowed so it can push branches and open PRs (#137); force-push still denied.
  *
  * **executor and evaluator** receive the same model-derived built-in auto-compaction
  * (#236) as the orchestrator: `autoCompactEnabled: true` and `autoCompactWindow` derived
  * from the model's context window × `autoCompactFactor`. Profiled executor sessions can
  * consume ~80% of a session limit, so the whole delegate tree must be bounded. The shared
  * derivation is factored here; the `undefined`→omit behaviour from #188 applies to all roles.
- * `investigator` and `arbitrator` keep their static policies (no auto-compact override).
+ * `investigator` and `arbitrator` return static constants that keep `autoCompactEnabled: false`.
  *
  * Everything else (`Agent` deny #131, auto-memory off #132, CLAUDE.md excludes #121)
  * is inherited from the base.

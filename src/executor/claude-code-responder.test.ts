@@ -608,6 +608,17 @@ describe('buildClaudeArgs', () => {
     expect(policy.autoMemoryEnabled).toBe(false);
   });
 
+  it('static EXECUTOR_PERMISSIONS and READONLY_PERMISSIONS carry autoCompactEnabled:false — explicit opt-out for arbitrator/investigator (#236)', () => {
+    // The base policy keeps autoCompactEnabled:false so arbitrator and investigator (which
+    // return these constants directly) have an explicit opt-out rather than relying on an
+    // unknown CLI default. The compactOverlay in permissionPolicyFor overrides this false
+    // to true for executor, evaluator, and orchestrator.
+    const execBase = JSON.parse(EXECUTOR_PERMISSIONS) as { autoCompactEnabled: boolean };
+    expect(execBase.autoCompactEnabled).toBe(false);
+    const readonlyBase = JSON.parse(READONLY_PERMISSIONS) as { autoCompactEnabled: boolean };
+    expect(readonlyBase.autoCompactEnabled).toBe(false);
+  });
+
   it('lets the orchestrator git push (to open PRs) but not force-push; executors keep the no-push base (#137)', () => {
     const deny = (role: string) => (JSON.parse(permissionPolicyFor(role)) as { permissions: { deny: string[] } }).permissions.deny;
     // Executor: the base policy — blanket git push denied (hands off, never pushes).
