@@ -33,6 +33,6 @@ export function contextWindowFor(model: string | undefined): number | undefined 
   if (CONTEXT_WINDOWS[model] !== undefined) return CONTEXT_WINDOWS[model];
   const lower = model.toLowerCase();
   if (lower.includes('haiku')) return 200_000;
-  if (lower.includes('sonnet') || lower.includes('opus') || lower.includes('fable')) return 1_000_000;
+  if (lower.includes('sonnet') || lower.includes('opus') || lower.includes('fable') || lower.includes('mythos')) return 1_000_000;
   return undefined;
 }

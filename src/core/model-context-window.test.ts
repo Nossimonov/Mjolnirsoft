@@ -22,6 +22,7 @@ describe('contextWindowFor', () => {
     expect(contextWindowFor('sonnet')).toBe(1_000_000);
     expect(contextWindowFor('haiku')).toBe(200_000);
     expect(contextWindowFor('fable')).toBe(1_000_000);
+    expect(contextWindowFor('mythos')).toBe(1_000_000);
   });
 
   it('returns undefined for completely unrecognised model strings (#188)', () => {
