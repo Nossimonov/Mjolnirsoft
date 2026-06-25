@@ -8,6 +8,7 @@ describe('contextWindowFor', () => {
 
   it('returns correct sizes for known full model IDs', () => {
     expect(contextWindowFor('claude-fable-5')).toBe(1_000_000);
+    expect(contextWindowFor('claude-mythos-5')).toBe(1_000_000);
     expect(contextWindowFor('claude-opus-4-8')).toBe(1_000_000);
     expect(contextWindowFor('claude-opus-4-7')).toBe(1_000_000);
     expect(contextWindowFor('claude-opus-4-6')).toBe(1_000_000);
