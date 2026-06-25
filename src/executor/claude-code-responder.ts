@@ -354,10 +354,9 @@ export const EXECUTOR_PERMISSION_POLICY = {
   // hand-off. Auto-memory is a built-in (no tool to deny); this settings toggle is the
   // off switch, read from `--settings` like the rest of this policy.
   autoMemoryEnabled: false,
-  // Turn off built-in auto-compaction for short-lived executor/evaluator sessions (#224).
-  // They have no longevity problem, so the overhead of compaction (which fires on token
-  // count alone, ignoring task boundaries) is pure waste. The orchestrator opts in
-  // separately via permissionPolicyFor('orchestrator', model, factor).
+  // Default auto-compaction to off. permissionPolicyFor overrides this to true for all
+  // five roles via the shared compactOverlay (#236/#224); the base keeps false so an
+  // explicit opt-out is on record rather than relying on an unknown CLI default.
   autoCompactEnabled: false,
 };
 
@@ -398,45 +397,64 @@ export const READONLY_PERMISSIONS = JSON.stringify(READONLY_PERMISSION_POLICY);
 
 /**
  * The serialized `--settings` policy for an agent of `role`.
- * - **evaluator / investigator** — {@link READONLY_PERMISSIONS}: reads/search/inspection
- *   allowed; `Edit` and `Write` denied at the policy level (hard enforcement, #185).
- * - **executor / arbitrator** — base {@link EXECUTOR_PERMISSIONS}: full cwd-scoped edits.
- * - **orchestrator** — extends the base with `git push` and `gh` so it can integrate
- *   delegate work by pushing the branch and opening a PR (#137); force-push still denied.
- *   Also enables Claude Code's built-in auto-compaction (#224): `autoCompactEnabled: true`
- *   and `autoCompactWindow` derived from the model's context window × `autoCompactFactor`.
+ * - **investigator / evaluator** — computed from the read-only base: reads/search/inspection
+ *   allowed; `Edit` and `Write` denied at the policy level (hard enforcement, #185);
+ *   model-derived auto-compact overlay applied (#236).
+ * - **arbitrator / executor** — computed from the base executor policy with the auto-compact
+ *   overlay (#236).
+ * - **orchestrator** — computed from the base, auto-compact overlay, plus `git push` and
+ *   `gh` allowed so it can push branches and open PRs (#137); force-push still denied.
  *
- * Everything else (`Agent` deny #131, auto-memory off #132, CLAUDE.md excludes #121,
- * `autoCompactEnabled: false` for executors/evaluators #224) is inherited from the base.
+ * All five roles receive the model-derived built-in auto-compaction (#236):
+ * `autoCompactEnabled: true` and `autoCompactWindow` derived from the model's context
+ * window × `autoCompactFactor`. The shared derivation is factored here; the `undefined`→omit
+ * behaviour from #188 applies to all roles.
  *
- * @param model — the orchestrator's model (used to derive `autoCompactWindow`); omit to
- *   use the default 1M-window assumption (safe — `min(configured, model_max)` applies).
+ * Everything else (`Agent` deny #131, auto-memory off #132, CLAUDE.md excludes #121)
+ * is inherited from the base.
+ *
+ * @param model — the model (used to derive `autoCompactWindow`); omit to use the default
+ *   1M-window assumption (safe — `min(configured, model_max)` applies).
  * @param autoCompactFactor — fraction of the model window to set as the compaction
  *   threshold (default 0.5). Drive from `mjolnir.config.json` when available.
  */
 export function permissionPolicyFor(role: string, model?: string, autoCompactFactor = 0.5): string {
-  if (role === 'evaluator' || role === 'investigator') return READONLY_PERMISSIONS;
-  if (role !== 'orchestrator') return EXECUTOR_PERMISSIONS;
-  const base = EXECUTOR_PERMISSION_POLICY;
+  // All five roles share the same model-derived auto-compact overlay (#236).
   // autoCompactWindow is an absolute token count; effective threshold = min(configured, model_max).
   // Omit when the model window is unknown — a wrong static guess (e.g. 200K for a 1M model) would
   // cap compaction at 10% of the real window; omitting lets the CLI use its server-tuned default (#188).
   const contextWindow = contextWindowFor(model);
-  return JSON.stringify({
-    ...base,
-    autoCompactEnabled: true,   // override the base false for the long-lived orchestrator
+  const compactOverlay = {
+    autoCompactEnabled: true as const,
     ...(contextWindow !== undefined && { autoCompactWindow: Math.round(contextWindow * autoCompactFactor) }),
-    permissions: {
-      ...base.permissions,
-      // Lift the blanket git-push deny (so a normal push is allowed) but keep
-      // force-push off-limits — the orchestrator proposes via a PR, never rewrites history.
-      deny: [
-        ...base.permissions.deny.filter((rule) => rule !== 'Bash(git push *)'),
-        'Bash(git push --force *)',
-        'Bash(git push -f *)',
-      ],
-    },
-  });
+  };
+
+  const base = EXECUTOR_PERMISSION_POLICY;
+
+  if (role === 'investigator' || role === 'evaluator') {
+    return JSON.stringify({ ...READONLY_PERMISSION_POLICY, ...compactOverlay });
+  }
+
+  if (role === 'orchestrator') {
+    // orchestrator: auto-compact + lift the git-push ban so it can open PRs (#137).
+    return JSON.stringify({
+      ...base,
+      ...compactOverlay,
+      permissions: {
+        ...base.permissions,
+        // Lift the blanket git-push deny (so a normal push is allowed) but keep
+        // force-push off-limits — the orchestrator proposes via a PR, never rewrites history.
+        deny: [
+          ...base.permissions.deny.filter((rule) => rule !== 'Bash(git push *)'),
+          'Bash(git push --force *)',
+          'Bash(git push -f *)',
+        ],
+      },
+    });
+  }
+
+  // executor, arbitrator, and any other role: base policy + overlay.
+  return JSON.stringify({ ...base, ...compactOverlay });
 }
 
 /** Build the `claude` argv for a one-shot run from the task prompt and run options. */
