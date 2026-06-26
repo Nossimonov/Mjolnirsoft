@@ -58,7 +58,7 @@ Sessions are addressed by id behind a `SessionBackend` seam (`src/core/`): `open
 
 **`git` backend:** runs the live session on the local file channel; on channel close commits the session record into `refs/mjolnir/sessions` — a dedicated ref **out of the working tree** — durable and pushable without ever touching the working tree, index, HEAD, or any checked-out branch. `list()` enumerates sessions from the ref (unioned with any local-only ones). Uses git plumbing only (`hash-object` → temp-index tree → `commit-tree` → `update-ref`) with a fixed record identity that doesn't depend on git config. Fails fast when git or a repository is absent.
 
-**Backend selection:** `mjolnir.config.json` (`storage.backend`). `loadProjectConfig` reads it; `createSessionStore` maps the id to an implementation, defaulting to `local` when the file is absent and failing fast on an unknown backend. The CLI, orchestrator, `attachInvitation`, and VS Code view all address sessions by id through the factory.
+**Backend selection:** `mjolnir.config.json` (`storage.backend`, `compaction.autoCompactFactor` (#224)). `loadProjectConfig` reads it; `createSessionStore` maps the storage id to an implementation, defaulting to `local` when the file is absent and failing fast on an unknown backend. The CLI, orchestrator, `attachInvitation`, and VS Code view all address sessions by id through the factory. `compaction.autoCompactFactor` (default `0.5`) is passed to `permissionPolicyFor` when provisioning any agent session — see *Compaction* (#224).
 
 **Why:**
 - Hiding the transport file behind an id gives one naming scheme across every surface; file paths never appear in CLI flags, handles, or pickers.
@@ -98,6 +98,10 @@ A thin CLI adapter (`src/cli/`) hosts a session from the terminal. Invoked as `<
 
 When the executor exits, the orchestrator's channel participant is closed; the session log — the durable transcript — persists.
 
+**Delegate-messaging guardrail (#218→#231):** the orchestrator may communicate changes or steering to a live delegate but **must get architect confirmation first** before doing so. The solicited-operational-question exception is unchanged — answering a delegate's own unblock question (a path, env var, how to run a command) is always permitted. The **no-unsolicited-shutdown** rule is **permanent**: deciding to stop a delegate is the architect's call; an observation or comment, even one flagging a problem, is not a shutdown instruction.
+
+**Commit and integration conventions (#170):** executors commit with a plain `(#N)` reference — no closing keyword — before handing off. The orchestrator carries `closes #N` in the PR body only after Verify is satisfied; it never appears in executor commits.
+
 **Why.** This is the first component that makes the tool an *orchestrator* rather than two manually-launched peers: it owns the executor's lifecycle. Process life and record life are deliberately decoupled — stopping an executor ends the process while its transcript survives for later inspection. This layer adds only spawning and supervision; messaging is reused unchanged from the session-log channel, keeping the orchestrator ignorant of how messages physically travel.
 
 ---
@@ -108,19 +112,37 @@ When the executor exits, the orchestrator's channel participant is closed; the s
 
 ### Responder: `createClaudeCodeResponder`
 
-Spawns a headless Claude Code agent — `claude -p "<task>" --output-format stream-json --verbose --include-partial-messages --settings <permission policy>` — in a per-executor workspace. It replies with the agent's final result and streams intermediate output (reasoning, tool use) to the view as it works.
+Spawns `claude --print --input-format stream-json --output-format stream-json --verbose --include-partial-messages --settings <permission policy>` **once per responder lifetime** in a per-executor workspace — a persistent streaming session (#172). Stdin is kept open; each task is pushed as an NDJSON line (`{"type":"user","message":{"role":"user","content":"…"}}`), not as an argv element. Messages arriving while a turn is in flight are pushed immediately to stdin so `claude` can consume them at the next tool boundary within the same running session — mid-turn delivery. `createTurnMultiplexer` manages a FIFO queue of pending entries and resolves each turn as the stream emits result lines. When a message lands while a tool is running, `claude` bundles both turns into one combined-envelope result (`num_turns>1`, `result.iterations[i]`); `extractIterationUsage` reads per-turn usage from those iteration records (#172). The responder replies with the agent's final result and streams intermediate output (reasoning, tool use) to the view as it works.
 
 The agent runs on the user's logged-in Claude Code subscription (no API key). Spawning the `claude` CLI rather than embedding the Agent SDK is what enables subscription use (the SDK is documented for API-key auth, which is separate billing).
 
 **Binary resolution:** `resolveClaudeBin()` — uses `CLAUDE_BIN` if set, else `claude`/`claude.exe` from PATH. `CLAUDE_BIN` exists because a spawned subprocess doesn't always inherit the PATH an interactive shell has.
 
-### Permission Policy (`EXECUTOR_PERMISSIONS`)
+### Permission Policy
 
-Pre-allows what a dev task needs — reads, cwd-scoped edits, shell commands. Notable restrictions:
+**Base (`EXECUTOR_PERMISSIONS`):** pre-allows what a dev task needs — reads, cwd-scoped edits, shell commands. Notable restrictions:
 
 - **Denies Claude's native `Agent` tool** (#131): a spawned agent can't spin up ad-hoc sub-agents — a heavyweight, opaque token sink redundant with `mcp__delegate__*` delegation. A bare deny strips the tool from the agent's context entirely, so it falls back to direct reads or asks upward for missing context.
-- **`claudeMdExcludes`** (glob `CLAUDE.md`/`CLAUDE.local.md`) — a spawned agent does **not** auto-load the project `CLAUDE.md` (#121). `claude -p` walks the directory tree to load it, which caused an executor to auto-load norms regardless of role and triggered the issue-discipline ceremony, costing turns and filing a spurious issue. (`--bare` would also drop `CLAUDE.md` but breaks subscription login by skipping OAuth/keychain reads — rejected; `claudeMdExcludes` rides settings and leaves auth untouched.) `CLAUDE.md` is a thin `@AGENTS.md` redirect for other tools; the `claudeMdExcludes` stripping ensures spawned agents never auto-load it.
+- **`claudeMdExcludes`** (glob `CLAUDE.md`/`CLAUDE.local.md`) — a spawned agent does **not** auto-load the project `CLAUDE.md` (#121). `claude --print` walks the directory tree to load it, which caused an executor to auto-load norms regardless of role and triggered the issue-discipline ceremony, costing turns and filing a spurious issue. (`--bare` would also drop `CLAUDE.md` but breaks subscription login by skipping OAuth/keychain reads — rejected; `claudeMdExcludes` rides settings and leaves auth untouched.) `CLAUDE.md` is a thin `@AGENTS.md` redirect for other tools; the `claudeMdExcludes` stripping ensures spawned agents never auto-load it.
 - **`autoMemoryEnabled: false`** (#132): claude's built-in auto-memory keys its store to the agent's cwd (an ephemeral worktree); any saved note would orphan when the worktree is removed and never be recalled by a later session (which runs in a different worktree). A learning belongs *up* with the architect, surfaced in the hand-off. Auto-memory has no tool to deny, so this `--settings` toggle is the off switch.
+
+**Three-tier role dispatch (`permissionPolicyFor`) (#185, #236):** the policy serialized for `--settings` is role-keyed, not a single fixed string:
+
+- **evaluator / investigator** — `READONLY_PERMISSION_POLICY` (#185): `Edit`/`Write`/`NotebookEdit` removed from the allow list and added to the deny list, so a misbehaving read-only role is blocked at the declarative tool level, not merely discouraged by instructions. `Bash` remains allowed (read-only roles legitimately need `git log`/`git diff`/`gh issue view`).
+- **executor / arbitrator** — base `EXECUTOR_PERMISSION_POLICY`.
+- **orchestrator** — base policy with the `git push` ban lifted (force-push still denied) so it can push branches and open PRs (#137).
+
+All five roles also receive the auto-compaction overlay (`autoCompactEnabled: true`, model-derived `autoCompactWindow`) — see *Compaction*.
+
+### Compaction (#224, #236, #188)
+
+Claude Code's built-in auto-compaction fires when the running context exceeds `autoCompactWindow` tokens. Every spawned agent session receives this overlay via `permissionPolicyFor`:
+
+- `autoCompactEnabled: true` — enables the built-in mechanism.
+- `autoCompactWindow` — `Math.round(contextWindowFor(model) * autoCompactFactor)`, an absolute token count. `contextWindowFor` (`model-context-window.ts`) resolves known models to their window size; returns `undefined` for unrecognised model strings so the field is **omitted** rather than guessed — a wrong static guess (e.g. 200K for a 1M model) would cap compaction at 10% of the real window; omitting lets the CLI use its server-tuned default (#188).
+- `autoCompactFactor` — fraction of the context window at which compaction fires; default `0.5`, configurable as `compaction.autoCompactFactor` in `mjolnir.config.json`.
+
+**Drift-safeguard instruction (#224):** `ORCHESTRATOR_OPERATIONS` carries a standing directive: after any auto-compact summary, verify every recalled detail — issue number, PR status, design decision, file path — against its primary source before acting, because a compacted summary is a distillation, not the original.
 
 ### Agent Instructions (`SHARED_CORE`)
 
@@ -162,7 +184,7 @@ The shared channel also carries infrastructure messages (permission/delegation c
 - **Session pinning**: `--session-id <uuid>` on the first message, `--resume <uuid>` after (#40) — the executor retains context across an interactive exchange rather than cold-starting each message. The pinned id is exposed as `claudeSessionId` for the keystone (#40) to record.
 - **Deterministic session id** (#126): derived from the session name (`claudeSessionIdFor`), so a session the extension host tore down resumes the *same* `claude` conversation when re-attached — re-deriving the id needs nothing persisted.
 - **Create-vs-resume strategy**: a `--session-id` create that collides with an existing id resumes that session; a `--resume` whose conversation doesn't exist falls back to create. A re-attached responder starts already-resumed (first turn uses `--resume`); if the conversation doesn't exist, it falls back to creating fresh and retries.
-- **Turn serialization** (#100): turns are chained — only one `claude` run in flight at a time. A message arriving while a turn runs is queued and executed in order once the current turn settles. A failed turn still settles the chain so one failure can't wedge the queue.
+- **Mid-turn delivery (#172):** each incoming channel message starts its `respond()` call immediately — no per-turn serialization at the executor-runtime layer. The persistent streaming session (`createPersistentCli`) pushes every message to the single `claude` stdin as it arrives; `createTurnMultiplexer`'s FIFO queue guarantees replies reach the channel in message-arrival order even with concurrent in-flight pushes. (The prior per-process model (#100) serialized turns to prevent two concurrent `claude --resume <id>` processes from colliding on the pinned session id; the persistent session eliminates that risk — there is exactly one process whose stdin accepts any number of concurrent writes.)
 
 ### Transient Failure Recovery (#141)
 
@@ -212,6 +234,8 @@ Each turn's token usage is captured from the `claude` result line. `extractUsage
 
 **Persistence (#116):** each turn's usage is posted as a `usage` message onto the session channel as the turn completes — it lands in the durable JSONL continuously, not batched at session close. A long-lived session (the orchestrator can stay open for weeks) keeps up-to-date accounting that survives teardown; each turn's cost is individually recoverable for post-mortem ("which turn thought hardest").
 
+**Token header (#133):** the VS Code session panel header renders a compact tally — `<total> tok · <weighted> wt · <output> out` — via `formatUsage`. The `wt` figure is `weightedUsage(u)`: per-kind multipliers (output × 5, cache-read × 0.1, cache-creation × 1.25, input × 1) give a cost-equivalent figure that tracks real budget impact rather than raw count.
+
 **Post-hoc analysis (#233):** a committed CLI — `npm run usage` (`src/cli/usage.ts`), with pure analysis in `src/executor/usage-report.ts` — reads per-turn `usage` deltas from session JSONL:
 - `--tree`: aggregates a delegate's sub-sessions
 - `--from`: anchors a time window
@@ -254,6 +278,10 @@ The delegate's full exchange stays on its sub-channel; only the **distilled repo
 An executor's `claude` calls MCP tools — `mcp__delegate__spawn` / `shutdown` — exposed by a second bundled server (`delegation-mcp-server.ts`) and pre-allowed in the executor policy so a spawn never dead-ends on a prompt. The server posts a `delegation-request` onto the session channel (`delegation-protocol.ts`); the host answers from `createDelegationHost`, which validates the requested role is a real `AgentRole` before spawning. The channel is the bridge (same log, no extra transport).
 
 **Evaluator role** (`composeAgentInstructions('evaluator')`, #57): a fresh-eyes, no-stake critic that reviews "the changes or state under review" — phrased generally so the one role serves an executor's diff, an orchestrator's design review, or a contributor's PR — and returns a distilled finding, never an edit.
+
+**Investigator role** (`composeAgentInstructions('investigator')`, #166): a fifth delegate role — `INVESTIGATOR_INSERT`/`INVESTIGATOR_OPERATIONS` in `ROLE_REGISTRY` (`agent-instructions.ts:147/202`). Fact-finds against the existing record — session logs, diffs, issues, PRs, git history, `AGENTS.md` — and returns a distilled finding with source citations, never an edit. `AgentRole` includes `'investigator'`. Shares `READONLY_PERMISSION_POLICY` with the evaluator (no `Edit`/`Write`/`NotebookEdit`); governed by its norms in `docs/agents/investigator.md`. Runs on the shared-worktree critique shape (no isolated worktree) like the evaluator.
+
+**Delegation ledger (#168):** `projectDelegationLedger` (`delegation-ledger.ts`) is a pure read-projection of the orchestrator's channel JSONL into per-delegate records keyed by delegate id — tracking the original hand-off task, any follow-up messages, bridged-back reports, and active/shutdown state. No separate record is written; the ledger re-projects from the same durable file, so it can never drift from what was actually exchanged. On VS Code activate the extension reads the ledger and passes active delegate ids to `WorktreeManager.prune` as a lock set, preventing a reload or restart from pruning an in-flight delegate's worktree (`extension.ts:122`).
 
 **Finding classification (#104):**
 - **Legible** findings (objective — a bug, an omission, something that renders invisibly): scored cold, flagged actionable
@@ -346,6 +374,8 @@ The channel is the bridge: file-backed and cross-process, so the standalone serv
 
 An executor's `AskUserQuestion` arrives through the identical `approve` tool as `{ tool_name: "AskUserQuestion", input: { questions } }`. The view dispatches on `tool_name` to render its options (single- or multi-select) instead of allow/deny. The pick returns as the allow's `updatedInput = { questions, answers }` — the shape Claude's tool expects — with no server or protocol change, only a second renderer.
 
+**Deny path (#96):** the view's "can't answer" free-text submit sends `{ behavior: 'deny', message: <text> }` instead of `allow`. The `message` field travels back to the agent through `INTERACTION_DECISION`, so the agent can read the reason and adapt rather than stalling on an unanswerable question.
+
 ### Learned Rules (#70)
 
 The card also offers "Always": the host records a learned allow-rule at parent-directory granularity (an "Always" on `C:/x/y.txt` remembers `Write(C:/x/**)`) into a gitignored per-project file (`.mjolnir/executor-permissions.json`). On each `approve` call the server derives the request's rule (`learnedRuleFor`) and, if it is in the persisted set (`matchesLearnedRule`), returns `allow` without prompting and posts an audit line to the transcript.
@@ -382,6 +412,8 @@ Two session-starting commands, both routing through one factored helper (`provis
 
 - **`Mjolnirsoft: Start Executor Session`:** prompts for a session name; creates a dedicated git worktree on a fresh branch (`mjolnir/work/<id>`, via `WorktreeManager`) **based on the freshest `origin/main`** — `currentRemoteBase` fetches and forks the worktree from the latest merged code; falls back to local `HEAD` when there's no remote or the fetch fails (#83). The fresh-base requirement surfaced when a prior session started on stale pre-rename code.
 - **`Mjolnirsoft: Open Orchestrator`:** opens *the* single orchestrator **directly at a fixed id, no name prompt** — attaches if already live, otherwise launches/resumes it (#123, the extension presenting itself as **"Mjolnirsoft Orchestrator"**). The **orchestrator works out of the *main repo* with no worktree** (#123): it coordinates and never implements, so a separate branch is only friction; by the architect's decision it writes the repo like the architect's own session (its confinement boundary is the repo itself). Being the singleton, it always resumes its one conversation when re-opened.
+
+**Singleton enforcement (#215):** `createOrchestratorSingleton` (`orchestrator-singleton.ts`) guards against two orchestrator generations owning the channel simultaneously — a risk on reload or abort-and-relaunch. `launchSession` calls `evict()` before opening the new channel (which calls the prior generation's close function and clears the registration) and `register(close)` after all participants are wired. Evict-then-register is idempotent when no prior generation exists.
 
 `provisionSession` then: writes the per-session MCP config, opens the live reasoning stream, spawns a Claude Code agent in-process in the extension host (composing that role's instructions) with that workspace as its cwd, and stands up the in-host delegation host. The command then opens the panel — session started and driven entirely from the editor, no terminal.
 
