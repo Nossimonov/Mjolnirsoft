@@ -381,9 +381,12 @@ describe('orchestrator delegate interaction guardrails (#218)', () => {
     );
   });
 
-  it('ORCHESTRATOR_OPERATIONS prohibits unsolicited delegate messages — interim until #172', () => {
-    expect(ORCHESTRATOR_OPERATIONS).toContain('Do not send unsolicited messages to a delegate');
-    expect(ORCHESTRATOR_OPERATIONS).toContain('#172');
+  it('ORCHESTRATOR_OPERATIONS requires architect confirmation before sending changes or steering to a delegate (#231)', () => {
+    expect(ORCHESTRATOR_OPERATIONS).toContain(
+      'Get architect confirmation before sending changes or steering to a delegate',
+    );
+    expect(ORCHESTRATOR_OPERATIONS).not.toContain('Do not send unsolicited messages to a delegate');
+    expect(ORCHESTRATOR_OPERATIONS).not.toContain('interim — until #172');
   });
 
   it('ORCHESTRATOR_OPERATIONS preserves the solicited-question exception in the messaging guardrail', () => {
@@ -396,7 +399,7 @@ describe('orchestrator delegate interaction guardrails (#218)', () => {
 
   it('the guardrails are present in the composed orchestrator instructions', () => {
     const composed = composeAgentInstructions('orchestrator');
-    expect(composed).toContain('Do not send unsolicited messages to a delegate');
+    expect(composed).toContain('Get architect confirmation before sending changes or steering to a delegate');
     expect(composed).toContain('Never shut down a delegate unless the architect explicitly instructs it');
   });
 });
